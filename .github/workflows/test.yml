@@ -39,10 +39,10 @@ jobs:
         run: |
           sleep 10
           docker logs tunnelsats
-          if ! docker logs tunnelsats | grep -q "10.21.21.9"; then
+          if ! docker logs tunnelsats | grep -q "Applying killswitch and routing for container IP:"; then
             echo "ERROR: Did not resolve LND container IP"
             exit 1
           fi
-          if docker logs tunnelsats | grep -q "Killswitch"; then
+          if docker logs tunnelsats | grep -q "Tunnelsats is running and protecting target IPs"; then
              echo "Killswitch engaged successfully."
           fi
