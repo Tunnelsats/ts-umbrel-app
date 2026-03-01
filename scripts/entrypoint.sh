@@ -20,22 +20,20 @@ get_container_ip() {
 }
 
 # Wait for at least one node to be present (Umbrel race condition mitigation)
-MAX_RETRIES=30
-RETRY_COUNT=0
+# Umbrel containers can take minutes to start after a reboot. We will loop indefinitely tracking for IPs.
 LND_IP=""
 CLN_IP=""
 
 echo "Querying Docker API for Lightning Node IPs..."
-while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+while true; do
     LND_IP=$(get_container_ip "lightning_lnd_1")
     CLN_IP=$(get_container_ip "lightning_core-lightning_1")
     
     if [ -n "$LND_IP" ] || [ -n "$CLN_IP" ]; then
         break
     fi
-    echo "Waiting for LND or CLN containers to initialize... ($RETRY_COUNT/$MAX_RETRIES)"
-    sleep 2
-    RETRY_COUNT=$((RETRY_COUNT+1))
+    echo "Waiting for LND or CLN containers to initialize... Retrying in 5 seconds."
+    sleep 5
 done
 
 echo "Target Node IPs - LND: ${LND_IP:-None}, CLN: ${CLN_IP:-None}"

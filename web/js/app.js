@@ -1,7 +1,7 @@
 // State
 let pollInterval;
 let activePaymentHash = null;
-
+let purchaseMode = "buy"; // "buy" or "renew"
 // Initialization
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
@@ -42,7 +42,15 @@ async function fetchStatus() {
 
         // Update Dashboard Text
         document.getElementById('txt-wg-status').innerText = data.wg_status;
-        document.getElementById('txt-pubkey').innerText = data.wg_pubkey || "Not available";
+        const pk = data.wg_pubkey || "Not available";
+        document.getElementById('txt-pubkey').innerText = pk;
+
+        // Setup pubkey for renewal
+        document.getElementById('renew-pubkey').value = pk;
+        if (pk !== "Not available" && purchaseMode === "buy") {
+            // If there's an active status at load, suggest Renew instead of Buy
+            purchaseMode = "renew"; // Will be applied visually via JS if needed, but safe to just let the UI handle it via setPurchaseMode.
+        }
 
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
@@ -71,6 +79,30 @@ async function fetchServers() {
     } catch (e) { }
 }
 
+// Purchase / Renew Mode Switch
+function setPurchaseMode(mode) {
+    purchaseMode = mode;
+    const title = document.getElementById('purchase-title');
+    const desc = document.getElementById('purchase-desc');
+    const pubBox = document.getElementById('renew-pubkey-box');
+    const btnBuy = document.getElementById('mode-buy');
+    const btnRenew = document.getElementById('mode-renew');
+
+    if (mode === 'buy') {
+        title.innerText = "Buy New Subscription";
+        desc.innerText = "Select a regional server, generate a Lightning Invoice, and scan to pay. Your VPN config will securely auto-install after payment.";
+        pubBox.classList.add('hidden');
+        btnBuy.className = "px-4 py-1.5 rounded bg-slate-700 text-white font-semibold text-sm transition shadow";
+        btnRenew.className = "px-4 py-1.5 rounded text-gray-400 font-semibold text-sm hover:text-white transition";
+    } else {
+        title.innerText = "Renew Existing Target";
+        desc.innerText = "Extend the duration of your active subscription. You don't need to reinstall the VPN configuration.";
+        pubBox.classList.remove('hidden');
+        btnRenew.className = "px-4 py-1.5 rounded bg-slate-700 text-white font-semibold text-sm transition shadow";
+        btnBuy.className = "px-4 py-1.5 rounded text-gray-400 font-semibold text-sm hover:text-white transition";
+    }
+}
+
 // 3. Purchase Flow
 async function createSub() {
     const serverId = document.getElementById('server-select').value;
@@ -82,10 +114,25 @@ async function createSub() {
     document.getElementById('btn-create').disabled = true;
 
     try {
-        const res = await fetch('/api/subscription/create', {
+        let endpoint = '/api/subscription/create';
+        let payload = { serverId, duration, referralCode: null };
+
+        if (purchaseMode === 'renew') {
+            endpoint = '/api/subscription/renew';
+            const wgPublicKey = document.getElementById('renew-pubkey').value;
+            payload = { serverId, duration, wgPublicKey };
+            if (!wgPublicKey || wgPublicKey === "Not available") {
+                alert("Cannot renew without an active public key from a connected VPN.");
+                document.getElementById('btn-create').innerText = "Generate Lightning Invoice";
+                document.getElementById('btn-create').disabled = false;
+                return;
+            }
+        }
+
+        const res = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ serverId, duration, referralCode: null })
+            body: JSON.stringify(payload)
         });
         const data = await res.json();
 
@@ -115,8 +162,12 @@ async function pollPayment() {
 
         if (data.status === 'PAID') {
             clearInterval(pollInterval);
-            document.getElementById('invoice-box').innerHTML = `<h3 class="text-tsgreen font-bold text-center mb-2">Payment Received!</h3><p class="text-sm text-gray-300 text-center">Provisioning VPN config...</p>`;
-            claimSubscription();
+            if (purchaseMode === 'buy') {
+                document.getElementById('invoice-box').innerHTML = `<h3 class="text-tsgreen font-bold text-center mb-2">Payment Received!</h3><p class="text-sm text-gray-300 text-center">Provisioning VPN config...</p>`;
+                claimSubscription();
+            } else {
+                document.getElementById('invoice-box').innerHTML = `<h3 class="text-tsgreen font-bold text-center mb-2">Renewal Successful!</h3><p class="text-sm text-gray-300 text-center mb-4">Your VPN subscription has been extended successfully. No restarts required.</p><button onclick="switchTab('dashboard');" class="mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition">Return to Dashboard</button>`;
+            }
         }
     } catch (e) { }
 }
@@ -197,4 +248,40 @@ async function restartTunnel() {
         // The container entrypoint will catch the trigger file, and restart `wg-quick`
         setTimeout(fetchStatus, 3000);
     } catch (e) { }
+}
+
+async function restoreNode() {
+    const btn = document.getElementById('btn-restore');
+    const msg = document.getElementById('restore-msg');
+
+    btn.disabled = true;
+    btn.innerText = "Restoring Defaults...";
+    msg.innerText = "";
+
+    try {
+        const res = await fetch('/api/local/restore-node', { method: 'POST' });
+        const data = await res.json();
+
+        let text = "Cleanup results: ";
+        if (data.lnd) text += "LND config removed. ";
+        if (data.cln) text += "CLN config reverted. ";
+        if (data.configs_cleaned) text += "VPN configs deleted. ";
+        if (!data.lnd && !data.cln && !data.configs_cleaned) text += "No modifications found. ";
+
+        msg.innerText = text;
+        msg.className = "text-center mt-6 text-sm font-bold text-tsgreen";
+
+        // Wait and then send a restart to wireguard just in case
+        setTimeout(() => {
+            fetch('/api/local/restart', { method: 'POST' });
+            setTimeout(fetchStatus, 3000);
+        }, 3000);
+
+    } catch (e) {
+        msg.innerText = "Failed to restore: " + e.message;
+        msg.className = "text-center mt-6 text-sm font-bold text-red-500";
+    } finally {
+        btn.disabled = false;
+        btn.innerText = "Restore Node Networking";
+    }
 }

@@ -215,5 +215,46 @@ def configure_node():
 
     return jsonify({"lnd": lnd_success, "cln": cln_success, "port": port, "dns": dns})
 
+@app.route("/api/local/restore-node", methods=["POST"])
+def restore_node():
+    lnd_success = False
+    lnd_path = "/lightning-data/lnd/tunnelsats.conf"
+    if os.path.exists(lnd_path):
+        try:
+            os.remove(lnd_path)
+            lnd_success = True
+        except Exception:
+            pass
+
+    cln_success = False
+    cln_path = "/lightning-data/cln/config"
+    if os.path.exists(cln_path):
+        try:
+            with open(cln_path, "r") as f:
+                lines = f.readlines()
+            
+            new_lines = []
+            for line in lines:
+                if not line.startswith("bind-addr=") and not line.startswith("announce-addr=") and not line.startswith("always-use-proxy="):
+                    new_lines.append(line)
+                    
+            with open(cln_path, "w") as f:
+                f.writelines(new_lines)
+            cln_success = True
+        except Exception:
+            pass
+
+    configs_cleaned = False
+    if os.path.exists(DATA_DIR):
+        try:
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".conf"):
+                    os.remove(os.path.join(DATA_DIR, f))
+            configs_cleaned = True
+        except Exception:
+            pass
+
+    return jsonify({"lnd": lnd_success, "cln": cln_success, "configs_cleaned": configs_cleaned})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=9739)

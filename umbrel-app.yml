@@ -2,7 +2,7 @@ manifestVersion: 1
 id: tunnelsats
 category: networking
 name: Tunnelsats
-version: "2.0.0"
+version: "3.0.0"
 tagline: Secure VPN routing for your Lightning Node
 description: >-
   Tunnelsats integrates with your LND and Core Lightning apps to provide anonymous, hybrid routing over the fast WireGuard protocol.
@@ -16,8 +16,11 @@ website: https://tunnelsats.com
 dependencies: []
 repo: https://github.com/Tunnelsats/ts-umbrel-app
 support: https://tunnelsats.com/join-telegram
-port: 
-gallery: []
+port: 9739
+gallery:
+  - 1.jpg
+  - 2.jpg
+  - 3.jpg
 path: ""
 defaultUsername: ""
 defaultPassword: ""
