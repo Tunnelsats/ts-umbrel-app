@@ -6,6 +6,7 @@ let purchaseMode = "buy"; // "buy" or "renew"
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
+    setInterval(fetchStatus, 10000);
 });
 
 // UI Routing
