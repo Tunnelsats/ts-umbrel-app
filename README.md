@@ -21,7 +21,8 @@ With `umbreld` and Rugix operating the OS, host-level modifications (such as ins
 - `GET /api/local/status` now includes dataplane metadata:
   - `dataplane_mode`, `target_container`, `target_ip`, `docker_network`, `forwarding_port`
   - `rules_synced`, `last_reconcile_at`, `last_error`
-- `POST /api/local/reconcile` triggers immediate dataplane reconciliation and returns per-request result payload.
+- `POST /api/local/reconcile` triggers immediate dataplane reconciliation and returns `202 Accepted` with a `request_id`.
+- `GET /api/local/reconcile/<request_id>` returns reconcile completion and result payload for that request.
 
 ## Important Note: The Reboot Race Condition
 
@@ -56,7 +57,8 @@ You can run offline mock tests of the application without needing Umbrel using D
 ### E2E Scenarios Covered
 
 - `happy_lnd`: dataplane metadata present and reconcile state exposed.
-- `manual_reconcile`: `POST /api/local/reconcile` returns success and request id.
+- `cln_fallback`: stopping the LND mock causes reconcile to target CLN.
+- `manual_reconcile`: `POST /api/local/reconcile` returns `202` + request id, then status polling returns completion.
 - `drift_restart`: Lightning container restart is healed by reconcile.
 - `inbound_reachability`: DNAT/FORWARD rules are present for inbound path.
 - `missing_socket`: app degrades gracefully when Docker socket is absent.

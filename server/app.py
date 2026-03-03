@@ -2,7 +2,6 @@ import json
 import os
 import re
 import subprocess
-import time
 import uuid
 
 import requests
@@ -86,6 +85,17 @@ def proxy_request(method, endpoint, payload=None):
         return (resp.content, resp.status_code, headers)
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
+
+def read_reconcile_result():
+    if not os.path.exists(RECONCILE_RESULT):
+        return None
+
+    try:
+        with open(RECONCILE_RESULT, "r", encoding="utf-8") as result_fp:
+            return json.load(result_fp)
+    except Exception:
+        return None
+
 
 @app.route("/")
 def serve_index():
@@ -238,24 +248,33 @@ def restart_tunnel():
 def reconcile_tunnel():
     request_id = str(uuid.uuid4())
     try:
+        if os.path.exists(RECONCILE_RESULT):
+            os.remove(RECONCILE_RESULT)
         with open(RECONCILE_TRIGGER, "w", encoding="utf-8") as trigger_fp:
             trigger_fp.write(request_id)
     except Exception as exc:
         return jsonify({"error": f"Unable to trigger reconcile: {str(exc)}"}), 500
 
-    deadline = time.time() + 12
-    while time.time() < deadline:
-        try:
-            if os.path.exists(RECONCILE_RESULT):
-                with open(RECONCILE_RESULT, "r", encoding="utf-8") as result_fp:
-                    result = json.load(result_fp)
-                if result.get("request_id") == request_id:
-                    return jsonify({"success": True, **result})
-        except Exception:
-            pass
-        time.sleep(0.25)
+    return (
+        jsonify(
+            {
+                "success": True,
+                "accepted": True,
+                "request_id": request_id,
+                "status_url": f"/api/local/reconcile/{request_id}",
+            }
+        ),
+        202,
+    )
 
-    return jsonify({"success": False, "request_id": request_id, "error": "Reconcile timed out"}), 202
+
+@app.route("/api/local/reconcile/<request_id>", methods=["GET"])
+def reconcile_status(request_id):
+    result = read_reconcile_result()
+    if isinstance(result, dict) and result.get("request_id") == request_id:
+        return jsonify({"success": True, "complete": True, **result})
+
+    return jsonify({"success": True, "complete": False, "request_id": request_id}), 202
 
 
 # NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
