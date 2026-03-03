@@ -259,7 +259,10 @@ ensure_wg_up() {
 
     if ! wg show "${WG_IFACE}" >/dev/null 2>&1; then
         log INFO "Bringing up wireguard interface ${WG_IFACE}"
-        wg-quick up "${WG_IFACE}" >/dev/null
+        if ! wg-quick up "${WG_IFACE}" >/dev/null 2>&1; then
+            LAST_ERROR="Failed to bring up WireGuard interface ${WG_IFACE}"
+            return 1
+        fi
     fi
 
     return 0
@@ -290,13 +293,27 @@ ensure_policy_routing() {
     local changed=0
 
     if ! ip rule show | grep -q "from ${DOCKER_NETWORK_SUBNET} lookup 51820"; then
-        ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820
+        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1; then
+            LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
+            return 1
+        fi
         changed=1
     fi
 
-    ip route replace default dev "${WG_IFACE}" metric 2 table 51820
-    ip route replace blackhole default metric 3 table 51820
-    ip route replace 10.9.0.0/24 dev "${WG_IFACE}" table 51820
+    if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="Failed to set policy route default via ${WG_IFACE}"
+        return 1
+    fi
+
+    if ! ip route replace blackhole default metric 3 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="Failed to set policy route blackhole fallback"
+        return 1
+    fi
+
+    if ! ip route replace 10.9.0.0/24 dev "${WG_IFACE}" table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="Failed to set policy route for WireGuard tunnel network"
+        return 1
+    fi
 
     echo "${changed}"
 }
@@ -311,8 +328,11 @@ ensure_nat_forward_rules() {
     if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
         -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-        iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
-            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"
+        if ! iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
+            LAST_ERROR="Failed to install iptables DNAT rule for ${WG_IFACE}:${FORWARDING_PORT}"
+            return 1
+        fi
         changed=1
     fi
 
@@ -320,8 +340,11 @@ ensure_nat_forward_rules() {
     if [ "${forward_in_count}" -ne 1 ] || ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
         -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-            -m comment --comment "tunnelsats-forward-in" -j ACCEPT
+        if ! iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
+            LAST_ERROR="Failed to install iptables FORWARD ingress rule (${WG_IFACE} -> ${BRIDGE_NAME})"
+            return 1
+        fi
         changed=1
     fi
 
@@ -329,8 +352,11 @@ ensure_nat_forward_rules() {
     if [ "${forward_out_count}" -ne 1 ] || ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
         -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-            -m comment --comment "tunnelsats-forward-out" -j ACCEPT
+        if ! iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
+            LAST_ERROR="Failed to install iptables FORWARD egress rule (${BRIDGE_NAME} -> ${WG_IFACE})"
+            return 1
+        fi
         changed=1
     fi
 
@@ -394,6 +420,8 @@ reconcile_once() {
     local reason="$1"
     local request_id="${2:-}"
     local changed=0
+    local policy_changed
+    local nat_changed
 
     LAST_ERROR=""
     RULES_SYNCED="false"
@@ -452,11 +480,28 @@ reconcile_once() {
         return 1
     fi
 
-    if [ "$(ensure_policy_routing)" = "1" ]; then
+    if ! policy_changed="$(ensure_policy_routing)"; then
+        LAST_ERROR="Failed to configure policy routing"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        return 1
+    fi
+
+    if [ "${policy_changed}" = "1" ]; then
         changed=1
     fi
 
-    if [ "$(ensure_nat_forward_rules)" = "1" ]; then
+    if ! nat_changed="$(ensure_nat_forward_rules)"; then
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        return 1
+    fi
+
+    if [ "${nat_changed}" = "1" ]; then
         changed=1
     fi
 
