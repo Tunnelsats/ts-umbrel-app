@@ -20,8 +20,10 @@ TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 DATA_DIR = "/data"
 DOCKER_SOCK = "/var/run/docker.sock"
 STATE_FILE = "/tmp/tunnelsats_state.json"
-RECONCILE_TRIGGER = "/tmp/tunnelsats_reconcile_trigger"
-RECONCILE_RESULT = "/tmp/tunnelsats_reconcile_result.json"
+RECONCILE_TRIGGER_DIR = "/tmp/tunnelsats_reconcile_trigger.d"
+RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
+RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 # Allow local loopback and all standard private subnets (RFC 1918) for LAN access
@@ -86,12 +88,51 @@ def proxy_request(method, endpoint, payload=None):
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
-def read_reconcile_result():
-    if not os.path.exists(RECONCILE_RESULT):
+def sanitize_request_id(raw_request_id):
+    request_id = str(raw_request_id or "").strip()
+    if REQUEST_ID_PATTERN.fullmatch(request_id):
+        return request_id
+    return None
+
+
+def ensure_reconcile_dirs():
+    os.makedirs(RECONCILE_TRIGGER_DIR, exist_ok=True)
+    os.makedirs(RECONCILE_RESULT_DIR, exist_ok=True)
+
+
+def reconcile_trigger_path(request_id):
+    return os.path.join(RECONCILE_TRIGGER_DIR, f"{request_id}.trigger")
+
+
+def reconcile_result_path(request_id):
+    return os.path.join(RECONCILE_RESULT_DIR, f"{request_id}.json")
+
+
+def atomic_write_text(path, payload):
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+    with open(tmp_path, "w", encoding="utf-8") as out_fp:
+        out_fp.write(payload)
+    os.replace(tmp_path, path)
+
+
+def read_reconcile_result(request_id):
+    result_path = reconcile_result_path(request_id)
+    if not os.path.exists(result_path):
         return None
 
     try:
-        with open(RECONCILE_RESULT, "r", encoding="utf-8") as result_fp:
+        with open(result_path, "r", encoding="utf-8") as result_fp:
+            return json.load(result_fp)
+    except Exception:
+        return None
+
+
+def read_legacy_reconcile_result():
+    if not os.path.exists(RECONCILE_RESULT_LEGACY):
+        return None
+
+    try:
+        with open(RECONCILE_RESULT_LEGACY, "r", encoding="utf-8") as result_fp:
             return json.load(result_fp)
     except Exception:
         return None
@@ -248,10 +289,8 @@ def restart_tunnel():
 def reconcile_tunnel():
     request_id = str(uuid.uuid4())
     try:
-        if os.path.exists(RECONCILE_RESULT):
-            os.remove(RECONCILE_RESULT)
-        with open(RECONCILE_TRIGGER, "w", encoding="utf-8") as trigger_fp:
-            trigger_fp.write(request_id)
+        ensure_reconcile_dirs()
+        atomic_write_text(reconcile_trigger_path(request_id), f"{request_id}\n")
     except Exception as exc:
         return jsonify({"error": f"Unable to trigger reconcile: {str(exc)}"}), 500
 
@@ -270,9 +309,17 @@ def reconcile_tunnel():
 
 @app.route("/api/local/reconcile/<request_id>", methods=["GET"])
 def reconcile_status(request_id):
-    result = read_reconcile_result()
+    request_id = sanitize_request_id(request_id)
+    if not request_id:
+        return jsonify({"error": "Invalid request_id"}), 400
+
+    result = read_reconcile_result(request_id)
     if isinstance(result, dict) and result.get("request_id") == request_id:
         return jsonify({"success": True, "complete": True, **result})
+
+    legacy_result = read_legacy_reconcile_result()
+    if isinstance(legacy_result, dict) and legacy_result.get("request_id") == request_id:
+        return jsonify({"success": True, "complete": True, **legacy_result})
 
     return jsonify({"success": True, "complete": False, "request_id": request_id}), 202
 
