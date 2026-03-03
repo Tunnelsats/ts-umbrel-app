@@ -188,8 +188,10 @@ ensure_docker_network() {
 
     if [ "${code}" = "404" ]; then
         log INFO "Creating docker network ${DOCKER_NETWORK_NAME} (${DOCKER_NETWORK_SUBNET})"
-        docker_api "POST" "/networks/create" "$(jq -cn --arg name "${DOCKER_NETWORK_NAME}" --arg subnet "${DOCKER_NETWORK_SUBNET}" '{Name:$name, Driver:"bridge", IPAM:{Config:[{Subnet:$subnet}]}, Options:{"com.docker.network.driver.mtu":"1420"}}')" >/dev/null
-        return 0
+        if ! docker_api "POST" "/networks/create" "$(jq -cn --arg name "${DOCKER_NETWORK_NAME}" --arg subnet "${DOCKER_NETWORK_SUBNET}" '{Name:$name, Driver:"bridge", IPAM:{Config:[{Subnet:$subnet}]}, Options:{"com.docker.network.driver.mtu":"1420"}}')" >/dev/null; then
+            LAST_ERROR="Failed to create docker network ${DOCKER_NETWORK_NAME}"
+            return 1
+        fi
     fi
 
     if [ "${code}" != "200" ]; then
@@ -403,8 +405,11 @@ cleanup_dataplane() {
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
 
-    while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; do
+    local max_attempts=10
+    local attempt=0
+    while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
         ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
+        attempt=$((attempt + 1))
     done
 
     ip route flush table 51820 >/dev/null 2>&1 || true
