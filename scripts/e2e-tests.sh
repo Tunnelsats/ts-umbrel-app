@@ -35,14 +35,21 @@ assert_json_field_nonempty() {
 }
 
 trigger_reconcile_and_wait() {
-  local trigger
   local request_id
-  local result
-  local start
 
+  local trigger
   trigger=$(curl -fsS -X POST "${BASE_URL}/api/local/reconcile")
   echo "${trigger}" | jq -e '.success == true and .request_id != null' >/dev/null
   request_id=$(echo "${trigger}" | jq -r '.request_id')
+
+  wait_for_reconcile_request "${request_id}"
+}
+
+wait_for_reconcile_request() {
+  local request_id="$1"
+  local timeout="${2:-20}"
+  local result
+  local start
 
   start=$(date +%s)
   while true; do
@@ -51,7 +58,7 @@ trigger_reconcile_and_wait() {
       echo "${result}"
       return 0
     fi
-    if [ $(( $(date +%s) - start )) -ge 20 ]; then
+    if [ $(( $(date +%s) - start )) -ge "${timeout}" ]; then
       echo "Timed out waiting for reconcile request ${request_id}" >&2
       return 1
     fi
@@ -104,6 +111,44 @@ scenario_manual_reconcile() {
   echo "${result}" | jq -e '.success == true' >/dev/null
   echo "${result}" | jq -e '.complete == true' >/dev/null
   assert_json_field_nonempty "${result}" '.request_id'
+}
+
+scenario_concurrent_reconcile() {
+  log "Scenario: concurrent_reconcile"
+  local tmp_a
+  local tmp_b
+  local trigger_a
+  local trigger_b
+  local request_id_a
+  local request_id_b
+
+  tmp_a="$(mktemp)"
+  tmp_b="$(mktemp)"
+
+  curl -fsS -X POST "${BASE_URL}/api/local/reconcile" > "${tmp_a}" &
+  local pid_a=$!
+  curl -fsS -X POST "${BASE_URL}/api/local/reconcile" > "${tmp_b}" &
+  local pid_b=$!
+  wait "${pid_a}"
+  wait "${pid_b}"
+
+  trigger_a="$(cat "${tmp_a}")"
+  trigger_b="$(cat "${tmp_b}")"
+  rm -f "${tmp_a}" "${tmp_b}"
+
+  echo "${trigger_a}" | jq -e '.success == true and .request_id != null' >/dev/null
+  echo "${trigger_b}" | jq -e '.success == true and .request_id != null' >/dev/null
+
+  request_id_a=$(echo "${trigger_a}" | jq -r '.request_id')
+  request_id_b=$(echo "${trigger_b}" | jq -r '.request_id')
+
+  if [ "${request_id_a}" = "${request_id_b}" ]; then
+    echo "Expected distinct request ids for concurrent reconcile requests"
+    exit 1
+  fi
+
+  wait_for_reconcile_request "${request_id_a}" 30 >/dev/null
+  wait_for_reconcile_request "${request_id_b}" 30 >/dev/null
 }
 
 scenario_drift_restart() {
@@ -183,6 +228,7 @@ main() {
   scenario_happy_lnd
   scenario_cln_fallback
   scenario_manual_reconcile
+  scenario_concurrent_reconcile
   scenario_drift_restart
   scenario_inbound_rules_present
   scenario_missing_config

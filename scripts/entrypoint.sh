@@ -6,8 +6,10 @@ WG_IFACE="tunnelsatsv2"
 WG_CONF_PATH="/etc/wireguard/${WG_IFACE}.conf"
 DOCKER_SOCK="/var/run/docker.sock"
 STATE_FILE="/tmp/tunnelsats_state.json"
-RECONCILE_TRIGGER="/tmp/tunnelsats_reconcile_trigger"
-RECONCILE_RESULT="/tmp/tunnelsats_reconcile_result.json"
+RECONCILE_TRIGGER_DIR="/tmp/tunnelsats_reconcile_trigger.d"
+RECONCILE_RESULT_DIR="/tmp/tunnelsats_reconcile_result.d"
+RECONCILE_TRIGGER_LEGACY="/tmp/tunnelsats_reconcile_trigger"
+RECONCILE_RESULT_LEGACY="/tmp/tunnelsats_reconcile_result.json"
 RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
@@ -30,6 +32,20 @@ log() {
     local level="$1"
     shift
     printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$level" "$*"
+}
+
+is_valid_request_id() {
+    local request_id="$1"
+    [[ "${request_id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]]
+}
+
+ensure_reconcile_dirs() {
+    mkdir -p "${RECONCILE_TRIGGER_DIR}" "${RECONCILE_RESULT_DIR}"
+}
+
+reconcile_result_path() {
+    local request_id="$1"
+    printf '%s/%s.json' "${RECONCILE_RESULT_DIR}" "${request_id}"
 }
 
 write_state() {
@@ -131,7 +147,7 @@ detect_lightning_container() {
         def cname: (.Names[0] // "") | ltrimstr("/");
         [ .[]
           | {id: .Id, name: cname}
-          | select(.name | test("lnd"))
+          | select(.name | test("(^|[_-])lnd([_-]|$)"))
         ]
         | if length > 0 then .[0] else empty end
         | "\(.id)|\(.name)|lnd"
@@ -142,7 +158,7 @@ detect_lightning_container() {
             def cname: (.Names[0] // "") | ltrimstr("/");
             [ .[]
               | {id: .Id, name: cname}
-              | select(.name | test("core-lightning|clightning|lightningd"))
+              | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
             ]
             | if length > 0 then .[0] else empty end
             | "\(.id)|\(.name)|cln"
@@ -352,12 +368,26 @@ cleanup_dataplane() {
 write_reconcile_result() {
     local request_id="$1"
     local changed="$2"
+    local result_path
+    local tmp_path
+
+    if ! is_valid_request_id "${request_id}"; then
+        log WARN "Skipping reconcile result write for invalid request_id: ${request_id}"
+        return 0
+    fi
+
+    ensure_reconcile_dirs
+    result_path="$(reconcile_result_path "${request_id}")"
+    tmp_path="$(mktemp "${RECONCILE_RESULT_DIR}/.${request_id}.tmp.XXXXXX")"
 
     jq -n \
         --arg request_id "${request_id}" \
         --argjson changed "${changed}" \
         --slurpfile state "${STATE_FILE}" \
-        '{request_id:$request_id, changed:$changed, state: ($state[0] // {})}' > "${RECONCILE_RESULT}"
+        '{request_id:$request_id, changed:$changed, state: ($state[0] // {})}' > "${tmp_path}"
+
+    mv -f "${tmp_path}" "${result_path}"
+    cp -f "${result_path}" "${RECONCILE_RESULT_LEGACY}" || true
 }
 
 reconcile_once() {
@@ -463,6 +493,8 @@ cleanup() {
 
 main_loop() {
     while true; do
+        ensure_reconcile_dirs
+
         if [ -f "${RESTART_TRIGGER}" ]; then
             log INFO "restart trigger detected"
             rm -f "${RESTART_TRIGGER}"
@@ -473,12 +505,29 @@ main_loop() {
             exit 1
         fi
 
-        if [ -f "${RECONCILE_TRIGGER}" ]; then
-            local req
-            req=$(cat "${RECONCILE_TRIGGER}" 2>/dev/null || true)
-            rm -f "${RECONCILE_TRIGGER}"
-            reconcile_once "manual" "${req}" || true
+        if [ -f "${RECONCILE_TRIGGER_LEGACY}" ]; then
+            local legacy_req
+            legacy_req=$(cat "${RECONCILE_TRIGGER_LEGACY}" 2>/dev/null || true)
+            rm -f "${RECONCILE_TRIGGER_LEGACY}"
+            if is_valid_request_id "${legacy_req}"; then
+                reconcile_once "manual" "${legacy_req}" || true
+            else
+                log WARN "Ignoring legacy reconcile trigger with invalid request id"
+            fi
         fi
+
+        local trigger_path
+        local req
+        while IFS= read -r trigger_path; do
+            [ -n "${trigger_path}" ] || continue
+            req="$(basename "${trigger_path}" .trigger)"
+            rm -f "${trigger_path}"
+            if is_valid_request_id "${req}"; then
+                reconcile_once "manual" "${req}" || true
+            else
+                log WARN "Ignoring reconcile trigger with invalid request id: ${req}"
+            fi
+        done < <(find "${RECONCILE_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' | sort)
 
         local now
         now=$(date +%s)
@@ -496,6 +545,8 @@ echo "Starting Tunnelsats v3 (Umbrel App)..."
 log INFO "Starting internal dashboard server on port 9739"
 python3 /app/server/app.py &
 API_PID=$!
+
+ensure_reconcile_dirs
 
 reconcile_once "startup" || true
 
