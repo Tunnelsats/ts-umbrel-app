@@ -212,20 +212,48 @@ async function restartTunnel() {
     } catch (e) { }
 }
 
+function waitMs(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pollReconcileResult(requestId, timeoutMs = 12000, intervalMs = 250) {
+    const attempts = Math.ceil(timeoutMs / intervalMs);
+    for (let i = 0; i < attempts; i += 1) {
+        const res = await fetch(`/api/local/reconcile/${encodeURIComponent(requestId)}`);
+        const data = await res.json();
+
+        if (res.ok && data.success && data.complete) {
+            return data;
+        }
+
+        if (!res.ok) {
+            throw new Error(data.error || "Failed to fetch reconcile status.");
+        }
+
+        await waitMs(intervalMs);
+    }
+
+    throw new Error("Reconcile timed out.");
+}
+
 async function reconcileTunnel() {
     const msg = document.getElementById('txt-reconcile-msg');
     msg.innerText = "Reconciling dataplane...";
     msg.className = "text-xs text-gray-400 mt-2";
     try {
-        const res = await fetch('/api/local/reconcile', { method: 'POST' });
-        const data = await res.json();
-        if (res.ok && data.success) {
-            msg.innerText = `Reconciled. Changes applied: ${data.changed ? "yes" : "no"}.`;
-            msg.className = "text-xs text-tsgreen mt-2";
-        } else {
-            msg.innerText = data.error || "Reconcile request timed out.";
+        const triggerRes = await fetch('/api/local/reconcile', { method: 'POST' });
+        const triggerData = await triggerRes.json();
+        if (!triggerRes.ok || !triggerData.success || !triggerData.request_id) {
+            msg.innerText = triggerData.error || "Unable to trigger reconcile.";
             msg.className = "text-xs text-red-500 mt-2";
+            return;
         }
+
+        msg.innerText = "Reconcile requested. Waiting for dataplane sync...";
+        const result = await pollReconcileResult(triggerData.request_id);
+
+        msg.innerText = `Reconciled. Changes applied: ${result.changed ? "yes" : "no"}.`;
+        msg.className = "text-xs text-tsgreen mt-2";
     } catch (e) {
         msg.innerText = e.message;
         msg.className = "text-xs text-red-500 mt-2";

@@ -34,6 +34,31 @@ assert_json_field_nonempty() {
   fi
 }
 
+trigger_reconcile_and_wait() {
+  local trigger
+  local request_id
+  local result
+  local start
+
+  trigger=$(curl -fsS -X POST "${BASE_URL}/api/local/reconcile")
+  echo "${trigger}" | jq -e '.success == true and .request_id != null' >/dev/null
+  request_id=$(echo "${trigger}" | jq -r '.request_id')
+
+  start=$(date +%s)
+  while true; do
+    result=$(curl -fsS "${BASE_URL}/api/local/reconcile/${request_id}")
+    if echo "${result}" | jq -e '.success == true and .complete == true' >/dev/null; then
+      echo "${result}"
+      return 0
+    fi
+    if [ $(( $(date +%s) - start )) -ge 20 ]; then
+      echo "Timed out waiting for reconcile request ${request_id}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 setup_stack() {
   log "Starting test stack"
   docker compose -f "${COMPOSE_TEST_FILE}" up -d --build
@@ -59,10 +84,10 @@ scenario_happy_lnd() {
   echo "${status}" | jq -e '.rules_synced == true or .rules_synced == false' >/dev/null
 }
 
-scenario_happy_cln() {
-  log "Scenario: happy_cln"
+scenario_cln_fallback() {
+  log "Scenario: cln_fallback (stop LND, expect CLN target)"
   docker stop mock_lightning_lnd_1 >/dev/null
-  curl -fsS -X POST "${BASE_URL}/api/local/reconcile" >/dev/null
+  trigger_reconcile_and_wait >/dev/null
 
   local status
   status=$(curl -fsS "${BASE_URL}/api/local/status")
@@ -74,9 +99,10 @@ scenario_happy_cln() {
 scenario_manual_reconcile() {
   log "Scenario: manual_reconcile"
   local result
-  result=$(curl -fsS -X POST "${BASE_URL}/api/local/reconcile")
+  result=$(trigger_reconcile_and_wait)
 
   echo "${result}" | jq -e '.success == true' >/dev/null
+  echo "${result}" | jq -e '.complete == true' >/dev/null
   assert_json_field_nonempty "${result}" '.request_id'
 }
 
@@ -85,7 +111,7 @@ scenario_drift_restart() {
   docker restart mock_lightning_lnd_1 >/dev/null
   sleep 3
 
-  curl -fsS -X POST "${BASE_URL}/api/local/reconcile" >/dev/null
+  trigger_reconcile_and_wait >/dev/null
   local status
   status=$(curl -fsS "${BASE_URL}/api/local/status")
   echo "${status}" | jq -e '.target_container | length > 0' >/dev/null
@@ -155,7 +181,7 @@ main() {
 
   setup_stack
   scenario_happy_lnd
-  scenario_happy_cln
+  scenario_cln_fallback
   scenario_manual_reconcile
   scenario_drift_restart
   scenario_inbound_rules_present

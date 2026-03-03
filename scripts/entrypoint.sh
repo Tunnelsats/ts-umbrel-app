@@ -286,18 +286,39 @@ ensure_policy_routing() {
 }
 
 ensure_nat_forward_rules() {
-    remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-    remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-    remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+    local changed=0
+    local dnat_count
+    local forward_in_count
+    local forward_out_count
 
-    iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
-        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"
+    dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
+    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
+        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
+        remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
+        iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"
+        changed=1
+    fi
 
-    iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-        -m comment --comment "tunnelsats-forward-in" -j ACCEPT
+    forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
+    if [ "${forward_in_count}" -ne 1 ] || ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+        -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
+        remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
+        iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT
+        changed=1
+    fi
 
-    iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-        -m comment --comment "tunnelsats-forward-out" -j ACCEPT
+    forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
+    if [ "${forward_out_count}" -ne 1 ] || ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+        -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
+        remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+        iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT
+        changed=1
+    fi
+
+    echo "${changed}"
 }
 
 rules_are_synced() {
@@ -405,8 +426,9 @@ reconcile_once() {
         changed=1
     fi
 
-    ensure_nat_forward_rules
-    changed=1
+    if [ "$(ensure_nat_forward_rules)" = "1" ]; then
+        changed=1
+    fi
 
     if rules_are_synced; then
         RULES_SYNCED="true"

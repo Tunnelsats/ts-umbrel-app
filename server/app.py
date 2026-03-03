@@ -2,7 +2,6 @@ import json
 import os
 import re
 import subprocess
-import time
 import uuid
 
 import requests
@@ -16,6 +15,21 @@ DOCKER_SOCK = "/var/run/docker.sock"
 STATE_FILE = "/tmp/tunnelsats_state.json"
 RECONCILE_TRIGGER = "/tmp/tunnelsats_reconcile_trigger"
 RECONCILE_RESULT = "/tmp/tunnelsats_reconcile_result.json"
+
+
+def safe_config_path_for_server(server_id):
+    raw_id = str(server_id or "unknown")
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", raw_id).strip("_")
+    if not safe_id:
+        safe_id = "unknown"
+
+    data_dir_abs = os.path.abspath(DATA_DIR)
+    config_path = os.path.abspath(os.path.join(data_dir_abs, f"tunnelsats-{safe_id}.conf"))
+
+    if os.path.commonpath([data_dir_abs, config_path]) != data_dir_abs:
+        raise ValueError("Resolved config path escapes data directory")
+
+    return config_path
 
 
 def get_active_vpn_info():
@@ -117,6 +131,17 @@ def read_dataplane_state():
     return defaults
 
 
+def read_reconcile_result():
+    if not os.path.exists(RECONCILE_RESULT):
+        return None
+
+    try:
+        with open(RECONCILE_RESULT, "r", encoding="utf-8") as result_fp:
+            return json.load(result_fp)
+    except Exception:
+        return None
+
+
 @app.route("/")
 def serve_index():
     return send_from_directory(app.static_folder, "index.html")
@@ -150,13 +175,17 @@ def claim_subscription():
         if resp.status_code == 200:
             data = resp.json()
             if "wireguardConfig" in data and "server" in data:
-                server_id = data["server"].get("id", "unknown")
-                config_path = os.path.join(DATA_DIR, f"tunnelsats-{server_id}.conf")
+                server = data.get("server")
+                server_id = server.get("id", "unknown") if isinstance(server, dict) else "unknown"
+                os.makedirs(DATA_DIR, exist_ok=True)
+                config_path = safe_config_path_for_server(server_id)
                 with open(config_path, "w", encoding="utf-8") as conf:
                     conf.write(data["wireguardConfig"])
         return resp.content, resp.status_code, resp.headers.items()
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 500
+    except Exception as exc:
+        return jsonify({"error": f"Failed to persist WireGuard config: {str(exc)}"}), 500
 
 
 @app.route("/api/subscription/renew", methods=["POST"])
@@ -252,24 +281,33 @@ def restart_tunnel():
 def reconcile_tunnel():
     request_id = str(uuid.uuid4())
     try:
+        if os.path.exists(RECONCILE_RESULT):
+            os.remove(RECONCILE_RESULT)
         with open(RECONCILE_TRIGGER, "w", encoding="utf-8") as trigger_fp:
             trigger_fp.write(request_id)
     except Exception as exc:
         return jsonify({"error": f"Unable to trigger reconcile: {str(exc)}"}), 500
 
-    deadline = time.time() + 12
-    while time.time() < deadline:
-        try:
-            if os.path.exists(RECONCILE_RESULT):
-                with open(RECONCILE_RESULT, "r", encoding="utf-8") as result_fp:
-                    result = json.load(result_fp)
-                if result.get("request_id") == request_id:
-                    return jsonify({"success": True, **result})
-        except Exception:
-            pass
-        time.sleep(0.25)
+    return (
+        jsonify(
+            {
+                "success": True,
+                "accepted": True,
+                "request_id": request_id,
+                "status_url": f"/api/local/reconcile/{request_id}",
+            }
+        ),
+        202,
+    )
 
-    return jsonify({"success": False, "request_id": request_id, "error": "Reconcile timed out"}), 202
+
+@app.route("/api/local/reconcile/<request_id>", methods=["GET"])
+def reconcile_status(request_id):
+    result = read_reconcile_result()
+    if isinstance(result, dict) and result.get("request_id") == request_id:
+        return jsonify({"success": True, "complete": True, **result})
+
+    return jsonify({"success": True, "complete": False, "request_id": request_id}), 202
 
 
 @app.route("/api/local/configure-node", methods=["POST"])
