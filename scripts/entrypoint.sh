@@ -74,6 +74,8 @@ else
     cp "$CONFIG_FILE" "/etc/wireguard/tunnelsatsv2.conf"
     
     # 1. Spin up wireguard
+    # Ensure no stale interface survives (common in host network mode restarts)
+    ip link del "$WG_IFACE" 2>/dev/null || true
     if wg-quick up "$WG_IFACE"; then
         WG_UP=1
         # 2. Add Routing Tables and Policy Routing

@@ -43,7 +43,7 @@ jobs:
           sleep 10
           docker logs tunnelsats
           if ! docker logs tunnelsats | grep -q "Applying killswitch and routing for container IP:"; then
-            echo "ERROR: Did not resolve LND container IP"
+            echo "ERROR: Tunnelsats failed to engage the killswitch or wg-quick failed."
             exit 1
           fi
           if docker logs tunnelsats | grep -q "Tunnelsats is running and protecting target IPs"; then
