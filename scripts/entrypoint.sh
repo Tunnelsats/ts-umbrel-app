@@ -260,7 +260,27 @@ ensure_wg_up() {
         return 1
     fi
 
-    if ! wg show "${WG_IFACE}" >/dev/null 2>&1; then
+    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+        local stripped_cfg
+        stripped_cfg="$(mktemp)"
+        if ! wg-quick strip "${WG_CONF_PATH}" > "${stripped_cfg}" 2>/dev/null; then
+            rm -f "${stripped_cfg}"
+            LAST_ERROR="Failed to prepare WireGuard sync config for ${WG_IFACE}"
+            return 1
+        fi
+
+        log INFO "WireGuard interface ${WG_IFACE} exists; syncing config"
+        if ! wg syncconf "${WG_IFACE}" "${stripped_cfg}" >/dev/null 2>&1; then
+            log WARN "syncconf failed for ${WG_IFACE}; recreating interface"
+            wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+            if ! wg-quick up "${WG_IFACE}" >/dev/null 2>&1; then
+                rm -f "${stripped_cfg}"
+                LAST_ERROR="Failed to reconfigure WireGuard interface ${WG_IFACE}"
+                return 1
+            fi
+        fi
+        rm -f "${stripped_cfg}"
+    else
         log INFO "Bringing up wireguard interface ${WG_IFACE}"
         if ! wg-quick up "${WG_IFACE}" >/dev/null 2>&1; then
             LAST_ERROR="Failed to bring up WireGuard interface ${WG_IFACE}"
@@ -295,7 +315,7 @@ EOF_RULES
 ensure_policy_routing() {
     local changed=0
 
-    if ! ip rule show | grep -q "from ${DOCKER_NETWORK_SUBNET} lookup 51820"; then
+    if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
         if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1; then
             LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
             return 1
@@ -367,7 +387,7 @@ ensure_nat_forward_rules() {
 }
 
 rules_are_synced() {
-    ip rule show | grep -q "from ${DOCKER_NETWORK_SUBNET} lookup 51820" || return 1
+    ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" || return 1
     iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
         -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1 || return 1
     iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
@@ -383,7 +403,7 @@ cleanup_dataplane() {
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
 
-    while ip rule show | grep -q "from ${DOCKER_NETWORK_SUBNET} lookup 51820"; do
+    while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; do
         ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
     done
 
