@@ -131,6 +131,9 @@ extract_forwarding_port() {
     if [ -z "${port}" ]; then
         return 1
     fi
+    if [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
+        return 1
+    fi
     echo "${port}"
 }
 
@@ -481,7 +484,6 @@ reconcile_once() {
     fi
 
     if ! policy_changed="$(ensure_policy_routing)"; then
-        LAST_ERROR="Failed to configure policy routing"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
