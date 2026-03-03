@@ -90,6 +90,11 @@
                             class="mt-4 w-full bg-gray-700 hover:bg-gray-600 font-semibold py-2 rounded transition border border-gray-600">
                             Restart tunnel interface
                         </button>
+                        <button onclick="reconcileTunnel()"
+                            class="mt-2 w-full bg-tsgreen hover:bg-green-600 text-black font-semibold py-2 rounded transition">
+                            Reconcile dataplane now
+                        </button>
+                        <p id="txt-reconcile-msg" class="text-xs text-gray-400 mt-2"></p>
                     </div>
                 </div>
 
@@ -106,6 +111,38 @@
                         <div class="flex justify-between pb-2">
                             <span class="text-gray-400">CLN Container IP</span>
                             <span id="txt-cln-ip" class="font-mono text-tsgreen">Loading...</span>
+                        </div>
+                        <div class="flex justify-between border-t border-gray-700 pt-2">
+                            <span class="text-gray-400">Dataplane Mode</span>
+                            <span id="txt-dataplane-mode" class="font-mono text-xs">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Target Container</span>
+                            <span id="txt-target-container" class="font-mono text-xs text-tsgreen">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Target IP</span>
+                            <span id="txt-target-ip" class="font-mono text-xs text-tsgreen">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Forwarding Port</span>
+                            <span id="txt-forwarding-port" class="font-mono text-xs">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Rules Synced</span>
+                            <span id="txt-rules-synced" class="font-mono text-xs">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Docker Network</span>
+                            <span id="txt-docker-network" class="font-mono text-xs">Loading...</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Last Reconcile</span>
+                            <span id="txt-last-reconcile" class="font-mono text-xs">Loading...</span>
+                        </div>
+                        <div class="flex flex-col pt-2">
+                            <span class="text-gray-400 text-sm mb-1">Last Error</span>
+                            <span id="txt-last-error" class="font-mono text-xs bg-gray-800 p-2 rounded">None</span>
                         </div>
                         <!-- Need Node Routing Setup Config -->
                         <div class="mt-4 p-4 bg-yellow-900/30 border border-yellow-700 rounded text-sm">

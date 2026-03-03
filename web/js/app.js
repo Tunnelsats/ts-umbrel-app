@@ -6,6 +6,7 @@ let activePaymentHash = null;
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
+    setInterval(fetchStatus, 10000);
 });
 
 // UI Routing
@@ -49,6 +50,18 @@ async function fetchStatus() {
 
         document.getElementById('txt-lnd-ip').innerText = data.lnd_ip || "Not Detected";
         document.getElementById('txt-cln-ip').innerText = data.cln_ip || "Not Detected";
+        document.getElementById('txt-dataplane-mode').innerText = data.dataplane_mode || "Unknown";
+        document.getElementById('txt-target-container').innerText = data.target_container || "Not detected";
+        document.getElementById('txt-target-ip').innerText = data.target_ip || "Not detected";
+        document.getElementById('txt-forwarding-port').innerText = data.forwarding_port || "Not detected";
+        document.getElementById('txt-rules-synced').innerText = data.rules_synced ? "Yes" : "No";
+
+        const net = data.docker_network || {};
+        const netName = net.name || "docker-tunnelsats";
+        const netSubnet = net.subnet || "unknown";
+        document.getElementById('txt-docker-network').innerText = `${netName} (${netSubnet})`;
+        document.getElementById('txt-last-reconcile').innerText = data.last_reconcile_at || "Never";
+        document.getElementById('txt-last-error').innerText = data.last_error || "None";
 
     } catch (e) {
         console.error("Failed to fetch status", e);
@@ -197,4 +210,25 @@ async function restartTunnel() {
         // The container entrypoint will catch the trigger file, and restart `wg-quick`
         setTimeout(fetchStatus, 3000);
     } catch (e) { }
+}
+
+async function reconcileTunnel() {
+    const msg = document.getElementById('txt-reconcile-msg');
+    msg.innerText = "Reconciling dataplane...";
+    msg.className = "text-xs text-gray-400 mt-2";
+    try {
+        const res = await fetch('/api/local/reconcile', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            msg.innerText = `Reconciled. Changes applied: ${data.changed ? "yes" : "no"}.`;
+            msg.className = "text-xs text-tsgreen mt-2";
+        } else {
+            msg.innerText = data.error || "Reconcile request timed out.";
+            msg.className = "text-xs text-red-500 mt-2";
+        }
+    } catch (e) {
+        msg.innerText = e.message;
+        msg.className = "text-xs text-red-500 mt-2";
+    }
+    fetchStatus();
 }

@@ -6,10 +6,22 @@ With `umbreld` and Rugix operating the OS, host-level modifications (such as ins
 
 ## Architecture & How it Works
 
-1. **Dockerized Environment**: The app runs a Debian container with `wireguard-tools`, `iproute2`, `procps`, and `nftables` compiled in.
-2. **Network Interception**: By utilizing `network_mode: "host"` and elevated capabilities (`NET_ADMIN`, `NET_RAW`), the container modifies the host's `nftables` policy routing from within the container boundary.
-3. **Dynamic IP Parsing**: LND and Core Lightning running on Umbrel do not have static IP addresses. To route their traffic out of the VPN interface (`tunnelsatsv2`), the `entrypoint.sh` script polls `/var/run/docker.sock` to detect the internal IPs of `lightning_lnd_1` and `lightning_core-lightning_1` as soon as they boot.
-4. **The Killswitch**: The container strictly binds LND traffic to the `51820` routing table. If the VPN drops, the primary route falls back to a `blackhole` instead of leaking over the default physical interfaces.
+1. **Dockerized Environment**: The app runs a Debian container with `wireguard-tools`, `iproute2`, `iptables`, `nftables`, `curl`, `jq`, and Flask.
+2. **Host Network Control**: With `network_mode: "host"` and capabilities (`NET_ADMIN`, `NET_RAW`), the container can apply host-visible routing and firewall policy without host-installed systemd units.
+3. **Docker API Driven Discovery**: The runtime talks directly to `/var/run/docker.sock` to discover active Lightning containers (`lnd` or `core-lightning`) and reconcile dataplane state.
+4. **Deterministic Overlay Network**: The app ensures `docker-tunnelsats` (`10.9.9.0/25`) exists and keeps the active Lightning container attached with deterministic IP `10.9.9.9`.
+5. **Full Dataplane Parity**:
+   - Policy routing (`table 51820`) with blackhole fallback kill switch.
+   - Inbound DNAT from WireGuard forwarded VPN port to `10.9.9.9:9735`.
+   - Forward-chain allows between WG interface and the Docker bridge.
+6. **Auto Reconciliation**: A periodic reconcile loop (30s) and manual reconcile endpoint continuously repair drift (container restart, IP/network changes, stale rules).
+
+### Runtime API Surface
+
+- `GET /api/local/status` now includes dataplane metadata:
+  - `dataplane_mode`, `target_container`, `target_ip`, `docker_network`, `forwarding_port`
+  - `rules_synced`, `last_reconcile_at`, `last_error`
+- `POST /api/local/reconcile` triggers immediate dataplane reconciliation and returns per-request result payload.
 
 ## Important Note: The Reboot Race Condition
 
@@ -32,10 +44,34 @@ You can run offline mock tests of the application without needing Umbrel using D
     ```bash
     docker compose up --build tunnelsats
     ```
-4. Check the logs for successful mock discovery of the LND container IPs:
+4. Check logs for successful reconcile and rule sync:
     ```bash
     docker logs tunnelsats
     ```
+5. Run the e2e scenario harness:
+    ```bash
+    ./scripts/e2e-tests.sh
+    ```
+
+### E2E Scenarios Covered
+
+- `happy_lnd`: dataplane metadata present and reconcile state exposed.
+- `manual_reconcile`: `POST /api/local/reconcile` returns success and request id.
+- `drift_restart`: Lightning container restart is healed by reconcile.
+- `inbound_reachability`: DNAT/FORWARD rules are present for inbound path.
+- `missing_socket`: app degrades gracefully when Docker socket is absent.
+
+## Operational Troubleshooting
+
+- If `rules_synced` is `false`, check `last_error` in `GET /api/local/status`.
+- Use the dashboard **Reconcile dataplane now** button or call:
+  ```bash
+  curl -X POST http://127.0.0.1:9739/api/local/reconcile
+  ```
+- For full rule refresh, use:
+  ```bash
+  curl -X POST http://127.0.0.1:9739/api/local/restart
+  ```
 
 ## App Store Deployment
 This repository is pre-configured with the required `umbrel-app.yml` manifest to adhere to the official [Umbrel App Store guidelines](https://github.com/getumbrel/umbrel-apps/blob/master/README.md).
