@@ -179,8 +179,9 @@ scenario_missing_socket() {
       /app/scripts/entrypoint.sh & \
       pid=$!; \
       sleep 8; \
-      curl -fsS http://127.0.0.1:9739/api/local/status > /tmp/status.json || true; \
-      cat /tmp/status.json; \
+      status=$(curl -fsS http://127.0.0.1:9739/api/local/status || true); \
+      echo "$status"; \
+      echo "$status" | jq -e ".last_error | test(\"Docker socket\")" >/dev/null || exit 1; \
       kill $pid || true'
 }
 
