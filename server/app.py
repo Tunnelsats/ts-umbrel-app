@@ -110,18 +110,25 @@ def claim_subscription():
         if resp.status_code == 200:
             data = resp.json()
             if "wireguardConfig" in data and "server" in data:
-                # Save config
+                # Rename old configs to .bak (don't delete — user paid for these)
                 server_id = data["server"].get("id", "unknown")
                 if os.path.exists(DATA_DIR):
                     for f in os.listdir(DATA_DIR):
                         if f.endswith(".conf"):
-                            try: os.remove(os.path.join(DATA_DIR, f))
+                            try:
+                                old_path = os.path.join(DATA_DIR, f)
+                                os.rename(old_path, old_path + ".bak")
                             except: pass
-                            
+
                 config_path = os.path.join(DATA_DIR, f"tunnelsats-{server_id}.conf")
                 with open(config_path, "w") as f:
                     f.write(data["wireguardConfig"])
-        return (resp.content, resp.status_code, resp.headers.items())
+
+        # Filter hop-by-hop headers (same as proxy_request)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.headers.items()
+                   if name.lower() not in excluded_headers]
+        return (resp.content, resp.status_code, headers)
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
@@ -193,9 +200,12 @@ def upload_config():
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR)
         else:
+            # Rename old configs to .bak (don't delete — user paid for these)
             for f in os.listdir(DATA_DIR):
                 if f.endswith(".conf"):
-                    try: os.remove(os.path.join(DATA_DIR, f))
+                    try:
+                        old_path = os.path.join(DATA_DIR, f)
+                        os.rename(old_path, old_path + ".bak")
                     except: pass
             
         config_path = os.path.join(DATA_DIR, "tunnelsats-imported.conf")

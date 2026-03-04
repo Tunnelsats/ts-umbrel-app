@@ -187,7 +187,8 @@ async function createSub(mode) {
             renderQR(mode, data.invoice);
             document.getElementById(`invoice-box-${mode}`).classList.remove('hidden');
 
-            // Start Polling
+            // Start Polling (clear any existing interval first)
+            if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(pollPayment, 3000);
         } else if (data.message) {
             displayPurchaseError(data.message);
