@@ -234,43 +234,7 @@
                     </div>
                 </div>
 
-                <div>
-                    <h2 class="text-xl font-bold text-white mb-4">Target Node Status</h2>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div
-                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] group relative overflow-hidden">
-                            <div
-                                class="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-bl-[100px] pointer-events-none">
-                            </div>
-                            <div class="flex items-center space-x-3 mb-2">
-                                <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors"
-                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01">
-                                    </path>
-                                </svg>
-                                <p class="text-sm font-semibold text-gray-400">LND Target IP</p>
-                            </div>
-                            <p id="txt-lnd-ip" class="text-lg font-mono text-gray-300 tracking-wide">Loading...</p>
-                        </div>
-                        <div
-                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] group relative overflow-hidden">
-                            <div
-                                class="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-bl-[100px] pointer-events-none">
-                            </div>
-                            <div class="flex items-center space-x-3 mb-2">
-                                <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors"
-                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z">
-                                    </path>
-                                </svg>
-                                <p class="text-sm font-semibold text-gray-400">Core Lightning Target IP</p>
-                            </div>
-                            <p id="txt-cln-ip" class="text-lg font-mono text-gray-300 tracking-wide">Loading...</p>
-                        </div>
-                    </div>
-                </div>
+                <!-- NOTE: Target Node Status (LND/CLN IPs) moved to PR #3 dataplane layer -->
 
                 <div class="bg-gray-800/60 p-4 rounded-lg border border-gray-700 mt-6 relative z-20">
                     <p class="text-sm text-gray-400 mb-2">Detected Configurations on Disk</p>
@@ -516,27 +480,13 @@
                 <div>
                     <h2 class="text-xl font-bold text-red-500 mb-2">Uninstall TunnelSats Networking</h2>
 
-                    <div class="bg-red-900/20 border border-red-800 rounded-lg p-6 mb-6">
-                        <h3 class="text-red-400 font-bold mb-2">Danger Zone</h3>
-                        <ul class="list-disc list-inside text-sm text-gray-300 space-y-2">
-                            <li>This will remove the external routing configurations from LND and CLN.</li>
-                            <li>Your persistent VPN configs are kept safely in the app's backup folder.</li>
-                            <li>Your Lightning nodes will temporarily drop connections until they pick up the reverted
-                                configs.</li>
-                            <li>We'll automatically request the Lightning nodes to restart their containers.</li>
-                        </ul>
+                    <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
+                        <h3 class="text-gray-400 font-bold mb-2">Coming Soon</h3>
+                        <p class="text-sm text-gray-300">
+                            Node configuration restore will be available once the dataplane integration is complete.
+                            To uninstall TunnelSats, simply remove the app from the Umbrel dashboard.
+                        </p>
                     </div>
-
-                    <button onclick="restoreNode()" id="btn-restore"
-                        class="w-full relative overflow-hidden group bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(220,38,38,0.2)] hover:shadow-[0_0_25px_rgba(220,38,38,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-3 border border-red-500/50">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
-                            </path>
-                        </svg>
-                        <span class="tracking-wide">Remove Node Overrides</span>
-                    </button>
-                    <p id="restore-msg" class="text-center mt-6 text-sm font-semibold"></p>
                 </div>
             </section>
         </main>

@@ -38,16 +38,16 @@ jobs:
           docker compose build tunnelsats
           docker compose up -d tunnelsats
 
-      - name: Assert Target Container Recognition
+      - name: Assert Container Starts Successfully
         run: |
           sleep 10
           docker logs tunnelsats
-          if ! docker logs tunnelsats | grep -q "Applying killswitch and routing for container IP:"; then
-            echo "ERROR: Tunnelsats failed to engage the killswitch or wg-quick failed."
+          if ! docker logs tunnelsats | grep -q "Starting internal dashboard"; then
+            echo "ERROR: Tunnelsats entrypoint failed to start the dashboard server."
             exit 1
           fi
-          if docker logs tunnelsats | grep -q "Tunnelsats is running and protecting target IPs"; then
-             echo "Killswitch engaged successfully."
+          if docker logs tunnelsats | grep -q "Tunnelsats container running"; then
+             echo "Container started successfully."
           fi
 
   backend-tests:

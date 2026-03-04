@@ -135,7 +135,6 @@ def renew_subscription():
 def local_status():
     # Detect if WireGuard is running
     wg_status = "Disconnected"
-    wg_ip = ""
     wg_pubkey = ""
     try:
         output = subprocess.check_output(["wg", "show", "tunnelsatsv2"], stderr=subprocess.STDOUT).decode("utf-8")
@@ -154,19 +153,6 @@ def local_status():
             if f.endswith(".conf"):
                 configs.append(f)
 
-    # Check for LND and CLN IPs via docker socket
-    lnd_ip = ""
-    cln_ip = ""
-    try:
-        if os.path.exists("/var/run/docker.sock"):
-            # Use dynamic filters to find the LND and CLN containers
-            lnd_out = subprocess.check_output("docker ps -q --filter 'name=lnd|lightningd' | grep -v 'core-lightning' | head -n 1 | xargs -r docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'", shell=True, stderr=subprocess.DEVNULL)
-            lnd_ip = lnd_out.decode().strip()
-            cln_out = subprocess.check_output("docker ps -q --filter 'name=cln|lightning' | grep -v 'lnd' | head -n 1 | xargs -r docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'", shell=True, stderr=subprocess.DEVNULL)
-            cln_ip = cln_out.decode().strip()
-    except Exception as e:
-        app.logger.error(f"Failed to fetch local status info: {e}")
-
     # Get version from manifest
     version = "v3.0.0" # Default
     try:
@@ -182,8 +168,6 @@ def local_status():
         "wg_status": wg_status,
         "wg_pubkey": wg_pubkey,
         "configs_found": configs,
-        "lnd_ip": lnd_ip,
-        "cln_ip": cln_ip,
         "version": version
     })
 
@@ -231,99 +215,8 @@ def restart_tunnel():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/local/configure-node", methods=["POST"])
-def configure_node():
-    port, dns = get_active_vpn_info()
-    if not port:
-        return jsonify({"error": "No VPN forwarding port found in config."}), 400
-        
-    lnd_success = False
-    lnd_path = "/lightning-data/lnd/tunnelsats.conf"
-    if os.path.exists("/lightning-data/lnd"):
-        try:
-            with open(lnd_path, "w") as f:
-                f.write(f"[Application Options]\nexternalhosts={dns}:{port}\n\n[Tor]\ntor.streamisolation=false\ntor.skip-proxy-for-clearnet-targets=true\n")
-            lnd_success = True
-        except Exception as e:
-            app.logger.error(f"Error configuring LND: {e}")
-
-    cln_success = False
-    cln_path = "/lightning-data/cln/config"
-    if os.path.exists(cln_path):
-        try:
-            with open(cln_path, "r") as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            for line in lines:
-                if not line.startswith("bind-addr=") and not line.startswith("announce-addr=") and not line.startswith("always-use-proxy="):
-                    new_lines.append(line)
-                    
-            new_lines.append(f"bind-addr=0.0.0.0:9735\n")
-            new_lines.append(f"announce-addr={dns}:{port}\n")
-            new_lines.append(f"always-use-proxy=false\n")
-            
-            with open(cln_path, "w") as f:
-                f.writelines(new_lines)
-            cln_success = True
-        except Exception as e:
-            app.logger.error(f"Error configuring CLN: {e}")
-
-    return jsonify({"lnd": lnd_success, "cln": cln_success, "port": port, "dns": dns})
-
-@app.route("/api/local/restore-node", methods=["POST"])
-def restore_node():
-    lnd_success = False
-    lnd_path = "/lightning-data/lnd/tunnelsats.conf"
-    if os.path.exists(lnd_path):
-        try:
-            with open(lnd_path, "r") as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            for line in lines:
-                if line.startswith("externalhosts=") or line.startswith("tor.skip-proxy-for-clearnet-targets="):
-                    if not line.startswith("#"):
-                        new_lines.append(f"#{line}")
-                    else:
-                        new_lines.append(line)
-                else:
-                    new_lines.append(line)
-
-            with open(lnd_path, "w") as f:
-                f.writelines(new_lines)
-            lnd_success = True
-        except Exception as e:
-            app.logger.error(f"Error removing LND config: {e}")
-
-    cln_success = False
-    cln_path = "/lightning-data/cln/config"
-    if os.path.exists(cln_path):
-        try:
-            with open(cln_path, "r") as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            for line in lines:
-                if line.startswith("bind-addr=") or line.startswith("announce-addr=") or line.startswith("always-use-proxy="):
-                    if not line.startswith("#"):
-                        new_lines.append(f"#{line}")
-                    else:
-                        new_lines.append(line)
-                else:
-                    new_lines.append(line)
-            
-            with open(cln_path, "w") as f:
-                f.writelines(new_lines)
-            cln_success = True
-        except Exception as e:
-            app.logger.error(f"Error removing CLN config: {e}")
-
-    configs_cleaned = False
-    # DO NOT delete .conf files in DATA_DIR. 
-    # The user paid for these VPN configs, and removing the App should preserve them as backups.
-
-    return jsonify({"lnd": lnd_success, "cln": cln_success, "configs_cleaned": configs_cleaned})
+# NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
+# They will be re-introduced when the infra PR is merged.
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=9739)

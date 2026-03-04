@@ -15,8 +15,7 @@ describe('UI Routing and Initialization', () => {
                     wg_status: 'Connected',
                     wg_pubkey: 'testpubkey123',
                     configs_found: [],
-                    lnd_ip: '10.9.0.2',
-                    cln_ip: '10.9.0.3'
+                    version: 'v3.0.0'
                 }),
                 ok: true
             })

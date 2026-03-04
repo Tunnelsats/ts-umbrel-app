@@ -51,8 +51,7 @@ async function fetchStatus() {
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
 
-        document.getElementById('txt-lnd-ip').innerText = data.lnd_ip || "Not Detected";
-        document.getElementById('txt-cln-ip').innerText = data.cln_ip || "Not Detected";
+        // NOTE: LND/CLN IP detection moved to PR #3 (dataplane layer)
 
         if (data.version) {
             document.getElementById('app-version').innerText = data.version;
@@ -270,7 +269,7 @@ async function claimSubscription(mode) {
         invoiceBox.innerHTML = '';
 
         if (res.ok) {
-            const configMsg = await configureNode();
+            const configMsg = "Node configuration will be available after dataplane setup.";
 
             const h3 = document.createElement('h3');
             h3.className = 'text-tsgreen font-bold text-center mb-2';
@@ -319,22 +318,7 @@ async function claimSubscription(mode) {
     }
 }
 
-async function configureNode() {
-    try {
-        const res = await fetch('/api/local/configure-node', { method: 'POST' });
-        const data = await res.json();
-
-        let msg = "";
-        if (data.lnd && data.cln) msg = "LND and CLN were auto-configured!";
-        else if (data.lnd) msg = "LND was auto-configured! Please restart LND via UI.";
-        else if (data.cln) msg = "CLN was auto-configured! Please restart CLN via UI.";
-        else msg = "Auto-config unavailable due to Umbrel permissions. Please follow the manual setup guide.";
-
-        return msg;
-    } catch (e) {
-        return "Auto-config unavailable. Please configure manually.";
-    }
-}
+// NOTE: configureNode() and restoreNode() moved to PR #3/PR #4 (dataplane + API integration).
 
 // 4. Import Config
 async function importConfig() {
@@ -362,7 +346,7 @@ async function importConfig() {
 
         const data = await res.json();
         if (res.ok) {
-            const configMsg = await configureNode();
+            const configMsg = "Node configuration will be available after dataplane setup.";
             msg.innerText = `Config imported successfully! ${configMsg}`;
             msg.className = "text-center mt-4 text-sm font-bold text-tsgreen";
             setTimeout(() => {
@@ -387,42 +371,7 @@ async function restartTunnel() {
     } catch (e) { }
 }
 
-async function restoreNode() {
-    const btn = document.getElementById('btn-restore');
-    const msg = document.getElementById('restore-msg');
-
-    btn.disabled = true;
-    btn.innerText = "Restoring Defaults...";
-    msg.innerText = "";
-
-    try {
-        const res = await fetch('/api/local/restore-node', { method: 'POST' });
-        const data = await res.json();
-
-        const messages = [];
-        if (data.lnd) messages.push("LND config removed.");
-        if (data.cln) messages.push("CLN config reverted.");
-        if (data.configs_cleaned) messages.push("VPN configs deleted.");
-
-        let text = `Cleanup results: ${messages.length > 0 ? messages.join(' ') : 'No modifications found.'}`;
-
-        msg.innerText = text;
-        msg.className = "text-center mt-6 text-sm font-bold text-tsgreen";
-
-        // Wait and then send a restart to wireguard just in case
-        setTimeout(() => {
-            fetch('/api/local/restart', { method: 'POST' });
-            setTimeout(fetchStatus, 3000);
-        }, 3000);
-
-    } catch (e) {
-        msg.innerText = "Failed to restore: " + e.message;
-        msg.className = "text-center mt-6 text-sm font-bold text-red-500";
-    } finally {
-        btn.disabled = false;
-        btn.innerText = "Restore Node Networking";
-    }
-}
+// NOTE: restoreNode() moved to PR #3/PR #4.
 
 // Custom Dropdown Logic
 let openDropdown = null;
