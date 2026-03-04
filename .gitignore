@@ -1,2 +1,15 @@
 .env.local
 .umbrel-apps-fork/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+venv/
+.pytest_cache/
+PR_DESCRIPTION_TEMP.md
+PR_DESCRIPTION_TEMP2.md
+deploy_to_umbrel.expect
+deploy_to_umbrel.sh
+ssh_test.expect

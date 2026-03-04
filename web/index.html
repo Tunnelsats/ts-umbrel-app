@@ -4,17 +4,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tunnelsats v3 - Umbrel Dashboard</title>
+    <title>TunnelSats Plugin</title>
+    <!-- Use a modern font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
             theme: {
                 extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
                     colors: {
                         tsgreen: '#22c55e',
                         tsyellow: '#facc15',
-                        darkbg: '#111827',
-                        cardbg: '#1f2937'
+                        tsgray: '#0f1115',
                     }
                 }
             }
@@ -22,169 +26,475 @@
     </script>
     <style>
         body {
-            background-color: #111827;
-            color: white;
-            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
         }
 
         .tab-active {
-            border-bottom: 2px solid #22c55e;
-            color: #22c55e;
-            font-weight: bold;
+            border-bottom: 2px solid #facc15;
+            color: #ffffff;
+            font-weight: 600;
         }
 
-        .hidden {
+        .glass-panel {
+            background: rgba(15, 17, 21, 0.8);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        /* Hide scrollbar for Chrome, Safari and Opera */
+        .scrollbar-hide::-webkit-scrollbar {
             display: none;
+        }
+
+        /* Hide scrollbar for IE, Edge and Firefox */
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            /* IE and Edge */
+            scrollbar-width: none;
+            /* Firefox */
+        }
+
+        .animated-gradient-text {
+            background: linear-gradient(to right, #22c55e, #facc15, #22c55e);
+            background-size: 200% auto;
+            color: transparent;
+            -webkit-background-clip: text;
+            background-clip: text;
+            animation: gradientMove 3s linear infinite;
+        }
+
+        @keyframes gradientMove {
+            to {
+                background-position: 200% center;
+            }
         }
     </style>
 </head>
 
-<body class="p-6 h-screen flex flex-col">
+<body class="min-h-screen flex items-center justify-center py-10 px-4 md:px-8">
+    <div class="flex w-full max-w-6xl glass-panel rounded-2xl shadow-2xl overflow-hidden min-h-[75vh]">
 
-    <div class="max-w-4xl mx-auto w-full flex-grow flex flex-col">
-        <!-- Header -->
-        <header class="flex items-center justify-between pb-6 border-b border-gray-700">
-            <div class="flex items-center space-x-4">
-                <img src="/img/brand/logo.svg" alt="Tunnelsats Logo" class="h-12 w-12">
-                <div>
-                    <h1 class="text-2xl font-bold tracking-wider">Tunnelsats <span
-                            class="bg-tsgreen text-black px-2 py-0.5 rounded text-sm italic">v3</span></h1>
-                    <p class="text-gray-400 text-sm">Lightning VPN Isolation</p>
+        <!-- Sidebar Configuration -->
+        <aside class="w-64 bg-gray-950/80 border-r border-gray-800 flex flex-col shadow-xl z-10">
+            <!-- Brand -->
+            <div class="p-6 border-b border-gray-800 flex items-center space-x-4">
+                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10"
+                    style="filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.5));">
+                <div class="flex flex-col">
+                    <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
+                            class="text-tsyellow">Sats</span></h1>
+                    <span id="app-version"
+                        class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.0.0</span>
                 </div>
             </div>
-            <div id="statusBadge" class="px-4 py-2 rounded-full font-bold text-sm bg-gray-600 text-gray-200">
-                Checking Status...
-            </div>
-        </header>
 
-        <!-- Navigation Tabs -->
-        <nav class="flex space-x-6 pt-4 mb-6 text-gray-400">
-            <button onclick="switchTab('dashboard')" id="tab-dashboard"
-                class="pb-2 tab-active hover:text-white transition">Dashboard</button>
-            <button onclick="switchTab('purchase')" id="tab-purchase" class="pb-2  hover:text-white transition">Purchase
-                / Renew</button>
-            <button onclick="switchTab('import')" id="tab-import" class="pb-2 hover:text-white transition">Import
-                Config</button>
-        </nav>
+            <!-- Navigation -->
+            <nav class="flex-1 px-4 py-6 space-y-2">
+                <button id="nav-dashboard" onclick="switchTab('dashboard')"
+                    class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
+                    <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
+                        stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Dashboard</span>
+                </button>
+                <button id="nav-buy" onclick="switchTab('buy')"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>Purchase New</span>
+                </button>
+                <button id="nav-renew" onclick="switchTab('renew')"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                        </path>
+                    </svg>
+                    <span>Renew Target</span>
+                </button>
+                <button id="nav-import" onclick="switchTab('import')"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                    </svg>
+                    <span>Install / Import</span>
+                </button>
+                <button id="nav-uninstall" onclick="switchTab('uninstall')"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
+                        </path>
+                    </svg>
+                    <span>Uninstall</span>
+                </button>
+            </nav>
+
+            <!-- Status Badge Area (Moved from Header) -->
+            <div class="p-6 border-t border-gray-800 bg-gray-900/40">
+                <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2">VPN Status</p>
+                <div id="statusBadge"
+                    class="w-full text-center px-4 py-2 rounded-lg font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400 shadow-inner truncate">
+                    Checking...
+                </div>
+            </div>
+
+            <!-- Footer Links -->
+            <div class="px-6 py-4 flex flex-col space-y-2 border-t border-gray-800">
+                <a href="https://tunnelsats.com" target="_blank"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Homepage</span>
+                </a>
+                <a href="https://tunnelsats.com/status" target="_blank"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                        </path>
+                    </svg>
+                    <span>Server Status</span>
+                </a>
+                <a href="https://tunnelsats.com/faq" target="_blank"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-blue-400 transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                        </path>
+                    </svg>
+                    <span>Help & FAQ</span>
+                </a>
+            </div>
+        </aside>
 
         <!-- Main Content Area -->
-        <main class="flex-grow">
-            <!-- Dashboard View -->
-            <section id="view-dashboard" class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div class="bg-cardbg rounded-xl p-6 border border-gray-700 shadow-xl">
-                    <h2 class="text-xl font-semibold mb-4 text-tsyellow">Tunnel Connection</h2>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-gray-700 pb-2">
-                            <span class="text-gray-400">Tunnel Status</span>
-                            <span id="txt-wg-status" class="font-mono">Loading...</span>
+        <main
+            class="flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60">
+            <!-- Dynamic Background Glows -->
+            <div
+                class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
+            </div>
+            <div
+                class="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-tsyellow/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
+            </div>
+
+            <!-- 1. Dashboard View -->
+            <section id="view-dashboard" class="space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white mb-4">VPN Status</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div
+                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 transition-colors group relative overflow-hidden">
+                            <div
+                                class="absolute top-0 right-0 w-24 h-24 bg-tsgreen/5 rounded-bl-[100px] pointer-events-none">
+                            </div>
+                            <div class="flex items-center space-x-3 mb-2">
+                                <svg class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors"
+                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1">
+                                    </path>
+                                </svg>
+                                <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
+                            </div>
+                            <p id="txt-wg-status" class="text-2xl font-mono text-gray-500 font-bold tracking-tight">
+                                Loading...</p>
                         </div>
-                        <div class="flex justify-between border-b border-gray-700 pb-2">
-                            <span class="text-gray-400">Active Configs</span>
-                            <span id="txt-configs" class="font-mono text-sm">Loading...</span>
+                        <div
+                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsyellow/50 transition-colors group relative overflow-hidden">
+                            <div
+                                class="absolute top-0 right-0 w-24 h-24 bg-tsyellow/5 rounded-bl-[100px] pointer-events-none">
+                            </div>
+                            <div class="flex items-center space-x-3 mb-2">
+                                <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow transition-colors"
+                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z">
+                                    </path>
+                                </svg>
+                                <p class="text-sm font-semibold text-gray-400">Active Pubkey</p>
+                            </div>
+                            <p id="txt-pubkey" class="text-sm font-mono truncate text-gray-300">Loading...</p>
                         </div>
-                        <div class="flex flex-col pt-2">
-                            <span class="text-gray-400 text-sm mb-1">Public Key</span>
-                            <span id="txt-pubkey" class="font-mono text-xs bg-gray-800 p-2 rounded truncate">...</span>
-                        </div>
-                        <button onclick="restartTunnel()"
-                            class="mt-4 w-full bg-gray-700 hover:bg-gray-600 font-semibold py-2 rounded transition border border-gray-600">
-                            Restart tunnel interface
-                        </button>
                     </div>
                 </div>
 
-                <div class="bg-cardbg rounded-xl p-6 border border-gray-700 shadow-xl">
-                    <h2 class="text-xl font-semibold mb-4 text-tsgreen">Node Protection</h2>
-                    <p class="text-sm text-gray-400 mb-4">Traffic originating from these IPs is isolated and routed
-                        strictly through the VPN tunnel. Your backend node IPs are identified automatically by the app.
-                    </p>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-gray-700 pb-2">
-                            <span class="text-gray-400">LND Container IP</span>
-                            <span id="txt-lnd-ip" class="font-mono text-tsgreen">Loading...</span>
+                <!-- NOTE: Target Node Status (LND/CLN IPs) moved to PR #3 dataplane layer -->
+
+                <div class="bg-gray-800/60 p-4 rounded-lg border border-gray-700 mt-6 relative z-20">
+                    <p class="text-sm text-gray-400 mb-2">Detected Configurations on Disk</p>
+                    <p id="txt-configs" class="text-sm font-mono text-gray-300">Loading...</p>
+                </div>
+
+                <!-- Subtle Slick Backdrop for the dashboard results -->
+                <div id="dashboard-banner" class="mt-12 p-1 relative overflow-hidden rounded-3xl group">
+                    <div
+                        class="absolute inset-0 bg-gradient-to-r from-tsgreen/20 via-tsyellow/20 to-tsgreen/20 blur-2xl opacity-30 group-hover:opacity-50 transition-opacity duration-1000">
+                    </div>
+                    <div
+                        class="relative bg-gray-950/60 backdrop-blur-xl border border-gray-800 rounded-[22px] p-8 flex flex-col items-center justify-center space-y-4">
+                        <div class="flex space-x-2" id="dashboard-banner-dots">
+                            <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping"></div>
+                            <div class="w-1.5 h-1.5 bg-tsyellow rounded-full animate-ping [animation-delay:0.3s]"></div>
+                            <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping [animation-delay:0.6s]"></div>
                         </div>
-                        <div class="flex justify-between pb-2">
-                            <span class="text-gray-400">CLN Container IP</span>
-                            <span id="txt-cln-ip" class="font-mono text-tsgreen">Loading...</span>
+                        <p id="dashboard-banner-title"
+                            class="text-sm font-bold text-gray-400 tracking-widest uppercase">Checking Connection...</p>
+                        <p id="dashboard-banner-text" class="text-[10px] text-gray-500 text-center max-w-xs">
+                            Initializing network status check. Please wait while we verify your tunnel state.</p>
+                        <div id="dashboard-banner-extra" class="hidden"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. Purchase New View -->
+            <section id="view-buy" class="hidden space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white mb-2">Buy New Subscription</h2>
+                    <p class="text-sm text-gray-400 mb-6">Create a fresh VPN config. This will override existing
+                        auto-configurations for your node.</p>
+
+                    <div id="buy-form" class="space-y-4">
+                        <div class="relative group" id="buy-server-dropdown-container">
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Select Server</label>
+                            <div class="relative">
+                                <button type="button" onclick="toggleDropdown('buy-server')" id="buy-server-btn"
+                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-gray-400 rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                    <span id="buy-server-label">Loading servers...</span>
+                                    <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
+                                        id="buy-server-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M19 9l-7 7-7-7"></path>
+                                    </svg>
+                                </button>
+                                <div id="buy-server-list"
+                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] max-h-60 overflow-y-auto scrollbar-hide origin-top transition-all duration-200 scale-95 opacity-0">
+                                    <!-- Options injected via JS -->
+                                </div>
+                                <input type="hidden" id="buy-server-select" value="">
+                            </div>
                         </div>
-                        <!-- Need Node Routing Setup Config -->
-                        <div class="mt-4 p-4 bg-yellow-900/30 border border-yellow-700 rounded text-sm">
-                            <strong class="text-tsyellow block mb-2">Important Next Step</strong>
-                            You MUST configure your LND or Core Lightning app manually to bind external routes to your
-                            Tunnelsats VPN. <a href="https://tunnelsats.com/guide" target="_blank"
-                                class="text-tsgreen hover:underline">Read the Setup Guide</a>
+
+                        <div class="relative group" id="buy-duration-dropdown-container">
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Duration</label>
+                            <div class="relative">
+                                <button type="button" onclick="toggleDropdown('buy-duration')" id="buy-duration-btn"
+                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                    <span id="buy-duration-label">1 Month</span>
+                                    <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
+                                        id="buy-duration-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M19 9l-7 7-7-7"></path>
+                                    </svg>
+                                </button>
+                                <div id="buy-duration-list"
+                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] overflow-hidden origin-top transition-all duration-200 scale-95 opacity-0">
+                                    <button type="button" onclick="selectOption('buy-duration', '1', '1 Month')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">1
+                                        Month</button>
+                                    <button type="button"
+                                        onclick="selectOption('buy-duration', '3', '3 Months (10% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">3
+                                        Months (10% off)</button>
+                                    <button type="button"
+                                        onclick="selectOption('buy-duration', '6', '6 Months (15% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">6
+                                        Months (15% off)</button>
+                                    <button type="button"
+                                        onclick="selectOption('buy-duration', '12', '12 Months (25% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors hover:pl-6 block">12
+                                        Months (25% off)</button>
+                                </div>
+                                <input type="hidden" id="buy-duration-select" value="1">
+                            </div>
+                        </div>
+
+                        <div class="mt-8">
+                            <button id="btn-create-buy" onclick="createSub('buy')"
+                                class="w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
+                                <svg class="w-5 h-5 text-black animate-pulse" fill="none" stroke="currentColor"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                                <span>Generate Lightning Invoice</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Payment Box -->
+                    <div id="invoice-box-buy"
+                        class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
+                        <div class="flex flex-col items-center">
+                            <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
+                            <a id="pay-link-buy" href="#"
+                                class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
+                                <div id="qr-placeholder-buy"
+                                    class="w-48 h-48 bg-gray-200 flex items-center justify-center text-gray-500 font-bold">
+                                    QR Loading...</div>
+                            </a>
+                            <input id="invoice-bolt11-buy" type="text" readonly
+                                class="w-full bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded mb-2 text-center" />
+                            <p class="text-sm text-tsgreen animate-pulse">Waiting for payment confirmation...</p>
                         </div>
                     </div>
                 </div>
             </section>
 
-            <!-- Purchase View -->
-            <section id="view-purchase" class="hidden">
-                <div class="bg-cardbg rounded-xl p-6 border border-gray-700 shadow-xl max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-semibold mb-2 text-tsgreen">Buy New Subscription</h2>
-                    <p class="text-gray-400 mb-6">Select a regional server, generate a Lightning Invoice, and scan to
-                        pay. Your VPN config will securely auto-install after payment.</p>
+            <!-- 3. Renew Target View -->
+            <section id="view-renew" class="hidden space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white mb-2">Renew Existing Target</h2>
+                    <p class="text-sm text-gray-400 mb-6">Extend your active subscription time using your currently
+                        installed pubkey.</p>
 
-                    <div class="space-y-4">
+                    <div id="renew-form" class="space-y-4">
                         <div>
-                            <label class="block text-gray-400 text-sm mb-1">1. Choose Location</label>
-                            <select id="server-select"
-                                class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-white">
-                                <option value="">Loading servers...</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-gray-400 text-sm mb-1">2. Duration (Months)</label>
-                            <select id="duration-select"
-                                class="w-full bg-gray-800 border border-gray-600 rounded p-2 text-white">
-                                <option value="1">1 Month</option>
-                                <option value="3">3 Months (5% off)</option>
-                                <option value="6">6 Months (10% off)</option>
-                                <option value="12">12 Months (20% off)</option>
-                            </select>
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Target Public Key</label>
+                            <input id="renew-pubkey" type="text" readonly
+                                class="w-full bg-gray-900/50 border border-gray-800 text-gray-400 rounded-xl p-4 cursor-not-allowed shadow-inner font-mono text-sm opacity-70">
                         </div>
 
-                        <div id="invoice-box"
-                            class="hidden mt-6 p-4 border border-tsgreen rounded bg-black flex flex-col items-center">
-                            <h3 class="text-tsgreen font-bold mb-2">Awaiting Payment...</h3>
-                            <textarea id="invoice-bolt11" class="w-full bg-gray-900 p-2 text-xs font-mono rounded mb-4"
-                                rows="4" readonly></textarea>
-                            <a id="pay-link" href="#"
-                                class="bg-tsgreen hover:bg-green-600 text-black font-bold py-2 px-6 rounded-full transition w-full text-center">Open
-                                Internal Wallet</a>
+                        <div class="relative group" id="renew-duration-dropdown-container">
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Duration to Add</label>
+                            <div class="relative">
+                                <button type="button" onclick="toggleDropdown('renew-duration')" id="renew-duration-btn"
+                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                    <span id="renew-duration-label">1 Month</span>
+                                    <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
+                                        id="renew-duration-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M19 9l-7 7-7-7"></path>
+                                    </svg>
+                                </button>
+                                <div id="renew-duration-list"
+                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] overflow-hidden origin-top transition-all duration-200 scale-95 opacity-0">
+                                    <button type="button" onclick="selectOption('renew-duration', '1', '1 Month')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">1
+                                        Month</button>
+                                    <button type="button"
+                                        onclick="selectOption('renew-duration', '3', '3 Months (10% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">3
+                                        Months (10% off)</button>
+                                    <button type="button"
+                                        onclick="selectOption('renew-duration', '6', '6 Months (15% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block">6
+                                        Months (15% off)</button>
+                                    <button type="button"
+                                        onclick="selectOption('renew-duration', '12', '12 Months (25% off)')"
+                                        class="w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors hover:pl-6 block">12
+                                        Months (25% off)</button>
+                                </div>
+                                <input type="hidden" id="renew-duration-select" value="1">
+                            </div>
                         </div>
 
-                        <button id="btn-create" onclick="createSub()"
-                            class="w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-3 rounded transition mt-4">
-                            Generate Lightning Invoice
-                        </button>
+                        <div class="mt-8">
+                            <button id="btn-create-renew" onclick="createSub('renew')"
+                                class="w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
+                                <svg class="w-5 h-5 text-black group-hover:rotate-180 transition-transform duration-500"
+                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                                    </path>
+                                </svg>
+                                <span>Generate Renewal Invoice</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Payment Box -->
+                    <div id="invoice-box-renew"
+                        class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
+                        <div class="flex flex-col items-center">
+                            <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
+                            <a id="pay-link-renew" href="#"
+                                class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
+                                <div id="qr-placeholder-renew"
+                                    class="w-48 h-48 bg-gray-200 flex items-center justify-center text-gray-500 font-bold">
+                                    QR Loading...</div>
+                            </a>
+                            <input id="invoice-bolt11-renew" type="text" readonly
+                                class="w-full bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded mb-2 text-center" />
+                            <p class="text-sm text-tsgreen animate-pulse">Waiting for renewal confirmation...</p>
+                        </div>
                     </div>
                 </div>
             </section>
 
-            <!-- Import View -->
-            <section id="view-import" class="hidden">
-                <div class="bg-cardbg rounded-xl p-6 border border-gray-700 shadow-xl max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-semibold mb-2 text-tsyellow">Legacy Migration</h2>
-                    <p class="text-gray-400 mb-6">If you updated to Umbrel 1.6+ and already have a valid Tunnelsats
-                        configuration, simply paste your original <code>tunnelsats.conf</code> below. We will securely
-                        store it to your persistent app volume.</p>
-                    <textarea id="config-text"
-                        class="w-full h-64 bg-gray-800 border border-gray-600 rounded p-4 text-sm font-mono text-gray-300"
-                        placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;VPNPort = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;PresharedKey = ...&#10;Endpoint = ...&#10;AllowedIPs = 0.0.0.0/0, ::/0&#10;PersistentKeepalive = 25"></textarea>
+            <!-- 4. Install / Import View -->
+            <section id="view-import" class="hidden space-y-6">
+                <!-- Pending Install Section (Only visible if a payment was just completed) -->
+                <div id="pending-install-section"
+                    class="hidden bg-gray-800 shadow-inner p-6 rounded-lg border border-tsgreen mb-6">
+                    <h2 class="text-xl font-bold text-white mb-2">Finalize New Installation</h2>
+                    <p class="text-sm text-gray-300 mb-4">Your payment was confirmed. Click the button below to
+                        provision your VPN config and configure your lightning node.</p>
+                    <button onclick="claimSubscription('import')" id="btn-claim-install"
+                        class="w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-3 rounded transition shadow-lg">
+                        Install Now
+                    </button>
+                    <!-- claimSubscription will render the result here -->
+                    <div id="invoice-box-import" class="mt-4"></div>
+                </div>
+
+                <div>
+                    <h2 class="text-xl font-bold text-white mb-2">Import Existing Config</h2>
+                    <p class="text-sm text-gray-400 mb-6">Already have a TunnelSats config from the website? Paste it
+                        below to apply it to your node.</p>
+
+                    <textarea id="config-text" rows="8"
+                        class="w-full bg-gray-900 border border-gray-700 text-tsgreen font-mono text-sm rounded-xl p-5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen transition-all shadow-inner scrollbar-hide"
+                        placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."></textarea>
 
                     <button onclick="importConfig()"
-                        class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded transition mt-4 border border-gray-500">
-                        Securely Import Config
+                        class="mt-6 w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
+                        <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4">
+                            </path>
+                        </svg>
+                        <span>Apply & Configure</span>
                     </button>
-                    <p id="import-msg" class="text-center mt-4 text-sm"></p>
+                    <p id="import-msg" class="text-center mt-4 text-sm font-semibold"></p>
+                </div>
+            </section>
+
+            <!-- 5. Uninstall / Restore View -->
+            <section id="view-uninstall" class="hidden space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-red-500 mb-2">Uninstall TunnelSats Networking</h2>
+
+                    <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
+                        <h3 class="text-gray-400 font-bold mb-2">Coming Soon</h3>
+                        <p class="text-sm text-gray-300">
+                            Node configuration restore will be available once the dataplane integration is complete.
+                            To uninstall TunnelSats, simply remove the app from the Umbrel dashboard.
+                        </p>
+                    </div>
                 </div>
             </section>
         </main>
     </div>
 
     <!-- Logic -->
-    <script src="/js/app.js"></script>
+    <script src="https://cdn.rawgit.com/davidshimjs/qrcodejs/gh-pages/qrcode.min.js"></script>
+    <script src="js/app.js"></script>
 </body>
 
 </html>

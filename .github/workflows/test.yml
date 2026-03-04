@@ -38,14 +38,53 @@ jobs:
           docker compose build tunnelsats
           docker compose up -d tunnelsats
 
-      - name: Assert Target Container Recognition
+      - name: Assert Container Starts Successfully
         run: |
           sleep 10
           docker logs tunnelsats
-          if ! docker logs tunnelsats | grep -q "Applying killswitch and routing for container IP:"; then
-            echo "ERROR: Did not resolve LND container IP"
+          if ! docker logs tunnelsats | grep -q "Starting internal dashboard"; then
+            echo "ERROR: Tunnelsats entrypoint failed to start the dashboard server."
             exit 1
           fi
-          if docker logs tunnelsats | grep -q "Tunnelsats is running and protecting target IPs"; then
-             echo "Killswitch engaged successfully."
+          if docker logs tunnelsats | grep -q "Tunnelsats container running"; then
+             echo "Container started successfully."
           fi
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements-test.txt
+
+      - name: Run Pytest
+        env:
+          PYTHONPATH: ./server
+        run: |
+          pytest server/tests/
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Install JS dependencies
+        working-directory: ./web
+        run: npm install
+
+      - name: Run Jest
+        working-directory: ./web
+        run: npm test

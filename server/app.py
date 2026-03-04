@@ -2,13 +2,42 @@ import os
 import time
 import subprocess
 import requests
-from flask import Flask, request, jsonify, send_from_directory
+import logging
+import yaml
+from ipaddress import ip_address, ip_network
+from flask import Flask, request, jsonify, send_from_directory, abort
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__, static_folder="../web", static_url_path="")
+# Umbrel uses an app-proxy, so request.remote_addr will be 127.0.0.1 unless we use ProxyFix to parse X-Forwarded-For.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1)
 
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 DATA_DIR = "/data"
+
+# Allow local loopback and all standard private subnets (RFC 1918) for LAN access
+ALLOWED_NETWORKS = [
+    ip_network('127.0.0.0/8'),
+    ip_network('10.0.0.0/8'),
+    ip_network('172.16.0.0/12'),
+    ip_network('192.168.0.0/16')
+]
+
+@app.before_request
+def restrict_local_api():
+    if request.path.startswith('/api/local/'):
+        remote_addr = request.remote_addr
+        if remote_addr:
+            try:
+                ip_obj = ip_address(remote_addr)
+                if not any(ip_obj in net for net in ALLOWED_NETWORKS):
+                    app.logger.warning(f"Unauthorized access attempt to {request.path} from {remote_addr}")
+                    abort(403)
+            except ValueError:
+                abort(403)
+        else:
+            abort(403)
 
 def get_active_vpn_info():
     port = None
@@ -42,7 +71,11 @@ def proxy_request(method, endpoint, payload=None):
         else:
             return jsonify({"error": "Unsupported method"}), 405
             
-        return (resp.content, resp.status_code, resp.headers.items())
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.headers.items()
+                   if name.lower() not in excluded_headers]
+                   
+        return (resp.content, resp.status_code, headers)
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
@@ -77,12 +110,25 @@ def claim_subscription():
         if resp.status_code == 200:
             data = resp.json()
             if "wireguardConfig" in data and "server" in data:
-                # Save config
+                # Rename old configs to .bak (don't delete — user paid for these)
                 server_id = data["server"].get("id", "unknown")
+                if os.path.exists(DATA_DIR):
+                    for f in os.listdir(DATA_DIR):
+                        if f.endswith(".conf"):
+                            try:
+                                old_path = os.path.join(DATA_DIR, f)
+                                os.rename(old_path, old_path + ".bak")
+                            except: pass
+
                 config_path = os.path.join(DATA_DIR, f"tunnelsats-{server_id}.conf")
                 with open(config_path, "w") as f:
                     f.write(data["wireguardConfig"])
-        return (resp.content, resp.status_code, resp.headers.items())
+
+        # Filter hop-by-hop headers (same as proxy_request)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.headers.items()
+                   if name.lower() not in excluded_headers]
+        return (resp.content, resp.status_code, headers)
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
@@ -96,7 +142,6 @@ def renew_subscription():
 def local_status():
     # Detect if WireGuard is running
     wg_status = "Disconnected"
-    wg_ip = ""
     wg_pubkey = ""
     try:
         output = subprocess.check_output(["wg", "show", "tunnelsatsv2"], stderr=subprocess.STDOUT).decode("utf-8")
@@ -115,16 +160,14 @@ def local_status():
             if f.endswith(".conf"):
                 configs.append(f)
 
-    # Check for LND and CLN IPs via our entrypoint logs or docker 
-    lnd_ip = ""
-    cln_ip = ""
+    # Get version from manifest
+    version = "v3.0.0" # Default
     try:
-        # We can read the ip file we might dump from entrypoint to /tmp or just exec docker inspect if socket available
-        if os.path.exists("/var/run/docker.sock"):
-            lnd_out = subprocess.check_output(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "lightning_lnd_1"], stderr=subprocess.DEVNULL)
-            lnd_ip = lnd_out.decode().strip()
-            cln_out = subprocess.check_output(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "lightning_core-lightning_1"], stderr=subprocess.DEVNULL)
-            cln_ip = cln_out.decode().strip()
+        manifest_path = os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml")
+        if os.path.exists(manifest_path):
+            with open(manifest_path, 'r') as f:
+                manifest = yaml.safe_load(f)
+                version = f"v{manifest.get('version', '3.0.0')}"
     except Exception:
         pass
 
@@ -132,8 +175,7 @@ def local_status():
         "wg_status": wg_status,
         "wg_pubkey": wg_pubkey,
         "configs_found": configs,
-        "lnd_ip": lnd_ip,
-        "cln_ip": cln_ip
+        "version": version
     })
 
 @app.route("/api/local/upload-config", methods=["POST"])
@@ -157,6 +199,14 @@ def upload_config():
     try:
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR)
+        else:
+            # Rename old configs to .bak (don't delete — user paid for these)
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".conf"):
+                    try:
+                        old_path = os.path.join(DATA_DIR, f)
+                        os.rename(old_path, old_path + ".bak")
+                    except: pass
             
         config_path = os.path.join(DATA_DIR, "tunnelsats-imported.conf")
         with open(config_path, "w") as f:
@@ -175,45 +225,8 @@ def restart_tunnel():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/local/configure-node", methods=["POST"])
-def configure_node():
-    port, dns = get_active_vpn_info()
-    if not port:
-        return jsonify({"error": "No VPN forwarding port found in config."}), 400
-        
-    lnd_success = False
-    lnd_path = "/lightning-data/lnd/tunnelsats.conf"
-    if os.path.exists("/lightning-data/lnd"):
-        try:
-            with open(lnd_path, "w") as f:
-                f.write(f"[Application Options]\nexternalhosts={dns}:{port}\n\n[Tor]\ntor.streamisolation=false\ntor.skip-proxy-for-clearnet-targets=true\n")
-            lnd_success = True
-        except Exception:
-            pass
-
-    cln_success = False
-    cln_path = "/lightning-data/cln/config"
-    if os.path.exists(cln_path):
-        try:
-            with open(cln_path, "r") as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            for line in lines:
-                if not line.startswith("bind-addr=") and not line.startswith("announce-addr=") and not line.startswith("always-use-proxy="):
-                    new_lines.append(line)
-                    
-            new_lines.append(f"bind-addr=0.0.0.0:9735\n")
-            new_lines.append(f"announce-addr={dns}:{port}\n")
-            new_lines.append(f"always-use-proxy=false\n")
-            
-            with open(cln_path, "w") as f:
-                f.writelines(new_lines)
-            cln_success = True
-        except Exception:
-            pass
-
-    return jsonify({"lnd": lnd_success, "cln": cln_success, "port": port, "dns": dns})
+# NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
+# They will be re-introduced when the infra PR is merged.
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=9739)
