@@ -52,6 +52,7 @@ async function fetchStatus() {
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
 
+<<<<<<< HEAD
         // NOTE: LND/CLN IP detection moved to PR #3 (dataplane layer)
 
         if (data.version) {
@@ -72,6 +73,22 @@ async function fetchStatus() {
             bannerText.innerText = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
             bannerDots.classList.add('hidden');
         }
+=======
+        document.getElementById('txt-lnd-ip').innerText = data.lnd_ip || "Not Detected";
+        document.getElementById('txt-cln-ip').innerText = data.cln_ip || "Not Detected";
+        document.getElementById('txt-dataplane-mode').innerText = data.dataplane_mode || "Unknown";
+        document.getElementById('txt-target-container').innerText = data.target_container || "Not detected";
+        document.getElementById('txt-target-ip').innerText = data.target_ip || "Not detected";
+        document.getElementById('txt-forwarding-port').innerText = data.forwarding_port || "Not detected";
+        document.getElementById('txt-rules-synced').innerText = data.rules_synced ? "Yes" : "No";
+
+        const net = data.docker_network || {};
+        const netName = net.name || "docker-tunnelsats";
+        const netSubnet = net.subnet || "unknown";
+        document.getElementById('txt-docker-network').innerText = `${netName} (${netSubnet})`;
+        document.getElementById('txt-last-reconcile').innerText = data.last_reconcile_at || "Never";
+        document.getElementById('txt-last-error').innerText = data.last_error || "None";
+>>>>>>> 46623c700b007fd79a9a4ddd8f5d8b304af3899a
 
     } catch (e) {
         console.error("Failed to fetch status", e);

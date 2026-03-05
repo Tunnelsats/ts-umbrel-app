@@ -466,5 +466,27 @@ def restore_node():
     return jsonify({"lnd": lnd_success, "cln": cln_success})
 
 
+
+@app.route("/api/local/restore-node", methods=["POST"])
+def restore_node():
+    lnd_success = comment_out_config_lines(
+        LND_TUNNELSATS_CONF_PATH,
+        (
+            "externalhosts=",
+            "tor.skip-proxy-for-clearnet-targets=",
+        ),
+    )
+    cln_success = comment_out_config_lines(
+        CLN_CONFIG_PATH,
+        (
+            "bind-addr=",
+            "announce-addr=",
+            "always-use-proxy=",
+        ),
+    )
+
+    return jsonify({"lnd": lnd_success, "cln": cln_success})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=9739)

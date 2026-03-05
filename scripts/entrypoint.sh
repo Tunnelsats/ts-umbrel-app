@@ -17,10 +17,13 @@ DOCKER_TARGET_IP="10.9.9.9"
 LN_TARGET_PORT="9735"
 RECONCILE_INTERVAL=30
 
-# Start internal UI server
-echo "Starting internal dashboard web server on port 9739..."
-python3 /app/server/app.py &
-API_PID=$!
+TARGET_CONTAINER_ID=""
+TARGET_CONTAINER_NAME=""
+TARGET_IMPL=""
+FORWARDING_PORT=""
+BRIDGE_NAME=""
+RULES_SYNCED="false"
+LAST_ERROR=""
 
 # Clean up trap
 cleanup() {
