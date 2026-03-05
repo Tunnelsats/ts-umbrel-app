@@ -1,7 +1,7 @@
-// State
-let pollInterval;
-let activePaymentHash = null;
-let purchaseMode = "buy"; // "buy" or "renew"
+// State (var for window-scope testability)
+var pollInterval;
+var activePaymentHash = null;
+var purchaseMode = "buy"; // "buy" or "renew"
 // Initialization
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
@@ -81,15 +81,16 @@ async function fetchStatus() {
 async function fetchServers() {
     try {
         const res = await fetch('/api/servers');
-        const servers = await res.json();
+        const data = await res.json();
+        // Handle both {servers: [...]} (upstream API) and flat array formats
+        const servers = Array.isArray(data) ? data : (data.servers || []);
 
         const selBuyList = document.getElementById('buy-server-list');
         selBuyList.innerHTML = "";
-
         servers.forEach(s => {
             let btn = document.createElement('button');
             btn.type = 'button';
-            const label = `${s.country} - ${s.city} (Port: ${s.wireguardPort})`;
+            const label = `${s.flag} ${s.country} — ${s.city}`;
             btn.setAttribute('onclick', `selectOption('buy-server', '${s.id}', '${label}')`);
             btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
             btn.innerText = label;
@@ -97,7 +98,7 @@ async function fetchServers() {
         });
 
         if (servers.length > 0) {
-            const firstLabel = `${servers[0].country} - ${servers[0].city} (Port: ${servers[0].wireguardPort})`;
+            const firstLabel = `${servers[0].flag} ${servers[0].country} — ${servers[0].city}`;
             selectOption('buy-server', servers[0].id, firstLabel);
         } else {
             document.getElementById('buy-server-label').innerText = "No servers available";
@@ -108,8 +109,8 @@ async function fetchServers() {
 // Purchase / Renew Mode Switch (Removed, handled by tabs now)
 
 // Initialize QRCodes
-let qrBuy = null;
-let qrRenew = null;
+var qrBuy = null;
+var qrRenew = null;
 
 function renderQR(mode, text) {
     const boxId = `qr-placeholder-${mode}`;
@@ -208,12 +209,32 @@ async function pollPayment() {
         const res = await fetch(`/api/subscription/${activePaymentHash}`);
         const data = await res.json();
 
-        if (data.status === 'PAID') {
+        if (data.status === 'paid') {
             clearInterval(pollInterval);
             const invoiceBox = document.getElementById(`invoice-box-${purchaseMode}`);
             invoiceBox.innerHTML = ''; // Clear content
 
             if (purchaseMode === 'buy') {
+                // Celebration SVG
+                const celebrationSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                celebrationSvg.setAttribute('viewBox', '0 0 120 120');
+                celebrationSvg.setAttribute('width', '80');
+                celebrationSvg.setAttribute('height', '80');
+                celebrationSvg.classList.add('mx-auto', 'mb-4');
+                celebrationSvg.innerHTML = `
+                    <circle cx="60" cy="60" r="50" fill="none" stroke="#22c55e" stroke-width="4" opacity="0.3">
+                        <animate attributeName="r" from="20" to="55" dur="1s" repeatCount="indefinite"/>
+                        <animate attributeName="opacity" from="0.6" to="0" dur="1s" repeatCount="indefinite"/>
+                    </circle>
+                    <circle cx="60" cy="60" r="30" fill="#22c55e" opacity="0.15"/>
+                    <path d="M45 60 L55 72 L78 48" fill="none" stroke="#22c55e" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+                        <animate attributeName="stroke-dasharray" from="0 100" to="60 100" dur="0.6s" fill="freeze"/>
+                    </path>
+                    <circle cx="30" cy="30" r="3" fill="#facc15"><animate attributeName="cy" from="30" to="10" dur="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="0.8s" repeatCount="indefinite"/></circle>
+                    <circle cx="90" cy="35" r="2" fill="#22c55e"><animate attributeName="cy" from="35" to="15" dur="1s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="1s" repeatCount="indefinite"/></circle>
+                    <circle cx="75" cy="25" r="2" fill="#facc15"><animate attributeName="cy" from="25" to="5" dur="0.7s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="0.7s" repeatCount="indefinite"/></circle>
+                `;
+
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center mb-2';
                 h3.textContent = 'Payment Received!';
@@ -230,7 +251,7 @@ async function pollPayment() {
                     switchTab('import');
                 };
 
-                invoiceBox.append(h3, p, button);
+                invoiceBox.append(celebrationSvg, h3, p, button);
             } else {
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center mb-2';
@@ -374,8 +395,34 @@ async function restartTunnel() {
 
 // NOTE: restoreNode() moved to PR #3/PR #4.
 
+// Copy Invoice to Clipboard
+async function copyInvoice(mode) {
+    const input = document.getElementById(`invoice-bolt11-${mode}`);
+    if (!input || !input.value) return;
+    try {
+        await navigator.clipboard.writeText(input.value);
+        // Visual feedback: swap icon to checkmark
+        const icon = document.getElementById(`copy-icon-${mode}`);
+        if (icon) {
+            const origPath = icon.innerHTML;
+            icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
+            icon.classList.remove('text-gray-400');
+            icon.classList.add('text-tsgreen');
+            setTimeout(() => {
+                icon.innerHTML = origPath;
+                icon.classList.remove('text-tsgreen');
+                icon.classList.add('text-gray-400');
+            }, 2000);
+        }
+    } catch (e) {
+        // Fallback for older browsers
+        input.select();
+        document.execCommand('copy');
+    }
+}
+
 // Custom Dropdown Logic
-let openDropdown = null;
+var openDropdown = null;
 
 function toggleDropdown(id) {
     const list = document.getElementById(`${id}-list`);

@@ -348,8 +348,17 @@
                                     class="w-48 h-48 bg-gray-200 flex items-center justify-center text-gray-500 font-bold">
                                     QR Loading...</div>
                             </a>
-                            <input id="invoice-bolt11-buy" type="text" readonly
-                                class="w-full bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded mb-2 text-center" />
+                            <div class="flex items-center gap-2 w-full mb-2">
+                                <input id="invoice-bolt11-buy" type="text" readonly
+                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis"
+                                    style="word-break: break-all;" />
+                                <button onclick="copyInvoice('buy')" title="Copy Invoice"
+                                    class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
+                                    <svg id="copy-icon-buy" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for payment confirmation...</p>
                         </div>
                     </div>
@@ -429,8 +438,17 @@
                                     class="w-48 h-48 bg-gray-200 flex items-center justify-center text-gray-500 font-bold">
                                     QR Loading...</div>
                             </a>
-                            <input id="invoice-bolt11-renew" type="text" readonly
-                                class="w-full bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded mb-2 text-center" />
+                            <div class="flex items-center gap-2 w-full mb-2">
+                                <input id="invoice-bolt11-renew" type="text" readonly
+                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis"
+                                    style="word-break: break-all;" />
+                                <button onclick="copyInvoice('renew')" title="Copy Invoice"
+                                    class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
+                                    <svg id="copy-icon-renew" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for renewal confirmation...</p>
                         </div>
                     </div>
