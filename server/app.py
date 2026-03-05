@@ -178,6 +178,70 @@ def proxy_request(method, endpoint, payload=None):
     except requests.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
+
+def docker_api(path):
+    if not os.path.exists(DOCKER_SOCK):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["curl", "-sS", "--fail", "--unix-socket", DOCKER_SOCK, f"http://localhost{path}"],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return json.loads(out.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def container_ip_by_match(pattern):
+    containers = docker_api("/containers/json?all=1")
+    if not containers:
+        return ""
+
+    for item in containers:
+        names = item.get("Names", [])
+        for name in names:
+            clean = name.lstrip("/")
+            if re.search(pattern, clean):
+                networks = item.get("NetworkSettings", {}).get("Networks", {})
+                for network_data in networks.values():
+                    ip_addr = network_data.get("IPAddress")
+                    if ip_addr:
+                        return ip_addr
+    return ""
+
+
+def read_dataplane_state():
+    defaults = {
+        "dataplane_mode": "docker-full-parity",
+        "target_container": "",
+        "target_ip": "",
+        "forwarding_port": "",
+        "rules_synced": False,
+        "last_reconcile_at": "",
+        "last_error": None,
+        "docker_network": {
+            "name": "docker-tunnelsats",
+            "subnet": "10.9.9.0/25",
+            "bridge": "",
+        },
+    }
+
+    if not os.path.exists(STATE_FILE):
+        return defaults
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as state_fp:
+            data = json.load(state_fp)
+        defaults.update({k: v for k, v in data.items() if k in defaults})
+        if isinstance(data.get("docker_network"), dict):
+            defaults["docker_network"].update(data["docker_network"])
+    except Exception:
+        pass
+
+    return defaults
+
+
 def sanitize_request_id(raw_request_id):
     request_id = str(raw_request_id or "").strip()
     if REQUEST_ID_PATTERN.fullmatch(request_id):
@@ -309,13 +373,26 @@ def local_status():
             if fname.endswith(".conf"):
                 configs.append(fname)
 
+    lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
+    cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
+    dataplane = read_dataplane_state()
     version = read_app_version()
 
     return jsonify({
         "wg_status": wg_status,
         "wg_pubkey": wg_pubkey,
         "configs_found": configs,
-        "version": version
+        "version": version,
+        "lnd_ip": lnd_ip,
+        "cln_ip": cln_ip,
+        "dataplane_mode": dataplane["dataplane_mode"],
+        "target_container": dataplane["target_container"],
+        "target_ip": dataplane["target_ip"],
+        "docker_network": dataplane["docker_network"],
+        "forwarding_port": dataplane["forwarding_port"],
+        "rules_synced": dataplane["rules_synced"],
+        "last_reconcile_at": dataplane["last_reconcile_at"],
+        "last_error": dataplane["last_error"],
     })
 
 @app.route("/api/local/upload-config", methods=["POST"])

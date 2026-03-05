@@ -52,9 +52,6 @@ async function fetchStatus() {
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
 
-<<<<<<< HEAD
-        // NOTE: LND/CLN IP detection moved to PR #3 (dataplane layer)
-
         if (data.version) {
             document.getElementById('app-version').innerText = data.version;
         }
@@ -73,7 +70,7 @@ async function fetchStatus() {
             bannerText.innerText = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
             bannerDots.classList.add('hidden');
         }
-=======
+
         document.getElementById('txt-lnd-ip').innerText = data.lnd_ip || "Not Detected";
         document.getElementById('txt-cln-ip').innerText = data.cln_ip || "Not Detected";
         document.getElementById('txt-dataplane-mode').innerText = data.dataplane_mode || "Unknown";
@@ -88,7 +85,6 @@ async function fetchStatus() {
         document.getElementById('txt-docker-network').innerText = `${netName} (${netSubnet})`;
         document.getElementById('txt-last-reconcile').innerText = data.last_reconcile_at || "Never";
         document.getElementById('txt-last-error').innerText = data.last_error || "None";
->>>>>>> 46623c700b007fd79a9a4ddd8f5d8b304af3899a
 
     } catch (e) {
         console.error("Failed to fetch status", e);
@@ -388,6 +384,55 @@ async function restartTunnel() {
         // The container entrypoint will catch the trigger file, and restart `wg-quick`
         setTimeout(fetchStatus, 3000);
     } catch (e) { }
+}
+
+function waitMs(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pollReconcileResult(requestId, timeoutMs = 12000, intervalMs = 250) {
+    const attempts = Math.ceil(timeoutMs / intervalMs);
+    for (let i = 0; i < attempts; i += 1) {
+        const res = await fetch(`/api/local/reconcile/${encodeURIComponent(requestId)}`);
+        const data = await res.json();
+
+        if (res.ok && data.success && data.complete) {
+            return data;
+        }
+
+        if (!res.ok) {
+            throw new Error(data.error || "Failed to fetch reconcile status.");
+        }
+
+        await waitMs(intervalMs);
+    }
+
+    throw new Error("Reconcile timed out.");
+}
+
+async function reconcileTunnel() {
+    const msg = document.getElementById('txt-reconcile-msg');
+    msg.innerText = "Reconciling dataplane...";
+    msg.className = "text-xs text-gray-400 mt-2";
+    try {
+        const triggerRes = await fetch('/api/local/reconcile', { method: 'POST' });
+        const triggerData = await triggerRes.json();
+        if (!triggerRes.ok || !triggerData.success || !triggerData.request_id) {
+            msg.innerText = triggerData.error || "Unable to trigger reconcile.";
+            msg.className = "text-xs text-red-500 mt-2";
+            return;
+        }
+
+        msg.innerText = "Reconcile requested. Waiting for dataplane sync...";
+        const result = await pollReconcileResult(triggerData.request_id);
+
+        msg.innerText = `Reconciled. Changes applied: ${result.changed ? "yes" : "no"}.`;
+        msg.className = "text-xs text-tsgreen mt-2";
+    } catch (e) {
+        msg.innerText = e.message;
+        msg.className = "text-xs text-red-500 mt-2";
+    }
+    fetchStatus();
 }
 
 // NOTE: restoreNode() moved to PR #3/PR #4.

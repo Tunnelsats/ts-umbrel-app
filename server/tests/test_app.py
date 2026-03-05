@@ -84,6 +84,22 @@ def test_local_status_includes_manifest_version(client):
         assert response.get_json().get("version") == "v9.1.2"
 
 
+def test_local_status_exposes_dataplane_metadata_defaults(client):
+    with patch.object(app_module, "STATE_FILE", "/tmp/does-not-exist-tunnelsats-state.json"):
+        response = get_status(client, remote_addr="127.0.0.1")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["dataplane_mode"] == "docker-full-parity"
+    assert data["target_container"] == ""
+    assert data["target_ip"] == ""
+    assert data["forwarding_port"] == ""
+    assert data["rules_synced"] is False
+    assert data["last_error"] is None
+    assert isinstance(data["docker_network"], dict)
+    assert data["docker_network"]["name"] == "docker-tunnelsats"
+
+
 def test_restore_node_comments_tunnelsats_lines(client):
     with tempfile.TemporaryDirectory() as temp_dir:
         lnd_path = os.path.join(temp_dir, "tunnelsats.conf")

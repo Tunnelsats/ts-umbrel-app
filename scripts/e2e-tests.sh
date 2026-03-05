@@ -91,8 +91,8 @@ scenario_happy_lnd() {
   echo "${status}" | jq -e '.rules_synced == true or .rules_synced == false' >/dev/null
 }
 
-scenario_cln_fallback() {
-  log "Scenario: cln_fallback (stop LND, expect CLN target)"
+scenario_happy_cln() {
+  log "Scenario: happy_cln (stop LND, expect CLN target)"
   docker stop mock_lightning_lnd_1 >/dev/null
   trigger_reconcile_and_wait >/dev/null
 
@@ -227,7 +227,7 @@ main() {
 
   setup_stack
   scenario_happy_lnd
-  scenario_cln_fallback
+  scenario_happy_cln
   scenario_manual_reconcile
   scenario_concurrent_reconcile
   scenario_drift_restart

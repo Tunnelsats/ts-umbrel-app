@@ -241,6 +241,29 @@
                     <p id="txt-configs" class="text-sm font-mono text-gray-300">Loading...</p>
                 </div>
 
+                <div class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 mt-6 relative z-20">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">Dataplane Health</h3>
+                        <button onclick="reconcileTunnel()"
+                            class="px-3 py-2 text-xs font-semibold rounded-lg bg-tsgreen hover:bg-green-500 text-black transition-colors">
+                            Reconcile dataplane now
+                        </button>
+                    </div>
+                    <p id="txt-reconcile-msg" class="text-xs text-gray-500 mb-3"></p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">LND Container IP</span><span id="txt-lnd-ip" class="font-mono text-tsgreen">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">CLN Container IP</span><span id="txt-cln-ip" class="font-mono text-tsgreen">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Dataplane Mode</span><span id="txt-dataplane-mode" class="font-mono">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Target Container</span><span id="txt-target-container" class="font-mono text-tsgreen">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Target IP</span><span id="txt-target-ip" class="font-mono text-tsgreen">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Forwarding Port</span><span id="txt-forwarding-port" class="font-mono">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Rules Synced</span><span id="txt-rules-synced" class="font-mono">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Docker Network</span><span id="txt-docker-network" class="font-mono">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Last Reconcile</span><span id="txt-last-reconcile" class="font-mono">Loading...</span></div>
+                        <div class="flex justify-between border-b border-gray-800 py-1"><span class="text-gray-400">Last Error</span><span id="txt-last-error" class="font-mono">None</span></div>
+                    </div>
+                </div>
+
                 <!-- Subtle Slick Backdrop for the dashboard results -->
                 <div id="dashboard-banner" class="mt-12 p-1 relative overflow-hidden rounded-3xl group">
                     <div

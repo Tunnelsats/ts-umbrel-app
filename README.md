@@ -63,7 +63,7 @@ Then run offline mock tests of the application without needing Umbrel using Dock
 ### E2E Scenarios Covered
 
 - `happy_lnd`: dataplane metadata present and reconcile state exposed.
-- `cln_fallback`: stopping the LND mock causes reconcile to target CLN.
+- `happy_cln`: stopping the LND mock causes reconcile to target CLN.
 - `manual_reconcile`: `POST /api/local/reconcile` returns `202` + request id, then status polling returns completion.
 - `drift_restart`: Lightning container restart is healed by reconcile.
 - `inbound_reachability`: DNAT/FORWARD rules are present for inbound path.
