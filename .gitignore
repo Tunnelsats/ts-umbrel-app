@@ -8,6 +8,7 @@ node_modules/
 __pycache__/
 venv/
 .pytest_cache/
+.venv-tests/
 PR_DESCRIPTION_TEMP.md
 PR_DESCRIPTION_TEMP2.md
 deploy_to_umbrel.expect

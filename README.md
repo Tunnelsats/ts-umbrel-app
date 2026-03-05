@@ -37,7 +37,7 @@ To heavily mitigate this, Node operators should strictly set their `externalip` 
 Run backend unit tests first:
 
 ```bash
-python3 -m unittest discover -s server/tests -v
+./scripts/run-unit-tests.sh -v
 ```
 
 Then run offline mock tests of the application without needing Umbrel using Docker Compose.

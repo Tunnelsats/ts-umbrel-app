@@ -6,16 +6,13 @@ import uuid
 from ipaddress import ip_address, ip_network
 
 import requests
-import logging
 import yaml
-from ipaddress import ip_address, ip_network
-from flask import Flask, request, jsonify, send_from_directory, abort
-from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses an app-proxy, so request.remote_addr will be 127.0.0.1 unless we use ProxyFix to parse X-Forwarded-For.
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 DATA_DIR = "/data"
@@ -34,30 +31,6 @@ ALLOWED_NETWORKS = (
     ip_network("172.16.0.0/12"),
     ip_network("192.168.0.0/16"),
 )
-
-
-# Allow local loopback and all standard private subnets (RFC 1918) for LAN access
-ALLOWED_NETWORKS = [
-    ip_network('127.0.0.0/8'),
-    ip_network('10.0.0.0/8'),
-    ip_network('172.16.0.0/12'),
-    ip_network('192.168.0.0/16')
-]
-
-@app.before_request
-def restrict_local_api():
-    if request.path.startswith('/api/local/'):
-        remote_addr = request.remote_addr
-        if remote_addr:
-            try:
-                ip_obj = ip_address(remote_addr)
-                if not any(ip_obj in net for net in ALLOWED_NETWORKS):
-                    app.logger.warning(f"Unauthorized access attempt to {request.path} from {remote_addr}")
-                    abort(403)
-            except ValueError:
-                abort(403)
-        else:
-            abort(403)
 
 def client_is_allowed(remote_addr):
     if not remote_addr:
@@ -336,16 +309,7 @@ def local_status():
             if fname.endswith(".conf"):
                 configs.append(fname)
 
-    # Get version from manifest
-    version = "v3.0.0" # Default
-    try:
-        manifest_path = os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml")
-        if os.path.exists(manifest_path):
-            with open(manifest_path, 'r') as f:
-                manifest = yaml.safe_load(f)
-                version = f"v{manifest.get('version', '3.0.0')}"
-    except Exception:
-        pass
+    version = read_app_version()
 
     return jsonify({
         "wg_status": wg_status,
@@ -374,15 +338,8 @@ def upload_config():
     try:
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR)
-        else:
-            # Rename old configs to .bak (don't delete — user paid for these)
-            for f in os.listdir(DATA_DIR):
-                if f.endswith(".conf"):
-                    try:
-                        old_path = os.path.join(DATA_DIR, f)
-                        os.rename(old_path, old_path + ".bak")
-                    except: pass
-            
+
+        backup_existing_wireguard_configs(excluded_files={"tunnelsats-imported.conf"})
         config_path = os.path.join(DATA_DIR, "tunnelsats-imported.conf")
         with open(config_path, "w", encoding="utf-8") as conf:
             conf.write(config_data)
@@ -439,32 +396,6 @@ def reconcile_status(request_id):
         return jsonify({"success": True, "complete": True, **legacy_result})
 
     return jsonify({"success": True, "complete": False, "request_id": request_id}), 202
-
-
-# NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
-# They will be re-introduced when the infra PR is merged.
-
-
-@app.route("/api/local/restore-node", methods=["POST"])
-def restore_node():
-    lnd_success = comment_out_config_lines(
-        LND_TUNNELSATS_CONF_PATH,
-        (
-            "externalhosts=",
-            "tor.skip-proxy-for-clearnet-targets=",
-        ),
-    )
-    cln_success = comment_out_config_lines(
-        CLN_CONFIG_PATH,
-        (
-            "bind-addr=",
-            "announce-addr=",
-            "always-use-proxy=",
-        ),
-    )
-
-    return jsonify({"lnd": lnd_success, "cln": cln_success})
-
 
 
 @app.route("/api/local/restore-node", methods=["POST"])
