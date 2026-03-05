@@ -7,18 +7,6 @@ import pytest
 import server.app as app_module
 
 
-DATAPLANE_STATUS = {
-    "dataplane_mode": "docker-full-parity",
-    "target_container": "",
-    "target_ip": "",
-    "docker_network": {"name": "docker-tunnelsats", "subnet": "10.9.9.0/25", "bridge": ""},
-    "forwarding_port": "",
-    "rules_synced": False,
-    "last_reconcile_at": "",
-    "last_error": None,
-}
-
-
 @pytest.fixture
 def client():
     app_module.app.config["TESTING"] = True
@@ -28,13 +16,11 @@ def client():
 
 def get_status(client, remote_addr="127.0.0.1", headers=None):
     with patch("server.app.subprocess.check_output", side_effect=Exception("wg unavailable")):
-        with patch("server.app.container_ip_by_match", return_value=""):
-            with patch("server.app.read_dataplane_state", return_value=DATAPLANE_STATUS):
-                return client.get(
-                    "/api/local/status",
-                    headers=headers or {},
-                    environ_base={"REMOTE_ADDR": remote_addr},
-                )
+        return client.get(
+            "/api/local/status",
+            headers=headers or {},
+            environ_base={"REMOTE_ADDR": remote_addr},
+        )
 
 
 def test_local_api_rejects_public_remote_ip(client):
