@@ -34,7 +34,13 @@ To heavily mitigate this, Node operators should strictly set their `externalip` 
 
 ## Testing Locally (TDD)
 
-You can run offline mock tests of the application without needing Umbrel using Docker Compose.
+Run backend unit tests first:
+
+```bash
+python3 -m unittest discover -s server/tests -v
+```
+
+Then run offline mock tests of the application without needing Umbrel using Docker Compose.
 
 1. Generate a mock `tunnelsats-dev.conf` inside the `data/` directory.
 2. Spin up the test environment mock nodes:

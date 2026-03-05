@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import uuid
+from ipaddress import ip_address, ip_network
 
 import requests
 import logging
@@ -24,6 +25,15 @@ RECONCILE_TRIGGER_DIR = "/tmp/tunnelsats_reconcile_trigger.d"
 RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
+LND_TUNNELSATS_CONF_PATH = "/lightning-data/lnd/tunnelsats.conf"
+CLN_CONFIG_PATH = "/lightning-data/cln/config"
+ALLOWED_NETWORKS = (
+    ip_network("127.0.0.0/8"),
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+)
 
 
 # Allow local loopback and all standard private subnets (RFC 1918) for LAN access
@@ -48,6 +58,113 @@ def restrict_local_api():
                 abort(403)
         else:
             abort(403)
+
+def client_is_allowed(remote_addr):
+    if not remote_addr:
+        return False
+
+    try:
+        remote_ip = ip_address(remote_addr)
+    except ValueError:
+        return False
+
+    return any(remote_ip in subnet for subnet in ALLOWED_NETWORKS)
+
+
+def normalize_version(raw_version):
+    version_text = str(raw_version or "").strip()
+    if not version_text:
+        return "v3.0.0"
+    if version_text.startswith("v"):
+        return version_text
+    return f"v{version_text}"
+
+
+def read_app_version():
+    if not os.path.exists(APP_MANIFEST_PATH):
+        return "v3.0.0"
+
+    try:
+        with open(APP_MANIFEST_PATH, "r", encoding="utf-8") as manifest_fp:
+            manifest_raw = manifest_fp.read()
+    except Exception:
+        return "v3.0.0"
+
+    if yaml:
+        try:
+            manifest = yaml.safe_load(manifest_raw) or {}
+            return normalize_version(manifest.get("version", "3.0.0"))
+        except Exception:
+            pass
+
+    match = re.search(r'^\s*version:\s*"?([^"\n]+)"?\s*$', manifest_raw, re.MULTILINE)
+    if match:
+        return normalize_version(match.group(1))
+
+    return "v3.0.0"
+
+
+def backup_existing_wireguard_configs(excluded_files=None):
+    if not os.path.exists(DATA_DIR):
+        return
+
+    excluded = set(excluded_files or ())
+    for fname in os.listdir(DATA_DIR):
+        if not fname.endswith(".conf") or fname in excluded:
+            continue
+
+        old_path = os.path.join(DATA_DIR, fname)
+        if not os.path.isfile(old_path):
+            continue
+
+        backup_path = os.path.join(DATA_DIR, f"{fname}.bak")
+        suffix = 1
+        while os.path.exists(backup_path):
+            backup_path = os.path.join(DATA_DIR, f"{fname}.bak.{suffix}")
+            suffix += 1
+
+        os.rename(old_path, backup_path)
+
+
+def comment_out_config_lines(path, prefixes):
+    if not os.path.exists(path):
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            lines = conf_fp.readlines()
+    except Exception:
+        return False
+
+    changed = False
+    updated_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            updated_lines.append(line)
+            continue
+
+        if any(stripped.startswith(prefix) for prefix in prefixes):
+            updated_lines.append(f"# {line}" if line.endswith("\n") else f"# {line}\n")
+            changed = True
+        else:
+            updated_lines.append(line)
+
+    if changed:
+        try:
+            with open(path, "w", encoding="utf-8") as conf_fp:
+                conf_fp.writelines(updated_lines)
+        except Exception:
+            return False
+
+    return True
+
+
+@app.before_request
+def restrict_to_local():
+    if request.path.startswith("/api/local") and not client_is_allowed(request.remote_addr):
+        return jsonify({"error": "Forbidden"}), 403
+
 
 def get_active_vpn_info():
     port = None
@@ -326,6 +443,27 @@ def reconcile_status(request_id):
 
 # NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
 # They will be re-introduced when the infra PR is merged.
+
+
+@app.route("/api/local/restore-node", methods=["POST"])
+def restore_node():
+    lnd_success = comment_out_config_lines(
+        LND_TUNNELSATS_CONF_PATH,
+        (
+            "externalhosts=",
+            "tor.skip-proxy-for-clearnet-targets=",
+        ),
+    )
+    cln_success = comment_out_config_lines(
+        CLN_CONFIG_PATH,
+        (
+            "bind-addr=",
+            "announce-addr=",
+            "always-use-proxy=",
+        ),
+    )
+
+    return jsonify({"lnd": lnd_success, "cln": cln_success})
 
 
 if __name__ == "__main__":
