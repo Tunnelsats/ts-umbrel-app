@@ -455,6 +455,7 @@ write_reconcile_result() {
     local changed="$2"
     local result_path
     local tmp_path
+    local state_json="{}"
 
     if ! is_valid_request_id "${request_id}"; then
         log WARN "Skipping reconcile result write for invalid request_id: ${request_id}"
@@ -465,11 +466,21 @@ write_reconcile_result() {
     result_path="$(reconcile_result_path "${request_id}")"
     tmp_path="$(mktemp "${RECONCILE_RESULT_DIR}/.${request_id}.tmp.XXXXXX")"
 
-    jq -n \
+    if [ -f "${STATE_FILE}" ]; then
+        state_json="$(cat "${STATE_FILE}" 2>/dev/null || echo "{}")"
+        if ! echo "${state_json}" | jq -e . >/dev/null 2>&1; then
+            state_json="{}"
+        fi
+    fi
+
+    if ! jq -n \
         --arg request_id "${request_id}" \
         --argjson changed "${changed}" \
-        --slurpfile state "${STATE_FILE}" \
-        '{request_id:$request_id, changed:$changed, state: ($state[0] // {})}' > "${tmp_path}"
+        --argjson state "${state_json}" \
+        '{request_id:$request_id, changed:$changed, state: $state}' > "${tmp_path}"; then
+        rm -f "${tmp_path}"
+        return 1
+    fi
 
     mv -f "${tmp_path}" "${result_path}"
     cp -f "${result_path}" "${RECONCILE_RESULT_LEGACY}" || true

@@ -392,7 +392,25 @@ class TestDataplaneAndRegressionFixes:
                         assert complete.status_code == 200
                         complete_payload = json.loads(complete.data)
                         assert complete_payload['complete'] is True
+                        assert complete_payload['success'] is True
                         assert complete_payload['changed'] is True
+
+    def test_reconcile_status_reports_failure_when_rules_unsynced(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_dir = os.path.join(tmp_dir, 'results')
+            os.makedirs(result_dir, exist_ok=True)
+            request_id = 'req-unsynced-1'
+            with open(os.path.join(result_dir, f'{request_id}.json'), 'w') as f:
+                json.dump({'request_id': request_id, 'changed': False, 'state': {'rules_synced': False}}, f)
+
+            with patch('app.RECONCILE_RESULT_DIR', result_dir):
+                with patch('app.RECONCILE_RESULT_LEGACY', os.path.join(tmp_dir, 'legacy.json')):
+                    res = client.get(f'/api/local/reconcile/{request_id}')
+
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload['complete'] is True
+        assert payload['success'] is False
 
     def test_restore_node_comments_expected_lines(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:

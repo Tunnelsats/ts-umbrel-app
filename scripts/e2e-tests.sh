@@ -44,9 +44,13 @@ wait_for_reconcile_request() {
   start=$(date +%s)
   while true; do
     result=$(curl -fsS "${BASE_URL}/api/local/reconcile/${request_id}")
-    if echo "${result}" | jq -e '.success == true and .complete == true' >/dev/null; then
-      echo "${result}"
-      return 0
+    if echo "${result}" | jq -e '.complete == true' >/dev/null; then
+      if echo "${result}" | jq -e '.success == true and (.state.rules_synced // false) == true' >/dev/null; then
+        echo "${result}"
+        return 0
+      fi
+      echo "Reconcile request ${request_id} completed with failure: ${result}" >&2
+      return 1
     fi
     if [ $(( $(date +%s) - start )) -ge "${timeout}" ]; then
       echo "Timed out waiting for reconcile request ${request_id}" >&2

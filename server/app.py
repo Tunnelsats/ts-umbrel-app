@@ -301,6 +301,15 @@ def read_legacy_reconcile_result():
         return None
 
 
+def reconcile_result_success(result):
+    if not isinstance(result, dict):
+        return False
+    state = result.get("state", {})
+    if isinstance(state, dict):
+        return bool(state.get("rules_synced", False))
+    return False
+
+
 @app.before_request
 def restrict_local_api():
     if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
@@ -550,11 +559,11 @@ def reconcile_status(request_id):
 
     result = read_reconcile_result(request_id)
     if isinstance(result, dict) and result.get("request_id") == request_id:
-        return jsonify({"success": True, "complete": True, **result})
+        return jsonify({"success": reconcile_result_success(result), "complete": True, **result})
 
     legacy_result = read_legacy_reconcile_result()
     if isinstance(legacy_result, dict) and legacy_result.get("request_id") == request_id:
-        return jsonify({"success": True, "complete": True, **legacy_result})
+        return jsonify({"success": reconcile_result_success(legacy_result), "complete": True, **legacy_result})
 
     return jsonify({"success": True, "complete": False, "request_id": request_id}), 202
 
