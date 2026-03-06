@@ -2,9 +2,9 @@ name: TDD Docker Tests
 
 on:
   push:
-    branches: [ "main", "feat/*" ]
+    branches: [ "master", "feat/*", "feature-parity" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 jobs:
   test-compose:
