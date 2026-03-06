@@ -27,6 +27,8 @@ FORWARDING_PORT=""
 BRIDGE_NAME=""
 RULES_SYNCED="false"
 LAST_ERROR=""
+POLICY_CHANGED="0"
+NAT_CHANGED="0"
 
 log() {
     local level="$1"
@@ -332,6 +334,7 @@ EOF_RULES
 
 ensure_policy_routing() {
     local changed=0
+    POLICY_CHANGED="0"
 
     if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
         if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1; then
@@ -371,11 +374,13 @@ ensure_policy_routing() {
 ${wg_cidrs}
 EOF_WG_CIDRS
 
-    echo "${changed}"
+    POLICY_CHANGED="${changed}"
+    return 0
 }
 
 ensure_nat_forward_rules() {
     local changed=0
+    NAT_CHANGED="0"
     local dnat_count
     local forward_in_count
     local forward_out_count
@@ -416,7 +421,8 @@ ensure_nat_forward_rules() {
         changed=1
     fi
 
-    echo "${changed}"
+    NAT_CHANGED="${changed}"
+    return 0
 }
 
 rules_are_synced() {
@@ -490,8 +496,8 @@ reconcile_once() {
     local reason="$1"
     local request_id="${2:-}"
     local changed=0
-    local policy_changed
-    local nat_changed
+    local policy_changed="0"
+    local nat_changed="0"
 
     LAST_ERROR=""
     RULES_SYNCED="false"
@@ -549,25 +555,27 @@ reconcile_once() {
         return 1
     fi
 
-    if ! policy_changed="$(ensure_policy_routing)"; then
+    if ! ensure_policy_routing; then
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
         fi
         return 1
     fi
+    policy_changed="${POLICY_CHANGED}"
 
     if [ "${policy_changed}" = "1" ]; then
         changed=1
     fi
 
-    if ! nat_changed="$(ensure_nat_forward_rules)"; then
+    if ! ensure_nat_forward_rules; then
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
         fi
         return 1
     fi
+    nat_changed="${NAT_CHANGED}"
 
     if [ "${nat_changed}" = "1" ]; then
         changed=1
