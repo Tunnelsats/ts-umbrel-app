@@ -219,6 +219,23 @@ class TestMetaEndpoint:
         assert data['serverId'] == 'eu-de'
         assert data['vpnPort'] == 35825
 
+    def test_meta_drops_sensitive_secrets(self, client, data_dir):
+        meta = {
+            "serverId": "eu-de",
+            "presharedKey": "SuperSecretXYZ",
+            "paymentHash": "hash12345"
+        }
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        res = client.get('/api/local/meta')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['serverId'] == 'eu-de'
+        assert 'presharedKey' not in data
+        assert 'paymentHash' not in data
+
 # --- Phase 2: Renew Endpoint Test ---
 
 class TestRenewEndpoint:
@@ -246,8 +263,18 @@ class TestRenewEndpoint:
         mock_post.assert_called_once()
         call_kwargs = mock_post.call_args.kwargs
         assert call_kwargs['json']['duration'] == 3
-        assert call_kwargs['json']['serverId'] == 'au-syd'
         assert call_kwargs['json']['wgPublicKey'] == 'pubkey123'
+
+    def test_renew_rejects_external_ip(self):
+        # We need to manually invoke the proxy fix app structure to test the before_request
+        from app import app
+        with app.test_client() as client:
+            res = client.post(
+                '/api/subscription/renew',
+                json={'duration': 3},
+                environ_base={'REMOTE_ADDR': '203.0.113.1'} # External IP
+            )
+            assert res.status_code == 403
 
     @patch('app.requests.post')
     def test_renew_does_not_override_provided_fields(self, mock_post, client, data_dir):

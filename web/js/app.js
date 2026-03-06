@@ -170,8 +170,9 @@ async function createSub(mode) {
         if (mode === 'renew') {
             endpoint = '/api/subscription/renew';
             const wgPublicKey = document.getElementById('renew-pubkey').value;
-            payload = { duration, wgPublicKey };
-            if (!wgPublicKey || wgPublicKey === "Not available") {
+            const renewServerId = document.getElementById('renew-server').value;
+            payload = { duration, wgPublicKey, serverId: renewServerId };
+            if (!wgPublicKey || wgPublicKey === "Not found") {
                 displayPurchaseError("Cannot renew without an active public key from a connected VPN.");
                 document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
                 document.getElementById(`btn-create-${mode}`).disabled = false;
