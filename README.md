@@ -1,41 +1,88 @@
 # Tunnelsats - Umbrel App
 
-This repository contains the containerized version of [Tunnelsats](https://tunnelsats.com/) explicitly designed for the new **umbrelOS 1.6+ immutable architecture**. 
+This repository contains the containerized version of [Tunnelsats](https://tunnelsats.com/) for **umbrelOS 1.6+**.
 
-With `umbreld` and Rugix operating the OS, host-level modifications (such as installing `wireguard-tools` natively or relying on `systemd` services) are destroyed upon reboot. Thus, this application wraps the WireGuard tunneling logic inside a self-contained Umbrel App that dynamically discovers and masks Lightning Node traffic.
+Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
 
-## Architecture & How it Works
+## Docker-Native Architecture
 
-1. **Dockerized Environment**: The app runs a Debian container with `wireguard-tools`, `iproute2`, `procps`, and `nftables` compiled in.
-2. **Network Interception**: By utilizing `network_mode: "host"` and elevated capabilities (`NET_ADMIN`, `NET_RAW`), the container modifies the host's `nftables` policy routing from within the container boundary.
-3. **Dynamic IP Parsing**: LND and Core Lightning running on Umbrel do not have static IP addresses. To route their traffic out of the VPN interface (`tunnelsatsv2`), the `entrypoint.sh` script polls `/var/run/docker.sock` to detect the internal IPs of `lightning_lnd_1` and `lightning_core-lightning_1` as soon as they boot.
-4. **The Killswitch**: The container strictly binds LND traffic to the `51820` routing table. If the VPN drops, the primary route falls back to a `blackhole` instead of leaking over the default physical interfaces.
+1. The container runs with `network_mode: "host"` and `NET_ADMIN`/`NET_RAW` to manage WireGuard, routing and firewall state.
+2. Runtime detects active Lightning containers (`lnd` or `core-lightning`) via Docker API (`/var/run/docker.sock`).
+3. Runtime ensures a deterministic bridge network:
+   - Network: `docker-tunnelsats`
+   - Subnet: `10.9.9.0/25`
+   - Target node IP: `10.9.9.9`
+4. Runtime enforces dataplane parity:
+   - Policy routing table `51820` with blackhole fallback
+   - Inbound DNAT from WireGuard forwarding port to `10.9.9.9:9735`
+   - FORWARD rules between WireGuard interface and docker bridge
+5. A periodic reconcile loop (default: 30s) plus manual reconcile API repairs drift after restarts/network changes.
 
-## Important Note: The Reboot Race Condition
+## Runtime API
 
-Because Umbrel spins up applications independently upon reboot, there can be a brief fraction of a second where LND completes its boot *before* Tunnelsats starts generating its routing rules.
-Since we cannot deploy persistent `iptables`/`nftables` rules into the host OS (a limitation of Umbrel 1.6+ immutable design), **if Tunnelsats is delayed, LND might leak its true IP on standard outbound connections immediately upon boot.** 
+`GET /api/local/status` includes baseline status and dataplane metadata:
+- `wg_status`, `wg_pubkey`, `configs_found`, `version`
+- `dataplane_mode`, `target_container`, `target_impl`, `target_ip`
+- `docker_network`, `forwarding_port`, `rules_synced`, `last_reconcile_at`, `last_error`
 
-### Mitigation
-To heavily mitigate this, Node operators should strictly set their `externalip` configurations inside LND/CLN to their static Tunnelsats VPN IP. While brief outbound leakage is possible during reboot, the node will never aggressively *announce* its home IP to the broader gossip network.
+`POST /api/local/reconcile`:
+- Triggers immediate reconcile
+- Returns `202 Accepted` with `request_id` and status URL
 
-## Testing Locally (TDD)
+`GET /api/local/reconcile/<request_id>`:
+- Returns `202` while pending
+- Returns completed reconcile result once available
 
-You can run offline mock tests of the application without needing Umbrel using Docker Compose.
+`POST /api/local/restore-node`:
+- Comments out TunnelSats-injected LND/CLN lines in mounted config files
 
-1. Generate a mock `tunnelsats-dev.conf` inside the `data/` directory.
-2. Spin up the test environment mock nodes:
-    ```bash
-    docker compose -f docker-compose.test.yml up -d
-    ```
-3. Run the Tunnelsats app:
-    ```bash
-    docker compose up --build tunnelsats
-    ```
-4. Check the logs for successful mock discovery of the LND container IPs:
-    ```bash
-    docker logs tunnelsats
-    ```
+## Local Test Workflow
+
+Backend unit tests:
+
+```bash
+./scripts/run-unit-tests.sh -v
+```
+
+Frontend tests:
+
+```bash
+cd web && npm test
+```
+
+End-to-end dataplane scenarios:
+
+```bash
+./scripts/e2e-tests.sh
+```
+
+### E2E Scenarios
+
+- `happy_lnd`
+- `happy_cln`
+- `manual_reconcile`
+- `drift_restart`
+- `inbound_reachability`
+- `missing_socket`
+- `missing_config`
+- `shutdown_cleanup`
+
+## Troubleshooting
+
+- Check `GET /api/local/status` first.
+- If `rules_synced` is `false`, inspect `last_error`.
+- Trigger immediate repair:
+
+```bash
+curl -X POST http://127.0.0.1:9739/api/local/reconcile
+```
+
+- Force full restart path:
+
+```bash
+curl -X POST http://127.0.0.1:9739/api/local/restart
+```
 
 ## App Store Deployment
-This repository is pre-configured with the required `umbrel-app.yml` manifest to adhere to the official [Umbrel App Store guidelines](https://github.com/getumbrel/umbrel-apps/blob/master/README.md).
+
+This repository contains `umbrel-app.yml` for Umbrel app store compatibility.

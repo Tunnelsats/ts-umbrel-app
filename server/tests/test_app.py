@@ -8,6 +8,7 @@ import stat
 import tempfile
 from unittest.mock import patch, MagicMock
 from app import app
+import app as app_module
 
 # --- Fixtures ---
 
@@ -296,3 +297,125 @@ class TestRenewEndpoint:
         call_kwargs = mock_post.call_args.kwargs
         assert call_kwargs['json']['serverId'] == 'new-server'
         assert call_kwargs['json']['wgPublicKey'] == 'newkey'
+
+
+class TestDataplaneAndRegressionFixes:
+    def test_proxyfix_blocks_forwarded_public_ip(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': '127.0.0.1',
+            'HTTP_X_FORWARDED_FOR': '8.8.8.8'
+        })
+        assert res.status_code == 403
+
+    def test_upload_config_renames_old_conf_but_not_imported_conf(self, client, data_dir):
+        old_conf = data_dir / 'tunnelsats-old.conf'
+        old_conf.write_text('[Interface]\nPrivateKey=old\n')
+        imported_conf = data_dir / 'tunnelsats-imported.conf'
+        imported_conf.write_text('[Interface]\nPrivateKey=old-imported\n')
+
+        res = client.post('/api/local/upload-config', data={
+            'config_text': '[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n'
+        })
+        assert res.status_code == 200
+        assert os.path.exists(str(old_conf) + '.bak')
+        assert not os.path.exists(old_conf)
+        assert not os.path.exists(str(imported_conf) + '.bak')
+        assert imported_conf.read_text() == '[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n'
+
+    def test_local_status_includes_manifest_version_and_dataplane_defaults(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manifest_path = os.path.join(tmp_dir, 'umbrel-app.yml')
+            with open(manifest_path, 'w') as f:
+                f.write('version: "9.1.2"\n')
+
+            with patch('app.APP_MANIFEST_PATH', manifest_path):
+                with patch('app.STATE_FILE', os.path.join(tmp_dir, 'missing-state.json')):
+                    res = client.get('/api/local/status')
+
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['version'] == 'v9.1.2'
+        assert data['dataplane_mode'] == 'docker-full-parity'
+        assert data['docker_network']['name'] == 'docker-tunnelsats'
+        assert data['rules_synced'] is False
+        assert data['last_error'] is None
+
+    def test_reconcile_endpoint_creates_trigger_and_status_transitions(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trigger_dir = os.path.join(tmp_dir, 'triggers')
+            result_dir = os.path.join(tmp_dir, 'results')
+            legacy_result = os.path.join(tmp_dir, 'legacy.json')
+            with patch('app.RECONCILE_TRIGGER_DIR', trigger_dir):
+                with patch('app.RECONCILE_RESULT_DIR', result_dir):
+                    with patch('app.RECONCILE_RESULT_LEGACY', legacy_result):
+                        trigger_res = client.post('/api/local/reconcile')
+                        assert trigger_res.status_code == 202
+                        trigger_payload = json.loads(trigger_res.data)
+                        request_id = trigger_payload['request_id']
+                        assert trigger_payload['accepted'] is True
+                        assert request_id
+
+                        trigger_path = os.path.join(trigger_dir, f'{request_id}.trigger')
+                        assert os.path.exists(trigger_path)
+
+                        pending = client.get(f'/api/local/reconcile/{request_id}')
+                        assert pending.status_code == 202
+                        pending_payload = json.loads(pending.data)
+                        assert pending_payload['complete'] is False
+
+                        os.makedirs(result_dir, exist_ok=True)
+                        with open(os.path.join(result_dir, f'{request_id}.json'), 'w') as f:
+                            json.dump({'request_id': request_id, 'changed': True, 'state': {'rules_synced': True}}, f)
+
+                        complete = client.get(f'/api/local/reconcile/{request_id}')
+                        assert complete.status_code == 200
+                        complete_payload = json.loads(complete.data)
+                        assert complete_payload['complete'] is True
+                        assert complete_payload['changed'] is True
+
+    def test_restore_node_comments_expected_lines(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(lnd_path, 'w') as f:
+                f.write(
+                    '[Application Options]\n'
+                    'externalhosts=vpn.tunnelsats.com:9735\n'
+                    '# externalhosts=already-commented\n'
+                    'tor.skip-proxy-for-clearnet-targets=true\n'
+                )
+
+            with open(cln_path, 'w') as f:
+                f.write(
+                    'foo=bar\n'
+                    'bind-addr=0.0.0.0:9735\n'
+                    'announce-addr=vpn.tunnelsats.com:9735\n'
+                    'always-use-proxy=false\n'
+                    '# bind-addr=already-commented\n'
+                )
+
+            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    res = client.post('/api/local/restore-node')
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload == {'lnd': True, 'cln': True}
+
+            with open(lnd_path, 'r') as f:
+                lnd_content = f.read()
+            assert '# externalhosts=vpn.tunnelsats.com:9735\n' in lnd_content
+            assert '# tor.skip-proxy-for-clearnet-targets=true\n' in lnd_content
+            assert '# # externalhosts=already-commented' not in lnd_content
+
+            with open(cln_path, 'r') as f:
+                cln_content = f.read()
+            assert '# bind-addr=0.0.0.0:9735\n' in cln_content
+            assert '# announce-addr=vpn.tunnelsats.com:9735\n' in cln_content
+            assert '# always-use-proxy=false\n' in cln_content
+            assert '# # bind-addr=already-commented' not in cln_content
+
+    def test_restore_node_route_declared_once(self):
+        rules = [rule for rule in app_module.app.url_map.iter_rules() if rule.rule == '/api/local/restore-node']
+        assert len(rules) == 1

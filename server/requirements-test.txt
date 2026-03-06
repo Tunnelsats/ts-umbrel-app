@@ -3,3 +3,4 @@ responses
 flask
 requests
 werkzeug
+PyYAML
