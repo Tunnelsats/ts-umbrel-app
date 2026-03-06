@@ -213,7 +213,7 @@ def renew_subscription():
                     payload["serverId"] = meta["serverId"]
                 if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
                     payload["wgPublicKey"] = meta["wgPublicKey"]
-        except Exception as e:
+        except (IOError, json.JSONDecodeError) as e:
             app.logger.warning(f"Failed to read metadata for renew autofill: {e}")
             
     return proxy_request('POST', 'subscription/renew', payload)

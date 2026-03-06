@@ -23,9 +23,13 @@ function switchTab(tabId) {
 
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
-            if (data.serverId) document.getElementById('renew-server').value = data.serverId;
-            if (data.wgPublicKey) document.getElementById('renew-pubkey').value = data.wgPublicKey;
-        }).catch(e => console.error("Could not load metadata for renew:", e));
+            document.getElementById('renew-server').value = data.serverId || 'Not found';
+            document.getElementById('renew-pubkey').value = data.wgPublicKey || 'Not found';
+        }).catch(e => {
+            console.error("Could not load metadata for renew:", e);
+            document.getElementById('renew-server').value = 'Error loading';
+            document.getElementById('renew-pubkey').value = 'Error loading';
+        });
     }
 }
 
@@ -171,8 +175,17 @@ async function createSub(mode) {
             endpoint = '/api/subscription/renew';
             const wgPublicKey = document.getElementById('renew-pubkey').value;
             const renewServerId = document.getElementById('renew-server').value;
-            payload = { duration, wgPublicKey, serverId: renewServerId };
-            if (!wgPublicKey || wgPublicKey === "Not found") {
+            
+            payload = { duration };
+            // Avoid sending placeholders so backend autofill can kick in if needed
+            if (wgPublicKey && wgPublicKey !== 'Not found' && wgPublicKey !== 'Error loading') {
+                payload.wgPublicKey = wgPublicKey;
+            }
+            if (renewServerId && renewServerId !== 'Not found' && renewServerId !== 'Error loading') {
+                payload.serverId = renewServerId;
+            }
+
+            if (!payload.wgPublicKey) {
                 displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
                 document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
                 document.getElementById(`btn-create-${mode}`).disabled = false;
