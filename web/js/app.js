@@ -91,7 +91,7 @@ async function fetchServers() {
             let btn = document.createElement('button');
             btn.type = 'button';
             const label = `${s.flag} ${s.country} — ${s.city}`;
-            btn.setAttribute('onclick', `selectOption('buy-server', '${s.id}', '${label}')`);
+            btn.addEventListener('click', () => selectOption('buy-server', s.id, label));
             btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
             btn.innerText = label;
             selBuyList.appendChild(btn);
@@ -215,13 +215,9 @@ async function pollPayment() {
             invoiceBox.innerHTML = ''; // Clear content
 
             if (purchaseMode === 'buy') {
-                // Celebration SVG
-                const celebrationSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                celebrationSvg.setAttribute('viewBox', '0 0 120 120');
-                celebrationSvg.setAttribute('width', '80');
-                celebrationSvg.setAttribute('height', '80');
-                celebrationSvg.classList.add('mx-auto', 'mb-4');
-                celebrationSvg.innerHTML = `
+                // Celebration SVG (safely parsed to avoid innerHTML AST warnings)
+                const svgString = `
+                <svg viewBox="0 0 120 120" width="80" height="80" class="mx-auto mb-4">
                     <circle cx="60" cy="60" r="50" fill="none" stroke="#22c55e" stroke-width="4" opacity="0.3">
                         <animate attributeName="r" from="20" to="55" dur="1s" repeatCount="indefinite"/>
                         <animate attributeName="opacity" from="0.6" to="0" dur="1s" repeatCount="indefinite"/>
@@ -233,7 +229,10 @@ async function pollPayment() {
                     <circle cx="30" cy="30" r="3" fill="#facc15"><animate attributeName="cy" from="30" to="10" dur="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="0.8s" repeatCount="indefinite"/></circle>
                     <circle cx="90" cy="35" r="2" fill="#22c55e"><animate attributeName="cy" from="35" to="15" dur="1s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="1s" repeatCount="indefinite"/></circle>
                     <circle cx="75" cy="25" r="2" fill="#facc15"><animate attributeName="cy" from="25" to="5" dur="0.7s" repeatCount="indefinite"/><animate attributeName="opacity" from="1" to="0" dur="0.7s" repeatCount="indefinite"/></circle>
-                `;
+                </svg>`;
+
+                const parser = new DOMParser();
+                const celebrationSvg = parser.parseFromString(svgString, 'image/svg+xml').documentElement;
 
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center mb-2';
@@ -404,12 +403,17 @@ async function copyInvoice(mode) {
         // Visual feedback: swap icon to checkmark
         const icon = document.getElementById(`copy-icon-${mode}`);
         if (icon) {
-            const origPath = icon.innerHTML;
-            icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
+            const copyPath = icon.firstElementChild;
+            const checkPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            checkPath.setAttribute('stroke-linecap', 'round');
+            checkPath.setAttribute('stroke-linejoin', 'round');
+            checkPath.setAttribute('stroke-width', '2');
+            checkPath.setAttribute('d', 'M5 13l4 4L19 7');
+            icon.replaceChild(checkPath, copyPath);
             icon.classList.remove('text-gray-400');
             icon.classList.add('text-tsgreen');
             setTimeout(() => {
-                icon.innerHTML = origPath;
+                icon.replaceChild(copyPath, checkPath);
                 icon.classList.remove('text-tsgreen');
                 icon.classList.add('text-gray-400');
             }, 2000);
