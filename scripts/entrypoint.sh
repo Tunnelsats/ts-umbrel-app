@@ -49,7 +49,10 @@ reconcile_result_path() {
 }
 
 write_state() {
-    jq -n \
+    local tmp
+    tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+
+    if jq -n \
         --arg dataplane_mode "docker-full-parity" \
         --arg target_container "${TARGET_CONTAINER_NAME:-}" \
         --arg target_ip "${DOCKER_TARGET_IP:-}" \
@@ -75,7 +78,12 @@ write_state() {
                 subnet: $docker_network_subnet,
                 bridge: $bridge_name
             }
-        }' > "${STATE_FILE}"
+        }' > "${tmp}"; then
+        mv -f "${tmp}" "${STATE_FILE}"
+    else
+        rm -f "${tmp}"
+        return 1
+    fi
 }
 
 docker_api() {
@@ -506,7 +514,6 @@ reconcile_once() {
     fi
 
     if ! ensure_container_attached; then
-        LAST_ERROR="Failed to attach lightning container to docker-tunnelsats"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false

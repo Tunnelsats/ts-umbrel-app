@@ -136,6 +136,12 @@ class TestClaimSavesConfig:
         assert 'wgPublicKey' in meta
         assert 'claimedAt' in meta
 
+    def test_parse_config_comments_accepts_space_separated_vpnport(self):
+        parsed = app_module._parse_config_comments(
+            "# VPNPort 35825\n[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n"
+        )
+        assert parsed["vpnPort"] == 35825
+
     @patch('app.requests.post', side_effect=_mock_claim_post)
     def test_claim_files_have_chmod_600(self, mock_post, client, data_dir):
         """Both .conf and meta.json must have 600 permissions."""
@@ -416,7 +422,10 @@ class TestDataplaneAndRegressionFixes:
 
             assert res.status_code == 200
             payload = json.loads(res.data)
-            assert payload == {'lnd': True, 'cln': True}
+            assert payload['lnd'] is True
+            assert payload['cln'] is True
+            assert payload['lnd_changed'] is True
+            assert payload['cln_changed'] is True
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
@@ -430,6 +439,28 @@ class TestDataplaneAndRegressionFixes:
             assert '# announce-addr=vpn.tunnelsats.com:9735\n' in cln_content
             assert '# always-use-proxy=false\n' in cln_content
             assert '# # bind-addr=already-commented' not in cln_content
+
+    def test_restore_node_reports_processed_without_changes(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(lnd_path, 'w') as f:
+                f.write('[Application Options]\nfoo=bar\n')
+
+            with open(cln_path, 'w') as f:
+                f.write('foo=bar\n')
+
+            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    res = client.post('/api/local/restore-node')
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['lnd'] is True
+            assert payload['cln'] is True
+            assert payload['lnd_changed'] is False
+            assert payload['cln_changed'] is False
 
     def test_restore_node_route_declared_once(self):
         rules = [rule for rule in app_module.app.url_map.iter_rules() if rule.rule == '/api/local/restore-node']

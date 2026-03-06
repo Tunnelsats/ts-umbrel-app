@@ -101,14 +101,14 @@ def backup_existing_wireguard_configs(excluded_files=None):
 
 def comment_out_config_lines(path, prefixes):
     if not os.path.exists(path):
-        return False
+        return False, False
 
     try:
         with open(path, "r", encoding="utf-8") as conf_fp:
             lines = conf_fp.readlines()
     except (IOError, OSError) as exc:
         app.logger.warning(f"Error reading {path} for restore: {exc}")
-        return False
+        return False, False
 
     changed = False
     updated_lines = []
@@ -125,14 +125,29 @@ def comment_out_config_lines(path, prefixes):
             updated_lines.append(line)
 
     if changed:
+        file_mode = None
         try:
-            with open(path, "w", encoding="utf-8") as conf_fp:
+            file_mode = os.stat(path).st_mode & 0o777
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error reading file mode for {path}: {exc}")
+
+        tmp_path = os.path.join(os.path.dirname(path) or ".", f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as conf_fp:
                 conf_fp.writelines(updated_lines)
+            if file_mode is not None:
+                os.chmod(tmp_path, file_mode)
+            os.replace(tmp_path, path)
         except (IOError, OSError) as exc:
             app.logger.warning(f"Error writing {path} for restore: {exc}")
-            return False
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False, False
 
-    return True
+    return True, changed
 
 
 def _parse_config_comments(config_text):
@@ -141,7 +156,7 @@ def _parse_config_comments(config_text):
         line = line.strip()
         if match := re.match(r"^#\s*Port Forwarding:\s*(\d+)", line):
             meta["vpnPort"] = int(match.group(1))
-        elif match := re.match(r"^#\s*VPNPort\s*[:=]\s*(\d+)", line):
+        elif match := re.match(r"^#\s*VPNPort\s*(?:[:=]\s*|\s+)(\d+)", line):
             meta["vpnPort"] = int(match.group(1))
         elif match := re.match(r"^#\s*Server:\s*(.+)", line):
             meta["serverDomain"] = match.group(1).strip()
@@ -561,14 +576,14 @@ def get_metadata():
 
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
-    lnd_success = comment_out_config_lines(
+    lnd_processed, lnd_changed = comment_out_config_lines(
         LND_TUNNELSATS_CONF_PATH,
         (
             "externalhosts=",
             "tor.skip-proxy-for-clearnet-targets=",
         ),
     )
-    cln_success = comment_out_config_lines(
+    cln_processed, cln_changed = comment_out_config_lines(
         CLN_CONFIG_PATH,
         (
             "bind-addr=",
@@ -577,7 +592,14 @@ def restore_node():
         ),
     )
 
-    return jsonify({"lnd": lnd_success, "cln": cln_success})
+    return jsonify(
+        {
+            "lnd": lnd_processed,
+            "cln": cln_processed,
+            "lnd_changed": lnd_changed,
+            "cln_changed": cln_changed,
+        }
+    )
 
 
 if __name__ == "__main__":

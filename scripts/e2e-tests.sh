@@ -3,6 +3,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:9739}"
 COMPOSE_TEST_FILE="docker-compose.test.yml"
+TUNNELSATS_IMAGE="${TUNNELSATS_IMAGE:-tunnelsats/umbrel-app:v3.0.0}"
 
 log() {
   printf '[e2e] %s\n' "$*"
@@ -140,7 +141,7 @@ scenario_missing_socket() {
   docker run --rm --name tunnelsats-no-sock \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     -v "$(pwd)/data:/data" \
-    tunnelsats/umbrel-app:v3.0.0 sh -lc '\
+    "${TUNNELSATS_IMAGE}" sh -lc '\
       /app/scripts/entrypoint.sh & \
       pid=$!; \
       sleep 8; \
@@ -159,7 +160,7 @@ scenario_missing_config() {
     --cap-add NET_ADMIN --cap-add NET_RAW \
     -v "${temp_data}:/data" \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
-    tunnelsats/umbrel-app:v3.0.0 sh -lc '\
+    "${TUNNELSATS_IMAGE}" sh -lc '\
       /app/scripts/entrypoint.sh & \
       pid=$!; \
       sleep 8; \
