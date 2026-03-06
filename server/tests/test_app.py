@@ -218,3 +218,54 @@ class TestMetaEndpoint:
         data = json.loads(res.data)
         assert data['serverId'] == 'eu-de'
         assert data['vpnPort'] == 35825
+
+# --- Phase 2: Renew Endpoint Test ---
+
+class TestRenewEndpoint:
+    """Test that /api/subscription/renew autofills missing data from metadata."""
+
+    @patch('app.requests.post')
+    def test_renew_autofills_missing_fields_from_metadata(self, mock_post, client, data_dir):
+        # Create metadata
+        meta = {"serverId": "au-syd", "wgPublicKey": "pubkey123"}
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"success": true}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        # Send renew request with duration only, missing serverId and wgPublicKey
+        res = client.post('/api/subscription/renew', json={'duration': 3})
+        assert res.status_code == 200
+        
+        # Verify proxy_request was called with the autofilled payload
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs['json']['duration'] == 3
+        assert call_kwargs['json']['serverId'] == 'au-syd'
+        assert call_kwargs['json']['wgPublicKey'] == 'pubkey123'
+
+    @patch('app.requests.post')
+    def test_renew_does_not_override_provided_fields(self, mock_post, client, data_dir):
+        meta = {"serverId": "au-syd", "wgPublicKey": "oldkey123"}
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"success": true}'
+        mock_post.return_value = mock_resp
+
+        # Send renew request with explicit explicit data
+        res = client.post('/api/subscription/renew', json={'duration': 1, 'serverId': 'new-server', 'wgPublicKey': 'newkey'})
+        assert res.status_code == 200
+        
+        # Should use provided data, not autofilled from meta
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs['json']['serverId'] == 'new-server'
+        assert call_kwargs['json']['wgPublicKey'] == 'newkey'

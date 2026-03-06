@@ -20,6 +20,13 @@ function switchTab(tabId) {
     const btn = document.getElementById(`nav-${tabId}`);
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
+
+    if (tabId === 'renew') {
+        fetch('/api/local/meta').then(r => r.json()).then(data => {
+            if (data.serverId) document.getElementById('renew-server').value = data.serverId;
+            if (data.wgPublicKey) document.getElementById('renew-pubkey').value = data.wgPublicKey;
+        }).catch(e => console.error("Could not load metadata for renew:", e));
+    }
 }
 
 // 1. Fetch Local Status
@@ -45,8 +52,7 @@ async function fetchStatus() {
         const pk = data.wg_pubkey || "Not available";
         document.getElementById('txt-pubkey').innerText = pk;
 
-        // Setup pubkey for renewal
-        document.getElementById('renew-pubkey').value = pk;
+        // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.
 
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;

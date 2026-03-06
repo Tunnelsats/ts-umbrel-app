@@ -203,7 +203,20 @@ def claim_subscription():
 
 @app.route("/api/subscription/renew", methods=["POST"])
 def renew_subscription():
-    return proxy_request('POST', 'subscription/renew', request.json)
+    payload = dict(request.json or {})
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+                if not payload.get("serverId") and "serverId" in meta:
+                    payload["serverId"] = meta["serverId"]
+                if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
+                    payload["wgPublicKey"] = meta["wgPublicKey"]
+        except Exception as e:
+            app.logger.warning(f"Failed to read metadata for renew autofill: {e}")
+            
+    return proxy_request('POST', 'subscription/renew', payload)
 
 # --- LOCAL APP ROUTES ---
 

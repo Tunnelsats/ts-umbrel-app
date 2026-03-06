@@ -233,3 +233,55 @@ describe('Phase 1: createSub generates invoice', () => {
         expect(window.activePaymentHash).toBe('hash-xyz-123');
     });
 });
+
+describe('Phase 2: Renew Flow', () => {
+    beforeEach(() => {
+        setupDOM();
+        global.fetch = jest.fn((url, options) => {
+            if (url === '/api/local/meta') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ serverId: 'ch-zrh', wgPublicKey: 'pubkey789' }),
+                    ok: true
+                });
+            }
+            if (url === '/api/subscription/renew') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        paymentHash: 'renew-hash-123',
+                        invoice: 'lnbcrenewtest',
+                        amount_sats: 500
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+        evalScript();
+    });
+
+    afterEach(() => { jest.restoreAllMocks(); });
+
+    test('switchTab to renew auto-fills pubkey and server', async () => {
+        window.switchTab('renew');
+        // Wait for microtasks to finish so fetch callback resolves
+        await new Promise(process.nextTick); 
+        
+        expect(document.getElementById('renew-server').value).toBe('ch-zrh');
+        expect(document.getElementById('renew-pubkey').value).toBe('pubkey789');
+    });
+
+    test('createSub renew displays invoice and qr', async () => {
+        window.activePaymentHash = null;
+        if (window.pollInterval) clearInterval(window.pollInterval);
+
+        // trigger the renew payload
+        await window.createSub('renew');
+
+        const invoiceBox = document.getElementById('invoice-box-renew');
+        expect(invoiceBox.classList.contains('hidden')).toBe(false);
+        const bolt11 = document.getElementById('invoice-bolt11-renew');
+        expect(bolt11.value).toBe('lnbcrenewtest');
+        expect(window.activePaymentHash).toBe('renew-hash-123');
+    });
+});
