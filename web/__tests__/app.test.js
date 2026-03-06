@@ -275,6 +275,10 @@ describe('Phase 2: Renew Flow', () => {
         window.activePaymentHash = null;
         if (window.pollInterval) clearInterval(window.pollInterval);
 
+        // Pre-fill the form by simulating a tab switch so validation passes
+        window.switchTab('renew');
+        await new Promise(process.nextTick);
+
         // trigger the renew payload
         await window.createSub('renew');
 
