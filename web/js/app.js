@@ -173,7 +173,7 @@ async function createSub(mode) {
             const renewServerId = document.getElementById('renew-server').value;
             payload = { duration, wgPublicKey, serverId: renewServerId };
             if (!wgPublicKey || wgPublicKey === "Not found") {
-                displayPurchaseError("Cannot renew without an active public key from a connected VPN.");
+                displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
                 document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
                 document.getElementById(`btn-create-${mode}`).disabled = false;
                 return;
