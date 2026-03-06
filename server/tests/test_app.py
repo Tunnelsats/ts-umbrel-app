@@ -218,3 +218,81 @@ class TestMetaEndpoint:
         data = json.loads(res.data)
         assert data['serverId'] == 'eu-de'
         assert data['vpnPort'] == 35825
+
+    def test_meta_drops_sensitive_secrets(self, client, data_dir):
+        meta = {
+            "serverId": "eu-de",
+            "presharedKey": "SuperSecretXYZ",
+            "paymentHash": "hash12345"
+        }
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        res = client.get('/api/local/meta')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['serverId'] == 'eu-de'
+        assert 'presharedKey' not in data
+        assert 'paymentHash' not in data
+
+# --- Phase 2: Renew Endpoint Test ---
+
+class TestRenewEndpoint:
+    """Test that /api/subscription/renew autofills missing data from metadata."""
+
+    @patch('app.requests.post')
+    def test_renew_autofills_missing_fields_from_metadata(self, mock_post, client, data_dir):
+        # Create metadata
+        meta = {"serverId": "au-syd", "wgPublicKey": "pubkey123"}
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"success": true}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        # Send renew request with duration only, missing serverId and wgPublicKey
+        res = client.post('/api/subscription/renew', json={'duration': 3})
+        assert res.status_code == 200
+        
+        # Verify proxy_request was called with the autofilled payload
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs['json']['duration'] == 3
+        assert call_kwargs['json']['wgPublicKey'] == 'pubkey123'
+
+    def test_renew_rejects_external_ip(self):
+        # We need to manually invoke the proxy fix app structure to test the before_request
+        from app import app
+        with app.test_client() as client:
+            res = client.post(
+                '/api/subscription/renew',
+                json={'duration': 3},
+                environ_base={'REMOTE_ADDR': '203.0.113.1'} # External IP
+            )
+            assert res.status_code == 403
+
+    @patch('app.requests.post')
+    def test_renew_does_not_override_provided_fields(self, mock_post, client, data_dir):
+        meta = {"serverId": "au-syd", "wgPublicKey": "oldkey123"}
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"success": true}'
+        mock_post.return_value = mock_resp
+
+        # Send renew request with explicit explicit data
+        res = client.post('/api/subscription/renew', json={'duration': 1, 'serverId': 'new-server', 'wgPublicKey': 'newkey'})
+        assert res.status_code == 200
+        
+        # Should use provided data, not autofilled from meta
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs['json']['serverId'] == 'new-server'
+        assert call_kwargs['json']['wgPublicKey'] == 'newkey'

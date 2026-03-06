@@ -31,7 +31,7 @@ ALLOWED_NETWORKS = [
 
 @app.before_request
 def restrict_local_api():
-    if request.path.startswith('/api/local/'):
+    if request.path.startswith('/api/local/') or request.path == '/api/subscription/renew':
         remote_addr = request.remote_addr
         if remote_addr:
             try:
@@ -203,7 +203,20 @@ def claim_subscription():
 
 @app.route("/api/subscription/renew", methods=["POST"])
 def renew_subscription():
-    return proxy_request('POST', 'subscription/renew', request.json)
+    payload = dict(request.json or {})
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+                if not payload.get("serverId") and "serverId" in meta:
+                    payload["serverId"] = meta["serverId"]
+                if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
+                    payload["wgPublicKey"] = meta["wgPublicKey"]
+        except (IOError, json.JSONDecodeError) as e:
+            app.logger.warning(f"Failed to read metadata for renew autofill: {e}")
+            
+    return proxy_request('POST', 'subscription/renew', payload)
 
 # --- LOCAL APP ROUTES ---
 
@@ -303,6 +316,9 @@ def get_metadata():
         try:
             with open(meta_path) as f:
                 meta_data = json.load(f)
+                # Strip sensitive secrets before returning to untrusted LAN client
+                meta_data.pop('presharedKey', None)
+                meta_data.pop('paymentHash', None)
         except (json.JSONDecodeError, IOError) as e:
             app.logger.error(f"Error reading metadata file {meta_path}: {e}")
     return jsonify(meta_data)

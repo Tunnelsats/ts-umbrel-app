@@ -20,6 +20,17 @@ function switchTab(tabId) {
     const btn = document.getElementById(`nav-${tabId}`);
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
+
+    if (tabId === 'renew') {
+        fetch('/api/local/meta').then(r => r.json()).then(data => {
+            document.getElementById('renew-server').value = data.serverId || 'Not found';
+            document.getElementById('renew-pubkey').value = data.wgPublicKey || 'Not found';
+        }).catch(e => {
+            console.error("Could not load metadata for renew:", e);
+            document.getElementById('renew-server').value = 'Error loading';
+            document.getElementById('renew-pubkey').value = 'Error loading';
+        });
+    }
 }
 
 // 1. Fetch Local Status
@@ -45,8 +56,7 @@ async function fetchStatus() {
         const pk = data.wg_pubkey || "Not available";
         document.getElementById('txt-pubkey').innerText = pk;
 
-        // Setup pubkey for renewal
-        document.getElementById('renew-pubkey').value = pk;
+        // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.
 
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
@@ -164,9 +174,19 @@ async function createSub(mode) {
         if (mode === 'renew') {
             endpoint = '/api/subscription/renew';
             const wgPublicKey = document.getElementById('renew-pubkey').value;
-            payload = { duration, wgPublicKey };
-            if (!wgPublicKey || wgPublicKey === "Not available") {
-                displayPurchaseError("Cannot renew without an active public key from a connected VPN.");
+            const renewServerId = document.getElementById('renew-server').value;
+            
+            payload = { duration };
+            // Avoid sending placeholders so backend autofill can kick in if needed
+            if (wgPublicKey && wgPublicKey !== 'Not found' && wgPublicKey !== 'Error loading') {
+                payload.wgPublicKey = wgPublicKey;
+            }
+            if (renewServerId && renewServerId !== 'Not found' && renewServerId !== 'Error loading') {
+                payload.serverId = renewServerId;
+            }
+
+            if (!payload.wgPublicKey) {
+                displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
                 document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
                 document.getElementById(`btn-create-${mode}`).disabled = false;
                 return;
