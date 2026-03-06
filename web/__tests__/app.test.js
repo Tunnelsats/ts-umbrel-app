@@ -73,10 +73,12 @@ describe('Phase 1: fetchServers', () => {
             // /api/servers mock
             if (url === '/api/servers') {
                 return Promise.resolve({
-                    json: () => Promise.resolve([
-                        { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' },
-                        { id: 'us-east', country: 'USA', city: 'Ashburn', flag: '🇺🇸', status: 'online' }
-                    ]),
+                    json: () => Promise.resolve({
+                        servers: [
+                            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' },
+                            { id: 'us-east', country: 'USA', city: 'Ashburn', flag: '🇺🇸', status: 'online' }
+                        ]
+                    }),
                     ok: true
                 });
             }
@@ -126,7 +128,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
             }
             if (url === '/api/servers') {
                 return Promise.resolve({
-                    json: () => Promise.resolve([]),
+                    json: () => Promise.resolve({ servers: [] }),
                     ok: true
                 });
             }
@@ -181,9 +183,11 @@ describe('Phase 1: createSub generates invoice', () => {
             }
             if (url === '/api/servers') {
                 return Promise.resolve({
-                    json: () => Promise.resolve([
-                        { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' }
-                    ]),
+                    json: () => Promise.resolve({
+                        servers: [
+                            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' }
+                        ]
+                    }),
                     ok: true
                 });
             }
