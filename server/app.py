@@ -6,6 +6,7 @@ import logging
 import yaml
 import json
 import stat
+import re
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 from flask import Flask, request, jsonify, send_from_directory, abort
@@ -107,45 +108,34 @@ def check_subscription(paymentHash):
 
 def _parse_config_comments(config_text):
     """Extract metadata from WireGuard config comments and fields."""
-    import re
     meta = {}
     for line in config_text.split('\n'):
         line = line.strip()
-        # Parse comment-based metadata
-        m = re.match(r'^#\s*Port Forwarding:\s*(\d+)', line)
-        if m:
+        if m := re.match(r'^#\s*Port Forwarding:\s*(\d+)', line):
             meta['vpnPort'] = int(m.group(1))
-        m = re.match(r'^#\s*Server:\s*(.+)', line)
-        if m:
+        elif m := re.match(r'^#\s*Server:\s*(.+)', line):
             meta['serverDomain'] = m.group(1).strip()
-        m = re.match(r'^#\s*myPubKey:\s*(.+)', line)
-        if m:
+        elif m := re.match(r'^#\s*myPubKey:\s*(.+)', line):
             meta['wgPublicKey'] = m.group(1).strip()
-        m = re.match(r'^#\s*Valid Until:\s*(.+)', line)
-        if m:
+        elif m := re.match(r'^#\s*Valid Until:\s*(.+)', line):
             meta['expiresAt'] = m.group(1).strip()
-        # Parse config fields
-        m = re.match(r'^Endpoint\s*=\s*(.+)', line)
-        if m:
-            meta['wgEndpoint'] = m.group(1).strip()
-            # Also extract domain from endpoint (strip port)
+        elif m := re.match(r'^Endpoint\s*=\s*(.+)', line):
             endpoint_val = m.group(1).strip()
+            meta['wgEndpoint'] = endpoint_val
             if ':' in endpoint_val:
                 meta.setdefault('serverDomain', endpoint_val.rsplit(':', 1)[0])
-        m = re.match(r'^PresharedKey\s*=\s*(.+)', line)
-        if m:
+        elif m := re.match(r'^PresharedKey\s*=\s*(.+)', line):
             meta['presharedKey'] = m.group(1).strip()
-        m = re.match(r'^Address\s*=\s*(.+)', line)
-        if m:
+        elif m := re.match(r'^Address\s*=\s*(.+)', line):
             meta['peerAddress'] = m.group(1).strip()
     return meta
 
 
 def _write_file_secure(path, content):
-    """Write content to a file with chmod 600."""
-    with open(path, 'w') as f:
+    """Write content to a file atomically with chmod 600 (no TOCTOU window)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
         f.write(content)
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
 @app.route("/api/subscription/claim", methods=["POST"])
@@ -155,7 +145,10 @@ def claim_subscription():
     try:
         resp = requests.post(url, json=request.json, headers={"Content-Type": "application/json"}, timeout=10)
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
             if "fullConfig" in data:
                 # Ensure DATA_DIR exists
                 if not os.path.exists(DATA_DIR):
@@ -167,13 +160,13 @@ def claim_subscription():
                         try:
                             old_path = os.path.join(DATA_DIR, f_name)
                             os.rename(old_path, old_path + ".bak")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            app.logger.warning(f"Failed to rename old config {f_name}: {e}")
 
                 # Extract serverId from subscription or fallback
                 server_id = "unknown"
                 if "subscription" in data:
-                    server_id = data["subscription"].get("serverId", "unknown")
+                    server_id = secure_filename(data["subscription"].get("serverId", "unknown")) or "unknown"
 
                 # Write config file (chmod 600)
                 full_config = data["fullConfig"]
@@ -304,14 +297,15 @@ def restart_tunnel():
 @app.route("/api/local/meta", methods=["GET"])
 def get_metadata():
     """Return stored subscription metadata, or empty object if none."""
+    meta_data = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
-                return jsonify(json.load(f))
-        except (json.JSONDecodeError, IOError):
-            return jsonify({})
-    return jsonify({})
+                meta_data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            app.logger.error(f"Error reading metadata file {meta_path}: {e}")
+    return jsonify(meta_data)
 
 # NOTE: configure-node and restore-node endpoints moved to PR #3 (dataplane layer).
 # They will be re-introduced when the infra PR is merged.
