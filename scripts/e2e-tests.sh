@@ -148,7 +148,7 @@ scenario_missing_socket() {
     "${TUNNELSATS_IMAGE}" sh -lc '\
       /app/scripts/entrypoint.sh & \
       pid=$!; \
-      sleep 8; \
+      wait_for_status 30 || true; \
       status=$(curl -fsS http://127.0.0.1:9739/api/local/status || true); \
       echo "$status"; \
       echo "$status" | jq -e ".last_error | test(\"Docker socket\")" >/dev/null || exit 1; \
