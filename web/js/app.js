@@ -252,10 +252,18 @@ function renderQR(mode, text) {
     box.innerHTML = ""; // Clear placeholder
 
     if (mode === 'buy') {
-        if (!qrBuy) qrBuy = new QRCode(box, { width: 192, height: 192 });
+        if (qrBuy) {
+            qrBuy.clear();
+        } else {
+            qrBuy = new QRCode(box, { width: 192, height: 192 });
+        }
         qrBuy.makeCode(text);
     } else {
-        if (!qrRenew) qrRenew = new QRCode(box, { width: 192, height: 192 });
+        if (qrRenew) {
+            qrRenew.clear();
+        } else {
+            qrRenew = new QRCode(box, { width: 192, height: 192 });
+        }
         qrRenew.makeCode(text);
     }
 }
