@@ -494,29 +494,9 @@ def local_status():
 
 @app.route("/api/local/upload-config", methods=["POST"])
 def upload_config():
-    if "config" not in request.files and "config_text" not in request.form:
-        return jsonify({"error": "No config provided"}), 400
+    # TODO: Implement parsing and saving of uploaded config for Phase 3a
+    return jsonify({"error": "Not Implemented"}), 501
 
-    config_data = ""
-    if "config" in request.files:
-        uploaded = request.files["config"]
-        if uploaded.filename == "":
-            return jsonify({"error": "No selected file"}), 400
-        config_data = uploaded.read().decode("utf-8")
-    else:
-        config_data = request.form.get("config_text", "")
-
-    if "[Interface]" not in config_data or "[Peer]" not in config_data:
-        return jsonify({"error": "Invalid WireGuard configuration format"}), 400
-
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        backup_existing_wireguard_configs(excluded_files={"tunnelsats-imported.conf"})
-        config_path = os.path.join(DATA_DIR, "tunnelsats-imported.conf")
-        _write_file_secure(config_path, config_data)
-        return jsonify({"success": True, "message": "Config imported successfully."})
-    except Exception as exc:
-        return jsonify({"error": f"Failed to save config: {str(exc)}"}), 500
 
 
 @app.route("/api/local/restart", methods=["POST"])
