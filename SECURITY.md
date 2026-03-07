@@ -10,7 +10,7 @@ Please use one of the following methods to report a security vulnerability:
 
 * **Email:** Send an email to security at tunnelsats.com .
 * **Telegram:** Join our Telegram channel (link on our homepage, available via Tor and Clearnet) and send a direct message to an administrator.
-* **X (Twitter):** Send a direct message to [@[TunnelSats](https://x.com/TunnelSats)].
+* **X (Twitter):** Send a direct message to [@TunnelSats](https://x.com/TunnelSats).
 * **Nostr:** Send a direct message to [OurNostrPubkey](https://snort.social/p/npub1n9z4y3xjramqes8fp9rl96x5e4nl0hff57ynw7vqnjpq370tq78sljsp8y).
 
 **What to Include in Your Report:**
