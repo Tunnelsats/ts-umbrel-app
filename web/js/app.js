@@ -332,15 +332,9 @@ async function createSub(mode) {
 async function pollPayment() {
     if (!activePaymentHash) return;
 
-    // Check if the current view (buy or renew) is still visible. If not, stop polling.
-    const container = document.getElementById(`view-${purchaseMode}`);
-    if (container && container.classList.contains('hidden')) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        return;
-    }
-    
-    // Don't poll while the page is completely hidden to save resources
+    // Don't poll while the browser tab is completely hidden to save resources.
+    // However, DO keep polling if they just switched to the Dashboard UI tab 
+    // so they still get the success UI when they click back.
     if (document.hidden) return;
 
     try {
