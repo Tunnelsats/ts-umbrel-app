@@ -152,7 +152,12 @@ async function fetchStatus() {
         document.getElementById('txt-target').innerText = targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured";
 
         const fwdPort = data.forwarding_port;
-        document.getElementById('txt-forwarding').innerHTML = `Forwarding Port: <span class="text-white font-mono">${fwdPort || '--'}</span>`;
+        const fwdEl = document.getElementById('txt-forwarding');
+        const fwdSpan = fwdEl ? fwdEl.querySelector('span') : null;
+        if (fwdSpan) {
+            fwdSpan.innerText = fwdPort || '--';
+            fwdSpan.className = fwdPort ? "text-white font-mono" : "text-gray-400 font-mono";
+        }
 
         const badgeRules = document.getElementById('badge-rules');
         if (targetContainer) {
