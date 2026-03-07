@@ -61,7 +61,46 @@ async function fetchStatus() {
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
 
-        // NOTE: LND/CLN IP detection moved to PR #3 (dataplane layer)
+        // --- PR A: Update Dataplane UI ---
+        const targetContainer = data.target_container;
+        const targetIp = data.target_ip;
+        document.getElementById('txt-target').innerText = targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured";
+
+        const fwdPort = data.forwarding_port;
+        document.getElementById('txt-forwarding').innerHTML = `Forwarding Port: <span class="text-white font-mono">${fwdPort || '--'}</span>`;
+
+        const badgeRules = document.getElementById('badge-rules');
+        if (targetContainer) {
+            if (data.rules_synced) {
+                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen";
+                badgeRules.innerText = "Synced";
+            } else {
+                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow";
+                badgeRules.innerText = "Out of Sync";
+            }
+        } else {
+             badgeRules.className = "hidden";
+        }
+
+        const btnRecon = document.getElementById('btn-reconcile');
+        if (targetContainer) {
+            btnRecon.classList.remove('hidden');
+            btnRecon.classList.add('flex');
+        } else {
+             btnRecon.classList.add('hidden');
+             btnRecon.classList.remove('flex');
+        }
+
+        const lastRec = data.last_reconcile_at;
+        document.getElementById('txt-reconcile').innerText = lastRec ? new Date(lastRec).toLocaleString() : "Never";
+
+        const errEl = document.getElementById('txt-error');
+        if (data.last_error) {
+            errEl.classList.remove('hidden');
+            errEl.querySelector('span').innerText = data.last_error;
+        } else {
+            errEl.classList.add('hidden');
+        }
 
         if (data.version) {
             document.getElementById('app-version').innerText = data.version;
@@ -357,6 +396,78 @@ async function claimSubscription(mode) {
             btnInstall.innerText = "Retry Installation";
         }
     }
+}
+
+// 5. Dataplane Reconcile Logic
+let reconcilePollCount = 0;
+const MAX_RECONCILE_POLLS = 30; // Max 1 minute polling (30 * 2000ms)
+
+async function reconcileTunnel() {
+    const btn = document.getElementById('btn-reconcile');
+    const spinner = document.getElementById('reconcile-spinner');
+    const text = document.getElementById('reconcile-text');
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+    text.innerText = "Triggering...";
+
+    try {
+        const res = await fetch('/api/local/reconcile', { method: 'POST' });
+        const data = await res.json();
+
+        if (res.status === 202 && data.request_id) {
+            text.innerText = "Reconciling...";
+            reconcilePollCount = 0;
+            pollReconcileStatus(data.status_url);
+        } else {
+            text.innerText = "Error Triggering";
+            setTimeout(resetReconcileBtn, 3000);
+        }
+    } catch (e) {
+        text.innerText = "Network Error";
+        setTimeout(resetReconcileBtn, 3000);
+    }
+}
+
+async function pollReconcileStatus(url) {
+    if (reconcilePollCount >= MAX_RECONCILE_POLLS) {
+        document.getElementById('reconcile-text').innerText = "Timeout waiting for Dataplane";
+        setTimeout(resetReconcileBtn, 4000);
+        fetchStatus();
+        return;
+    }
+    reconcilePollCount++;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.complete) {
+            if (data.success) {
+                document.getElementById('reconcile-text').innerText = "Success!";
+                setTimeout(resetReconcileBtn, 3000);
+            } else {
+                document.getElementById('reconcile-text').innerText = "Failed";
+                setTimeout(resetReconcileBtn, 3000);
+            }
+            fetchStatus(); // Refresh cards
+        } else {
+            // Still polling
+            setTimeout(() => pollReconcileStatus(url), 2000);
+        }
+    } catch (e) {
+        setTimeout(() => pollReconcileStatus(url), 2000);
+    }
+}
+
+function resetReconcileBtn() {
+    const btn = document.getElementById('btn-reconcile');
+    const spinner = document.getElementById('reconcile-spinner');
+    const text = document.getElementById('reconcile-text');
+    
+    btn.disabled = false;
+    spinner.classList.add('hidden');
+    text.innerText = "Reconcile Now";
 }
 
 // NOTE: configureNode() and restoreNode() moved to PR #3/PR #4 (dataplane + API integration).
