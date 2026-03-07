@@ -89,6 +89,23 @@ function switchTab(tabId) {
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
 
+    // Reset polling and invoice UI when navigating away
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+    activePaymentHash = null;
+    ['buy', 'renew'].forEach(mode => {
+        const box = document.getElementById(`invoice-box-${mode}`);
+        if (box) box.classList.add('hidden');
+        
+        const btnCreate = document.getElementById(`btn-create-${mode}`);
+        if (btnCreate) {
+            btnCreate.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+            btnCreate.disabled = false;
+        }
+    });
+
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
             document.getElementById('renew-server').value = data.serverId || 'Not found';

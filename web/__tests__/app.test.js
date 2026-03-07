@@ -141,14 +141,15 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
     afterEach(() => { jest.restoreAllMocks(); });
 
     test('recognizes "paid" (lowercase) status and clears poll', async () => {
+        // Ensure the purchase mode view is visible so polling doesn't abort
+        // This MUST be called before setting activePaymentHash because switchTab clears it
+        window.switchTab('buy');
+
         // Reset state explicitly
         window.activePaymentHash = 'test-hash-abc';
         window.purchaseMode = 'buy';
         // Ensure no lingering pollInterval
         if (window.pollInterval) clearInterval(window.pollInterval);
-
-        // Ensure the purchase mode view is visible so polling doesn't abort
-        window.switchTab('buy');
 
         // Show the invoice box so pollPayment can modify it
         const invoiceBox = document.getElementById('invoice-box-buy');
