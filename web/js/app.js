@@ -249,12 +249,12 @@ var qrRenew = null;
 function renderQR(mode, text) {
     const boxId = `qr-placeholder-${mode}`;
     const box = document.getElementById(boxId);
-    box.innerHTML = ""; // Clear placeholder
 
     if (mode === 'buy') {
         if (qrBuy) {
             qrBuy.clear();
         } else {
+            box.innerHTML = ""; // Clear loading text placeholder only on first run
             qrBuy = new QRCode(box, { width: 192, height: 192 });
         }
         qrBuy.makeCode(text);
@@ -262,6 +262,7 @@ function renderQR(mode, text) {
         if (qrRenew) {
             qrRenew.clear();
         } else {
+            box.innerHTML = ""; // Clear loading text placeholder only on first run
             qrRenew = new QRCode(box, { width: 192, height: 192 });
         }
         qrRenew.makeCode(text);
