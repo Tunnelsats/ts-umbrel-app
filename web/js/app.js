@@ -2,10 +2,78 @@
 var pollInterval;
 var activePaymentHash = null;
 var purchaseMode = "buy"; // "buy" or "renew"
+
+// Pricing Configuration
+const BASE_PRICE_USD = 3;
+const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
+let currentSatsPerDollar = null;
+
+async function fetchPricing() {
+    try {
+        const res = await fetch('https://mempool.space/api/v1/prices');
+        const data = await res.json();
+        if (data && data.USD) {
+            currentSatsPerDollar = 100000000 / data.USD;
+        }
+    } catch(e) {
+        console.warn("Could not fetch BTC price", e);
+    }
+    renderDurations();
+}
+
+function calculatePrice(months) {
+    const discount = DISCOUNTS[months] || 0;
+    const grossUsd = BASE_PRICE_USD * months;
+    const amountUsd = grossUsd * (1 - discount);
+    
+    let satsStr = "";
+    if (currentSatsPerDollar) {
+        const amountSats = Math.floor(amountUsd * currentSatsPerDollar);
+        satsStr = ` (${amountSats.toLocaleString()} sats)`;
+    }
+    
+    return { amountUsd, satsStr, discount };
+}
+
+function renderDurations() {
+    const durations = [1, 3, 6, 12];
+    const lists = ['buy-duration', 'renew-duration'];
+    
+    lists.forEach(mode => {
+        const listEl = document.getElementById(`${mode}-list`);
+        if (!listEl) return;
+        listEl.innerHTML = "";
+        
+        const currentSelect = document.getElementById(`${mode}-select`);
+        const currentValue = currentSelect ? currentSelect.value : "1";
+        const labelEl = document.getElementById(`${mode}-label`);
+        
+        durations.forEach((months) => {
+            const { amountUsd, satsStr, discount } = calculatePrice(months);
+            const discountPercent = discount * 100;
+            const discountStr = discount > 0 ? ` (${discountPercent}% off)` : "";
+            const monthStr = months === 1 ? "1 Month" : `${months} Months`;
+            const label = `${monthStr}${discountStr} - $${amountUsd.toFixed(2).replace(/\.00$/, '')}${satsStr}`;
+            
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
+            btn.innerText = label;
+            btn.addEventListener('click', () => selectOption(mode, String(months), label));
+            listEl.appendChild(btn);
+            
+            if (String(months) === currentValue && labelEl) {
+                labelEl.innerText = label;
+            }
+        });
+    });
+}
+
 // Initialization
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
+    fetchPricing();
 });
 
 // UI Routing
@@ -263,6 +331,17 @@ async function createSub(mode) {
 
 async function pollPayment() {
     if (!activePaymentHash) return;
+
+    // Check if the current view (buy or renew) is still visible. If not, stop polling.
+    const container = document.getElementById(`view-${purchaseMode}`);
+    if (container && container.classList.contains('hidden')) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+        return;
+    }
+    
+    // Don't poll while the page is completely hidden to save resources
+    if (document.hidden) return;
 
     try {
         const res = await fetch(`/api/subscription/${activePaymentHash}`);

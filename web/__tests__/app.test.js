@@ -12,6 +12,7 @@ function setupDOM() {
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
     }));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
 }
 
 function evalScript() {
@@ -145,6 +146,9 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
         window.purchaseMode = 'buy';
         // Ensure no lingering pollInterval
         if (window.pollInterval) clearInterval(window.pollInterval);
+
+        // Ensure the purchase mode view is visible so polling doesn't abort
+        window.switchTab('buy');
 
         // Show the invoice box so pollPayment can modify it
         const invoiceBox = document.getElementById('invoice-box-buy');
