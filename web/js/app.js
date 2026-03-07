@@ -74,6 +74,12 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
     fetchPricing();
+
+    // Attach programmatic event listeners
+    const btnRecon = document.getElementById('btn-reconcile');
+    if (btnRecon) {
+        btnRecon.addEventListener('click', reconcileTunnel);
+    }
 });
 
 // UI Routing
