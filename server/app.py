@@ -740,6 +740,11 @@ def get_metadata():
     return jsonify(meta_data)
 
 
+@app.route("/api/local/configure-node", methods=["POST"])
+def configure_node():
+    # TODO: Implement reading from meta JSON and modifying LND/CLN config
+    return jsonify({"error": "Not Implemented. See PR_C_SPEC.md."}), 501
+
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
     lnd_processed, lnd_changed = comment_out_config_lines(
