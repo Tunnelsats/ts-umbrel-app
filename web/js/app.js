@@ -2,10 +2,84 @@
 var pollInterval;
 var activePaymentHash = null;
 var purchaseMode = "buy"; // "buy" or "renew"
+
+// Pricing Configuration
+const BASE_PRICE_USD = 3;
+const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
+let currentSatsPerDollar = null;
+
+async function fetchPricing() {
+    try {
+        const res = await fetch('https://mempool.space/api/v1/prices');
+        const data = await res.json();
+        if (data && data.USD) {
+            currentSatsPerDollar = 100000000 / data.USD;
+        }
+    } catch(e) {
+        console.warn("Could not fetch BTC price", e);
+    }
+    renderDurations();
+}
+
+function calculatePrice(months) {
+    const discount = DISCOUNTS[months] || 0;
+    const grossUsd = BASE_PRICE_USD * months;
+    const amountUsd = grossUsd * (1 - discount);
+    
+    let satsStr = "";
+    if (currentSatsPerDollar) {
+        const amountSats = Math.floor(amountUsd * currentSatsPerDollar);
+        satsStr = ` (${amountSats.toLocaleString()} sats)`;
+    }
+    
+    return { amountUsd, satsStr, discount };
+}
+
+function renderDurations() {
+    const durations = [1, 3, 6, 12];
+    const lists = ['buy-duration', 'renew-duration'];
+    
+    lists.forEach(mode => {
+        const listEl = document.getElementById(`${mode}-list`);
+        if (!listEl) return;
+        listEl.innerHTML = "";
+        
+        const currentSelect = document.getElementById(`${mode}-select`);
+        const currentValue = currentSelect ? currentSelect.value : "1";
+        const labelEl = document.getElementById(`${mode}-label`);
+        
+        durations.forEach((months) => {
+            const { amountUsd, satsStr, discount } = calculatePrice(months);
+            const discountPercent = discount * 100;
+            const discountStr = discount > 0 ? ` (${discountPercent}% off)` : "";
+            const monthStr = months === 1 ? "1 Month" : `${months} Months`;
+            const label = `${monthStr}${discountStr} - $${amountUsd.toFixed(2).replace(/\.00$/, '')}${satsStr}`;
+            
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
+            btn.innerText = label;
+            btn.addEventListener('click', () => selectOption(mode, String(months), label));
+            listEl.appendChild(btn);
+            
+            if (String(months) === currentValue && labelEl) {
+                labelEl.innerText = label;
+            }
+        });
+    });
+}
+
 // Initialization
 document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
+    fetchPricing();
+
+    // Attach programmatic event listeners
+    const btnRecon = document.getElementById('btn-reconcile');
+    if (btnRecon) {
+        btnRecon.addEventListener('click', reconcileTunnel);
+    }
 });
 
 // UI Routing
@@ -20,6 +94,23 @@ function switchTab(tabId) {
     const btn = document.getElementById(`nav-${tabId}`);
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
+
+    // Reset polling and invoice UI when navigating away
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+    activePaymentHash = null;
+    ['buy', 'renew'].forEach(mode => {
+        const box = document.getElementById(`invoice-box-${mode}`);
+        if (box) box.classList.add('hidden');
+        
+        const btnCreate = document.getElementById(`btn-create-${mode}`);
+        if (btnCreate) {
+            btnCreate.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+            btnCreate.disabled = false;
+        }
+    });
 
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
@@ -61,7 +152,51 @@ async function fetchStatus() {
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
         document.getElementById('txt-configs').innerText = confs;
 
-        // NOTE: LND/CLN IP detection moved to PR #3 (dataplane layer)
+        // --- PR A: Update Dataplane UI ---
+        const targetContainer = data.target_container;
+        const targetIp = data.target_ip;
+        document.getElementById('txt-target').innerText = targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured";
+
+        const fwdPort = data.forwarding_port;
+        const fwdEl = document.getElementById('txt-forwarding');
+        const fwdSpan = fwdEl ? fwdEl.querySelector('span') : null;
+        if (fwdSpan) {
+            fwdSpan.innerText = fwdPort || '--';
+            fwdSpan.className = fwdPort ? "text-white font-mono" : "text-gray-400 font-mono";
+        }
+
+        const badgeRules = document.getElementById('badge-rules');
+        if (targetContainer) {
+            if (data.rules_synced) {
+                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen";
+                badgeRules.innerText = "Synced";
+            } else {
+                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow";
+                badgeRules.innerText = "Out of Sync";
+            }
+        } else {
+             badgeRules.className = "hidden";
+        }
+
+        const btnRecon = document.getElementById('btn-reconcile');
+        if (targetContainer) {
+            btnRecon.classList.remove('hidden');
+            btnRecon.classList.add('flex');
+        } else {
+             btnRecon.classList.add('hidden');
+             btnRecon.classList.remove('flex');
+        }
+
+        const lastRec = data.last_reconcile_at;
+        document.getElementById('txt-reconcile').innerText = lastRec ? new Date(lastRec).toLocaleString() : "Never";
+
+        const errEl = document.getElementById('txt-error');
+        if (data.last_error) {
+            errEl.classList.remove('hidden');
+            errEl.querySelector('span').innerText = data.last_error;
+        } else {
+            errEl.classList.add('hidden');
+        }
 
         if (data.version) {
             document.getElementById('app-version').innerText = data.version;
@@ -125,13 +260,22 @@ var qrRenew = null;
 function renderQR(mode, text) {
     const boxId = `qr-placeholder-${mode}`;
     const box = document.getElementById(boxId);
-    box.innerHTML = ""; // Clear placeholder
 
     if (mode === 'buy') {
-        if (!qrBuy) qrBuy = new QRCode(box, { width: 192, height: 192 });
+        if (qrBuy) {
+            qrBuy.clear();
+        } else {
+            box.innerHTML = ""; // Clear loading text placeholder only on first run
+            qrBuy = new QRCode(box, { width: 192, height: 192 });
+        }
         qrBuy.makeCode(text);
     } else {
-        if (!qrRenew) qrRenew = new QRCode(box, { width: 192, height: 192 });
+        if (qrRenew) {
+            qrRenew.clear();
+        } else {
+            box.innerHTML = ""; // Clear loading text placeholder only on first run
+            qrRenew = new QRCode(box, { width: 192, height: 192 });
+        }
         qrRenew.makeCode(text);
     }
 }
@@ -224,6 +368,11 @@ async function createSub(mode) {
 
 async function pollPayment() {
     if (!activePaymentHash) return;
+
+    // Don't poll while the browser tab is completely hidden to save resources.
+    // However, DO keep polling if they just switched to the Dashboard UI tab 
+    // so they still get the success UI when they click back.
+    if (document.hidden) return;
 
     try {
         const res = await fetch(`/api/subscription/${activePaymentHash}`);
@@ -357,6 +506,78 @@ async function claimSubscription(mode) {
             btnInstall.innerText = "Retry Installation";
         }
     }
+}
+
+// 5. Dataplane Reconcile Logic
+let reconcilePollCount = 0;
+const MAX_RECONCILE_POLLS = 30; // Max 1 minute polling (30 * 2000ms)
+
+async function reconcileTunnel() {
+    const btn = document.getElementById('btn-reconcile');
+    const spinner = document.getElementById('reconcile-spinner');
+    const text = document.getElementById('reconcile-text');
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+    text.innerText = "Triggering...";
+
+    try {
+        const res = await fetch('/api/local/reconcile', { method: 'POST' });
+        const data = await res.json();
+
+        if (res.status === 202 && data.request_id) {
+            text.innerText = "Reconciling...";
+            reconcilePollCount = 0;
+            pollReconcileStatus(data.status_url);
+        } else {
+            text.innerText = "Error Triggering";
+            setTimeout(resetReconcileBtn, 3000);
+        }
+    } catch (e) {
+        text.innerText = "Network Error";
+        setTimeout(resetReconcileBtn, 3000);
+    }
+}
+
+async function pollReconcileStatus(url) {
+    if (reconcilePollCount >= MAX_RECONCILE_POLLS) {
+        document.getElementById('reconcile-text').innerText = "Timeout waiting for Dataplane";
+        setTimeout(resetReconcileBtn, 4000);
+        fetchStatus();
+        return;
+    }
+    reconcilePollCount++;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.complete) {
+            if (data.success) {
+                document.getElementById('reconcile-text').innerText = "Success!";
+                setTimeout(resetReconcileBtn, 3000);
+            } else {
+                document.getElementById('reconcile-text').innerText = "Failed";
+                setTimeout(resetReconcileBtn, 3000);
+            }
+            fetchStatus(); // Refresh cards
+        } else {
+            // Still polling
+            setTimeout(() => pollReconcileStatus(url), 2000);
+        }
+    } catch (e) {
+        setTimeout(() => pollReconcileStatus(url), 2000);
+    }
+}
+
+function resetReconcileBtn() {
+    const btn = document.getElementById('btn-reconcile');
+    const spinner = document.getElementById('reconcile-spinner');
+    const text = document.getElementById('reconcile-text');
+    
+    btn.disabled = false;
+    spinner.classList.add('hidden');
+    text.innerText = "Reconcile Now";
 }
 
 // NOTE: configureNode() and restoreNode() moved to PR #3/PR #4 (dataplane + API integration).

@@ -12,6 +12,7 @@ function setupDOM() {
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
     }));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
 }
 
 function evalScript() {
@@ -29,7 +30,13 @@ describe('UI Routing and Initialization', () => {
                     wg_status: 'Connected',
                     wg_pubkey: 'testpubkey123',
                     configs_found: [],
-                    version: 'v3.0.0'
+                    version: 'v3.0.0',
+                    target_container: 'lightning_lnd_1',
+                    target_ip: '10.21.21.6',
+                    forwarding_port: 9735,
+                    rules_synced: true,
+                    last_reconcile_at: '2023-10-27T10:00:00Z',
+                    last_error: 'Connection timeout'
                 }),
                 ok: true
             })
@@ -53,6 +60,13 @@ describe('UI Routing and Initialization', () => {
         await window.fetchStatus();
         expect(document.getElementById('txt-wg-status').innerText).toBe('Connected');
         expect(document.getElementById('txt-pubkey').innerText).toBe('testpubkey123');
+        expect(document.getElementById('txt-target').innerText).toBe('lightning_lnd_1 (10.21.21.6)');
+        expect(document.getElementById('txt-forwarding').querySelector('span').innerText).toBe(9735);
+        expect(document.getElementById('badge-rules').innerText).toBe('Synced');
+        expect(document.getElementById('btn-reconcile').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('txt-reconcile').innerText).not.toBe('Never');
+        expect(document.getElementById('txt-error').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('txt-error').querySelector('span').innerText).toBe('Connection timeout');
     });
 });
 
@@ -140,6 +154,10 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
     afterEach(() => { jest.restoreAllMocks(); });
 
     test('recognizes "paid" (lowercase) status and clears poll', async () => {
+        // Ensure the purchase mode view is visible so polling doesn't abort
+        // This MUST be called before setting activePaymentHash because switchTab clears it
+        window.switchTab('buy');
+
         // Reset state explicitly
         window.activePaymentHash = 'test-hash-abc';
         window.purchaseMode = 'buy';

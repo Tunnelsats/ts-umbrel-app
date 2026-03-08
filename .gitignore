@@ -1,3 +1,7 @@
+# OS
+.DS_Store
+
+# Environment
 .env.local
 .umbrel-apps-fork/
 
@@ -8,8 +12,16 @@ node_modules/
 __pycache__/
 venv/
 .pytest_cache/
-PR_DESCRIPTION_TEMP.md
-PR_DESCRIPTION_TEMP2.md
-deploy_to_umbrel.expect
-deploy_to_umbrel.sh
-ssh_test.expect
+
+# Temp & Artifacts
+*.tmp
+*.temp
+*.bak
+*.bak.*
+*.md.resolved*
+
+# Scripts/Testing Temp Files
+PR_DESCRIPTION*.md
+*.expect
+deploy_to_umbrel*.sh
+test_container.sh
