@@ -61,7 +61,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-wg-status').innerText).toBe('Connected');
         expect(document.getElementById('txt-pubkey').innerText).toBe('testpubkey123');
         expect(document.getElementById('txt-target').innerText).toBe('lightning_lnd_1 (10.21.21.6)');
-        expect(document.getElementById('txt-forwarding').querySelector('span').innerText).toBe(9735);
+        expect(String(document.getElementById('txt-forwarding').querySelector('span').innerText)).toBe('9735');
         expect(document.getElementById('badge-rules').innerText).toBe('Synced');
         expect(document.getElementById('btn-reconcile').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('txt-reconcile').innerText).not.toBe('Never');
@@ -155,7 +155,6 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
 
     test('recognizes "paid" (lowercase) status and clears poll', async () => {
         // Ensure the purchase mode view is visible so polling doesn't abort
-        // This MUST be called before setting activePaymentHash because switchTab clears it
         window.switchTab('buy');
 
         // Reset state explicitly
@@ -183,6 +182,55 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
         // Check that old content is replaced (payment-received UI renders)
         expect(invoiceBox.innerHTML).not.toContain('Waiting...');
         expect(invoiceBox.textContent).toContain('Payment Received');
+    });
+
+    test('buy paid flow preserves paymentHash into import claim', async () => {
+        window.switchTab('buy');
+        window.activePaymentHash = 'buy-hash-123';
+        window.purchaseMode = 'buy';
+        if (window.pollInterval) clearInterval(window.pollInterval);
+
+        const invoiceBox = document.getElementById('invoice-box-buy');
+        invoiceBox.classList.remove('hidden');
+        invoiceBox.innerHTML = '<p>Waiting...</p>';
+
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/subscription/buy-hash-123') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ status: 'paid' }),
+                    ok: true
+                });
+            }
+            if (url === '/api/subscription/claim') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ success: true }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.pollPayment();
+
+        const proceedBtn = Array.from(invoiceBox.querySelectorAll('button'))
+            .find((btn) => btn.textContent.includes('Proceed to Installation'));
+        expect(proceedBtn).toBeTruthy();
+        proceedBtn.click();
+
+        expect(window.activePaymentHash).toBe('buy-hash-123');
+        expect(document.getElementById('view-import').classList.contains('hidden')).toBe(false);
+
+        global.fetch.mockClear();
+        await window.claimSubscription('import');
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/subscription/claim',
+            expect.objectContaining({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paymentHash: 'buy-hash-123', referralCode: null })
+            })
+        );
     });
 });
 

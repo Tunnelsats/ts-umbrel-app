@@ -100,7 +100,6 @@ function switchTab(tabId) {
         clearInterval(pollInterval);
         pollInterval = null;
     }
-    activePaymentHash = null;
     ['buy', 'renew'].forEach(mode => {
         const box = document.getElementById(`invoice-box-${mode}`);
         if (box) box.classList.add('hidden');
@@ -421,6 +420,8 @@ async function pollPayment() {
 
                 invoiceBox.append(celebrationSvg, h3, p, button);
             } else {
+                // Renewals don't need claim/provisioning, so clear active hash after payment confirmation.
+                activePaymentHash = null;
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center mb-2';
                 h3.textContent = 'Renewal Successful!';
