@@ -150,6 +150,73 @@ def comment_out_config_lines(path, prefixes):
     return True, changed
 
 
+def upsert_config_line(path, prefix, replacement_line):
+    if not os.path.exists(path):
+        return False, False
+
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            lines = conf_fp.readlines()
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Error reading {path} for configure: {exc}")
+        return False, False
+
+    changed = False
+    found = False
+    updated_lines = []
+    normalized_line = f"{replacement_line}\n"
+
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            uncommented = stripped[1:].lstrip()
+            if uncommented.startswith(prefix):
+                if line != normalized_line:
+                    changed = True
+                updated_lines.append(normalized_line)
+                found = True
+            else:
+                updated_lines.append(line)
+            continue
+
+        if stripped.startswith(prefix):
+            if line != normalized_line:
+                changed = True
+            updated_lines.append(normalized_line)
+            found = True
+        else:
+            updated_lines.append(line)
+
+    if not found:
+        updated_lines.append(normalized_line)
+        changed = True
+
+    if changed:
+        file_mode = None
+        try:
+            file_mode = os.stat(path).st_mode & 0o777
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error reading file mode for {path}: {exc}")
+
+        tmp_path = os.path.join(os.path.dirname(path) or ".", f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as conf_fp:
+                conf_fp.writelines(updated_lines)
+            if file_mode is not None:
+                os.chmod(tmp_path, file_mode)
+            os.replace(tmp_path, path)
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error writing {path} for configure: {exc}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False, False
+
+    return True, changed
+
+
 def _parse_config_comments(config_text):
     meta = {}
     for line in config_text.split("\n"):
@@ -742,8 +809,74 @@ def get_metadata():
 
 @app.route("/api/local/configure-node", methods=["POST"])
 def configure_node():
-    # TODO: Implement reading from meta JSON and modifying LND/CLN config
-    return jsonify({"error": "Not Implemented. See PR_C_SPEC.md."}), 501
+    payload = request.get_json(silent=True) or {}
+    node_type = str(payload.get("nodeType", "")).strip().lower()
+
+    if node_type not in ("lnd", "cln"):
+        return jsonify({"success": False, "error": "Invalid nodeType. Use 'lnd' or 'cln'."}), 400
+
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    if not os.path.exists(meta_path):
+        return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fp:
+            meta = json.load(fp)
+    except (IOError, OSError, json.JSONDecodeError):
+        return jsonify({"success": False, "error": "Unable to read tunnelsats metadata file."}), 500
+
+    dns = str(meta.get("serverDomain", "")).strip()
+    try:
+        port = int(meta.get("vpnPort", 0))
+    except (TypeError, ValueError):
+        port = 0
+
+    if not dns or port <= 0:
+        return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
+
+    if node_type == "lnd":
+        lnd_processed, lnd_changed = upsert_config_line(
+            LND_TUNNELSATS_CONF_PATH,
+            "externalhosts=",
+            f"externalhosts={dns}:{port}",
+        )
+        if not lnd_processed:
+            return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
+
+        return jsonify(
+            {
+                "success": True,
+                "lnd": True,
+                "cln": False,
+                "lnd_changed": lnd_changed,
+                "port": port,
+                "dns": dns,
+            }
+        )
+
+    # CLN target
+    cln_steps = (
+        ("bind-addr=", "bind-addr=0.0.0.0:9735"),
+        ("announce-addr=", f"announce-addr={dns}:{port}"),
+        ("always-use-proxy=", "always-use-proxy=false"),
+    )
+    cln_changed = False
+    for prefix, line in cln_steps:
+        processed, changed = upsert_config_line(CLN_CONFIG_PATH, prefix, line)
+        if not processed:
+            return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
+        cln_changed = cln_changed or changed
+
+    return jsonify(
+        {
+            "success": True,
+            "lnd": False,
+            "cln": True,
+            "cln_changed": cln_changed,
+            "port": port,
+            "dns": dns,
+        }
+    )
 
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():

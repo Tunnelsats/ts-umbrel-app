@@ -532,3 +532,109 @@ describe('Phase 3a: Import Config', () => {
         expect(msg).toContain('Invalid WireGuard configuration format');
     });
 });
+
+describe('Phase 3b: Install Config', () => {
+    beforeEach(() => {
+        setupDOM();
+        global.fetch = jest.fn((url, opts) => {
+            if (url === '/api/local/configure-node') {
+                const payload = opts && opts.body ? JSON.parse(opts.body) : {};
+                if (payload.nodeType === 'cln') {
+                    return Promise.resolve({
+                        json: () => Promise.resolve({
+                            success: true,
+                            lnd: false,
+                            cln: true,
+                            port: 35825,
+                            dns: 'de2.tunnelsats.com'
+                        }),
+                        ok: true
+                    });
+                }
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        lnd: true,
+                        cln: false,
+                        port: 35825,
+                        dns: 'de2.tunnelsats.com'
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        lnd: true,
+                        cln: true,
+                        lnd_changed: true,
+                        cln_changed: false
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({
+                json: () => Promise.resolve({
+                    wg_status: 'Disconnected',
+                    wg_pubkey: '',
+                    configs_found: [],
+                    version: 'v3.0.0',
+                    target_impl: 'lnd',
+                    servers: []
+                }),
+                ok: true
+            });
+        });
+        evalScript();
+    });
+
+    afterEach(() => { jest.restoreAllMocks(); });
+
+    test('setNodeType updates selected node type state', () => {
+        window.setNodeType('cln');
+        expect(document.getElementById('node-type-selected').value).toBe('cln');
+        expect(document.getElementById('node-type-cln').className).toContain('bg-tsyellow');
+        expect(document.getElementById('node-type-lnd').className).not.toContain('bg-tsyellow');
+    });
+
+    test('configureNode posts selected nodeType and renders success', async () => {
+        window.setNodeType('lnd');
+        await window.configureNode();
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/local/configure-node',
+            expect.objectContaining({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nodeType: 'lnd' })
+            })
+        );
+        expect(document.getElementById('configure-node-msg').innerText).toContain('de2.tunnelsats.com:35825');
+    });
+
+    test('configureNode supports cln nodeType payload', async () => {
+        window.setNodeType('cln');
+        await window.configureNode();
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/local/configure-node',
+            expect.objectContaining({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nodeType: 'cln' })
+            })
+        );
+    });
+
+    test('restoreNode calls backend and renders result summary', async () => {
+        await window.restoreNode();
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/local/restore-node',
+            expect.objectContaining({ method: 'POST' })
+        );
+        const msg = document.getElementById('restore-node-msg').innerText;
+        expect(msg).toContain('LND');
+        expect(msg).toContain('CLN');
+    });
+});

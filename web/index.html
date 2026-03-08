@@ -483,6 +483,29 @@
                 </div>
 
                 <div>
+                    <h2 class="text-xl font-bold text-white mb-2">Configure Lightning Node</h2>
+                    <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats forwarding host.</p>
+
+                    <div class="grid grid-cols-2 gap-3 mb-4">
+                        <button id="node-type-lnd" type="button" onclick="setNodeType('lnd')"
+                            class="rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-sm font-bold text-gray-200 transition hover:border-tsyellow">
+                            LND
+                        </button>
+                        <button id="node-type-cln" type="button" onclick="setNodeType('cln')"
+                            class="rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-sm font-bold text-gray-200 transition hover:border-tsyellow">
+                            CLN
+                        </button>
+                    </div>
+                    <input id="node-type-selected" type="hidden" value="lnd">
+
+                    <button id="btn-configure-node" type="button" onclick="configureNode()"
+                        class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-3 rounded-xl transition shadow-lg">
+                        Configure Node
+                    </button>
+                    <p id="configure-node-msg" class="text-center mt-3 text-sm font-semibold"></p>
+                </div>
+
+                <div class="border-t border-gray-800 pt-6">
                     <h2 class="text-xl font-bold text-white mb-2">Import Existing Config</h2>
                     <p class="text-sm text-gray-400 mb-6">Already have a TunnelSats config from the website? Paste it
                         below to apply it to your node.</p>
@@ -510,11 +533,13 @@
                     <h2 class="text-xl font-bold text-red-500 mb-2">Uninstall TunnelSats Networking</h2>
 
                     <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
-                        <h3 class="text-gray-400 font-bold mb-2">Coming Soon</h3>
-                        <p class="text-sm text-gray-300">
-                            Node configuration restore will be available once the dataplane integration is complete.
-                            To uninstall TunnelSats, simply remove the app from the Umbrel dashboard.
-                        </p>
+                        <h3 class="text-white font-bold mb-2">Restore Node Config</h3>
+                        <p class="text-sm text-gray-300 mb-4">Revert TunnelSats node configuration changes before uninstalling.</p>
+                        <button id="btn-restore-node" type="button" onclick="restoreNode()"
+                            class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
+                            Restore Node Networking
+                        </button>
+                        <p id="restore-node-msg" class="text-center mt-3 text-sm font-semibold"></p>
                     </div>
                 </div>
             </section>

@@ -9,6 +9,45 @@ const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 
+function setNodeType(nodeType, fromUser = true) {
+    const normalized = nodeType === 'cln' ? 'cln' : 'lnd';
+    const hiddenInput = document.getElementById('node-type-selected');
+    const lndBtn = document.getElementById('node-type-lnd');
+    const clnBtn = document.getElementById('node-type-cln');
+    if (!hiddenInput || !lndBtn || !clnBtn) return;
+
+    hiddenInput.value = normalized;
+    if (fromUser) hiddenInput.dataset.userSelected = '1';
+
+    function setButtonState(button, isActive) {
+        button.classList.toggle('bg-tsyellow', isActive);
+        button.classList.toggle('border-tsyellow', isActive);
+        button.classList.toggle('text-black', isActive);
+        button.classList.toggle('bg-gray-900', !isActive);
+        button.classList.toggle('border-gray-700', !isActive);
+        button.classList.toggle('text-gray-200', !isActive);
+    }
+
+    setButtonState(lndBtn, normalized === 'lnd');
+    setButtonState(clnBtn, normalized === 'cln');
+}
+
+function setActionMessage(elementId, text, tone) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+
+    el.innerText = text;
+    if (tone === 'success') {
+        el.className = 'text-center mt-3 text-sm font-semibold text-tsgreen';
+        return;
+    }
+    if (tone === 'error') {
+        el.className = 'text-center mt-3 text-sm font-semibold text-red-500';
+        return;
+    }
+    el.className = 'text-center mt-3 text-sm font-semibold text-gray-400';
+}
+
 async function fetchPricing() {
     try {
         const res = await fetch('https://mempool.space/api/v1/prices');
@@ -72,6 +111,7 @@ function renderDurations() {
 
 // Initialization
 document.addEventListener("DOMContentLoaded", () => {
+    setNodeType('lnd', false);
     fetchStatus();
     fetchServers();
     fetchPricing();
@@ -597,7 +637,69 @@ function resetReconcileBtn() {
     text.innerText = "Reconcile Now";
 }
 
-// NOTE: configureNode() and restoreNode() moved to PR #3/PR #4 (dataplane + API integration).
+async function configureNode() {
+    const selectedNodeType = (document.getElementById('node-type-selected') || {}).value || 'lnd';
+    const btn = document.getElementById('btn-configure-node');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Configuring...';
+    }
+    setActionMessage('configure-node-msg', 'Applying node configuration...', 'info');
+
+    try {
+        const res = await fetch('/api/local/configure-node', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nodeType: selectedNodeType })
+        });
+        const data = await res.json();
+
+        if (res.ok && data.success !== false) {
+            const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
+            setActionMessage('configure-node-msg', `Node configured successfully: ${location}`, 'success');
+            fetchStatus();
+        } else {
+            setActionMessage('configure-node-msg', data.error || 'Failed to configure node.', 'error');
+        }
+    } catch (e) {
+        setActionMessage('configure-node-msg', `Failed to configure node: ${e.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = 'Configure Node';
+        }
+    }
+}
+
+async function restoreNode() {
+    const btn = document.getElementById('btn-restore-node');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Restoring...';
+    }
+    setActionMessage('restore-node-msg', 'Restoring node configuration...', 'info');
+
+    try {
+        const res = await fetch('/api/local/restore-node', { method: 'POST' });
+        const data = await res.json();
+
+        if (res.ok) {
+            const lndState = data.lnd_changed ? 'updated' : 'no changes';
+            const clnState = data.cln_changed ? 'updated' : 'no changes';
+            setActionMessage('restore-node-msg', `Restore complete. LND: ${lndState}. CLN: ${clnState}.`, 'success');
+            fetchStatus();
+        } else {
+            setActionMessage('restore-node-msg', data.error || 'Failed to restore node configuration.', 'error');
+        }
+    } catch (e) {
+        setActionMessage('restore-node-msg', `Failed to restore node configuration: ${e.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = 'Restore Node Networking';
+        }
+    }
+}
 
 function confirmOverwriteImport() {
     return new Promise((resolve) => {
@@ -729,8 +831,6 @@ async function restartTunnel() {
         setTimeout(fetchStatus, 3000);
     } catch (e) { }
 }
-
-// NOTE: restoreNode() moved to PR #3/PR #4.
 
 // Copy Invoice to Clipboard
 async function copyInvoice(mode) {
