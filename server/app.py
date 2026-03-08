@@ -186,6 +186,71 @@ def _write_file_secure(path, content):
     os.replace(tmp_path, path)
 
 
+def _has_required_wireguard_blocks(config_text):
+    has_interface = bool(re.search(r"^\s*\[Interface\]\s*$", config_text, flags=re.IGNORECASE | re.MULTILINE))
+    has_peer = bool(re.search(r"^\s*\[Peer\]\s*$", config_text, flags=re.IGNORECASE | re.MULTILINE))
+    return has_interface and has_peer
+
+
+def _extract_interface_private_key(config_text):
+    in_interface = False
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        section_match = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+        if section_match:
+            in_interface = section_match.group(1).strip().lower() == "interface"
+            continue
+
+        if in_interface:
+            private_key_match = re.match(r"^PrivateKey\s*=\s*(.+)$", line, flags=re.IGNORECASE)
+            if private_key_match:
+                return private_key_match.group(1).strip()
+
+    return ""
+
+
+def _derive_wg_public_key(private_key):
+    try:
+        result = subprocess.run(
+            ["wg", "pubkey"],
+            input=private_key,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError) as exc:
+        app.logger.warning(f"Failed to derive WireGuard public key: {exc}")
+        return ""
+
+
+def _server_id_from_domain(server_domain):
+    server_domain = str(server_domain or "").strip()
+    if not server_domain:
+        return "unknown"
+
+    server_id = secure_filename(server_domain.split(".", 1)[0])
+    return server_id or "unknown"
+
+
+def _port_from_endpoint(endpoint):
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        return 0
+
+    try:
+        candidate = endpoint.rsplit(":", 1)[1]
+    except IndexError:
+        return 0
+
+    if candidate.isdigit():
+        return int(candidate)
+    return 0
+
+
 def docker_api(path):
     if not os.path.exists(DOCKER_SOCK):
         return None
@@ -494,8 +559,83 @@ def local_status():
 
 @app.route("/api/local/upload-config", methods=["POST"])
 def upload_config():
-    # TODO: Implement parsing and saving of uploaded config for Phase 3a
-    return jsonify({"error": "Not Implemented"}), 501
+    payload = request.get_json(silent=True) or {}
+    config_text = payload.get("config")
+
+    # Backward compatibility for older UI calls sending multipart form data.
+    if not isinstance(config_text, str) and request.form:
+        config_text = request.form.get("config_text")
+
+    config_text = str(config_text or "")
+    if not config_text.strip():
+        return jsonify({"success": False, "error": "Missing WireGuard configuration text."}), 400
+
+    if not _has_required_wireguard_blocks(config_text):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Invalid WireGuard configuration format. Missing [Interface] or [Peer] block.",
+                }
+            ),
+            400,
+        )
+
+    private_key = _extract_interface_private_key(config_text)
+    if not private_key:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Invalid WireGuard configuration format. Missing Interface PrivateKey.",
+                }
+            ),
+            400,
+        )
+
+    wg_public_key = _derive_wg_public_key(private_key)
+    if not wg_public_key:
+        return jsonify({"success": False, "error": "Unable to derive public key from provided PrivateKey."}), 400
+
+    parsed = _parse_config_comments(config_text)
+    server_domain = parsed.get("serverDomain", "")
+    server_id = _server_id_from_domain(server_domain)
+    expires_at = parsed.get("expiresAt", "")
+    vpn_port = parsed.get("vpnPort", 0)
+    if not vpn_port:
+        vpn_port = _port_from_endpoint(parsed.get("wgEndpoint", ""))
+
+    meta = {
+        "serverId": server_id,
+        "serverDomain": server_domain,
+        "wgEndpoint": parsed.get("wgEndpoint", ""),
+        "wgPublicKey": wg_public_key,
+        "expiresAt": expires_at,
+        "vpnPort": vpn_port,
+        "importedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        backup_existing_wireguard_configs(excluded_files=("tunnelsats.conf",))
+        _write_file_secure(os.path.join(DATA_DIR, "tunnelsats.conf"), config_text)
+        _write_file_secure(os.path.join(DATA_DIR, META_FILE), json.dumps(meta, indent=2))
+    except (IOError, OSError) as exc:
+        app.logger.error(f"Unable to persist uploaded config: {exc}")
+        return jsonify({"success": False, "error": "Failed to save configuration on disk."}), 500
+
+    return jsonify(
+        {
+            "success": True,
+            "message": "Configuration saved and parsed.",
+            "meta": {
+                "serverId": server_id,
+                "wgPublicKey": wg_public_key,
+                "expiresAt": expires_at,
+                "vpnPort": vpn_port,
+            },
+        }
+    )
 
 
 

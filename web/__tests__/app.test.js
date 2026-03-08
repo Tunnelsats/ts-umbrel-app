@@ -289,3 +289,113 @@ describe('Phase 2: Renew Flow', () => {
         expect(window.activePaymentHash).toBe('renew-hash-123');
     });
 });
+
+describe('Phase 3a: Import Config', () => {
+    beforeEach(() => {
+        setupDOM();
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/status') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        wg_status: 'Disconnected', wg_pubkey: '', configs_found: [], version: 'v3.0.0'
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/servers') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ servers: [] }),
+                    ok: true
+                });
+            }
+            if (url === '/api/local/upload-config') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        message: 'Configuration saved and parsed.',
+                        meta: { serverId: 'de2' }
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+        evalScript();
+    });
+
+    afterEach(() => { jest.restoreAllMocks(); });
+
+    test('pre-validation rejects empty import payload', async () => {
+        document.getElementById('config-text').value = '   ';
+        document.getElementById('txt-configs').innerText = 'None Detected';
+        global.fetch.mockClear();
+
+        await window.importConfig();
+
+        const msg = document.getElementById('import-msg').innerText;
+        expect(msg).toContain('Please paste a WireGuard config');
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('pre-validation rejects config missing [Peer] block', async () => {
+        document.getElementById('config-text').value = '[Interface]\nPrivateKey = abc\n';
+        document.getElementById('txt-configs').innerText = 'None Detected';
+        global.fetch.mockClear();
+
+        await window.importConfig();
+
+        const msg = document.getElementById('import-msg').innerText;
+        expect(msg).toContain('Missing [Interface] or [Peer] block');
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('import sends JSON payload and renders success message', async () => {
+        const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\nEndpoint = de2.tunnelsats.com:51820\n';
+        const expectedConfig = config.trim();
+        document.getElementById('config-text').value = config;
+        document.getElementById('txt-configs').innerText = 'None Detected';
+        global.fetch.mockClear();
+
+        await window.importConfig();
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/local/upload-config',
+            expect.objectContaining({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ config: expectedConfig })
+            })
+        );
+        const msg = document.getElementById('import-msg').innerText;
+        expect(msg).toContain('Configuration saved and parsed.');
+    });
+
+    test('import renders backend error message', async () => {
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/upload-config') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: false,
+                        error: 'Invalid WireGuard configuration format. Missing [Interface] or [Peer] block.'
+                    }),
+                    ok: false
+                });
+            }
+            return Promise.resolve({
+                json: () => Promise.resolve({
+                    wg_status: 'Disconnected', wg_pubkey: '', configs_found: [], version: 'v3.0.0', servers: []
+                }),
+                ok: true
+            });
+        });
+
+        const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\n';
+        document.getElementById('config-text').value = config;
+        document.getElementById('txt-configs').innerText = 'None Detected';
+
+        await window.importConfig();
+
+        const msg = document.getElementById('import-msg').innerText;
+        expect(msg).toContain('Invalid WireGuard configuration format');
+    });
+});

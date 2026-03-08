@@ -364,8 +364,22 @@ async function claimSubscription(mode) {
 // 4. Import Config
 async function importConfig() {
     const txt = document.getElementById('config-text').value;
+    const config = (txt || '').trim();
     const msg = document.getElementById('import-msg');
     const existingConfigs = document.getElementById('txt-configs').innerText;
+
+    function setImportMessage(text, tone) {
+        msg.innerText = text;
+        if (tone === 'success') {
+            msg.className = "text-center mt-4 text-sm font-bold text-tsgreen";
+            return;
+        }
+        if (tone === 'error') {
+            msg.className = "text-center mt-4 text-sm font-bold text-red-500";
+            return;
+        }
+        msg.className = "text-center mt-4 text-sm text-gray-400";
+    }
 
     if (existingConfigs !== "None Detected" && existingConfigs !== "Loading..." && existingConfigs !== "") {
         if (!confirm("Warning: You already have a Tunnelsats configuration active. Importing a new config will overwrite it. Do you wish to proceed?")) {
@@ -373,34 +387,38 @@ async function importConfig() {
         }
     }
 
-    msg.innerText = "Importing...";
-    msg.className = "text-center mt-4 text-sm text-gray-400";
+    if (!config) {
+        setImportMessage("Please paste a WireGuard config before importing.", 'error');
+        return;
+    }
+
+    if (!/\[Interface\]/i.test(config) || !/\[Peer\]/i.test(config)) {
+        setImportMessage("Invalid WireGuard configuration format. Missing [Interface] or [Peer] block.", 'error');
+        return;
+    }
+
+    if (!/^\s*PrivateKey\s*=\s*.+$/mi.test(config)) {
+        setImportMessage("Invalid WireGuard configuration format. Missing Interface PrivateKey.", 'error');
+        return;
+    }
+
+    setImportMessage("Importing...", 'info');
 
     try {
-        const formData = new FormData();
-        formData.append('config_text', txt);
-
         const res = await fetch('/api/local/upload-config', {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config })
         });
 
         const data = await res.json();
-        if (res.ok) {
-            const configMsg = "Node configuration will be available after dataplane setup.";
-            msg.innerText = `Config imported successfully! ${configMsg}`;
-            msg.className = "text-center mt-4 text-sm font-bold text-tsgreen";
-            setTimeout(() => {
-                restartTunnel();
-                switchTab('dashboard');
-            }, 3000);
+        if (res.ok && data.success !== false) {
+            setImportMessage(data.message || "Configuration saved and parsed.", 'success');
         } else {
-            msg.innerText = data.error || "Import failed.";
-            msg.className = "text-center mt-4 text-sm font-bold text-red-500";
+            setImportMessage(data.error || "Import failed.", 'error');
         }
     } catch (e) {
-        msg.innerText = e.message;
-        msg.className = "text-center mt-4 text-sm font-bold text-red-500";
+        setImportMessage(e.message, 'error');
     }
 }
 

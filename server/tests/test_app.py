@@ -321,20 +321,76 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 403
 
-    def test_upload_config_renames_old_conf_but_not_imported_conf(self, client, data_dir):
+    @patch('app.subprocess.run')
+    def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, client, data_dir):
         old_conf = data_dir / 'tunnelsats-old.conf'
         old_conf.write_text('[Interface]\nPrivateKey=old\n')
-        imported_conf = data_dir / 'tunnelsats-imported.conf'
-        imported_conf.write_text('[Interface]\nPrivateKey=old-imported\n')
+        target_conf = data_dir / 'tunnelsats.conf'
+        target_conf.write_text('[Interface]\nPrivateKey=old-current\n')
 
-        res = client.post('/api/local/upload-config', data={
-            'config_text': '[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n'
-        })
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "# Port Forwarding: 35825\n"
+            "# Valid Until: 2026-04-05T10:30:00.000Z\n"
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "AllowedIPs = 0.0.0.0/0\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
         assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["success"] is True
+        assert payload["message"] == "Configuration saved and parsed."
+        assert payload["meta"]["serverId"] == "de2"
+        assert payload["meta"]["wgPublicKey"] == "derivedPubKeyBase64=="
+        assert payload["meta"]["expiresAt"] == "2026-04-05T10:30:00.000Z"
+        assert payload["meta"]["vpnPort"] == 35825
+
         assert os.path.exists(str(old_conf) + '.bak')
         assert not os.path.exists(old_conf)
-        assert not os.path.exists(str(imported_conf) + '.bak')
-        assert imported_conf.read_text() == '[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n'
+        assert not os.path.exists(str(target_conf) + '.bak')
+        assert target_conf.read_text() == config_text
+
+        meta_path = data_dir / 'tunnelsats-meta.json'
+        with open(meta_path, 'r') as fp:
+            meta = json.load(fp)
+        assert meta["serverId"] == "de2"
+        assert meta["wgPublicKey"] == "derivedPubKeyBase64=="
+        assert meta["expiresAt"] == "2026-04-05T10:30:00.000Z"
+        assert meta["vpnPort"] == 35825
+
+        mock_run.assert_called_once_with(
+            ["wg", "pubkey"],
+            input="clientPrivateKeyBase64==",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def test_upload_config_rejects_missing_required_blocks(self, client):
+        config_text = "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == "Invalid WireGuard configuration format. Missing [Interface] or [Peer] block."
+
+    def test_upload_config_rejects_missing_private_key(self, client):
+        config_text = "[Interface]\nAddress = 10.8.0.42/32\n\n[Peer]\nPublicKey = server==\n"
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == "Invalid WireGuard configuration format. Missing Interface PrivateKey."
 
     def test_local_status_includes_manifest_version_and_dataplane_defaults(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
