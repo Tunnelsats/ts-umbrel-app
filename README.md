@@ -1,6 +1,4 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/Tunnelsats/tunnelsats-v2-web/master/images/brand/svg/horizontal_primary.svg" alt="TunnelSats Logo" width="400"/>
-</div>
+  <img src="https://raw.githubusercontent.com/Tunnelsats/tunnelsats/ffb4732328045922dc90eb5580654077e8d3f246/images/brand/logos/ts_logo_rectangle.svg" alt="TunnelSats Logo" width="400"/>
 
 <br/>
 
