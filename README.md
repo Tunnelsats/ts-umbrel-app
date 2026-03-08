@@ -12,7 +12,7 @@
 
 # TunnelSats for Umbrel
 
-This repository contains the containerized version of [TunnelSats](https://tunnelsats.com/) explicitly built for **umbrelOS 1.6+**. 
+This repository contains the containerized version of [TunnelSats](https://tunnelsats.com/) explicitly built for [umbrelOS 1.6+](https://github.com/getumbrel/umbrel) ☂️. 
 
 ## ⚡ What it Solves
 Running a Lightning Network node over Tor ensures privacy but introduces high latency and routing reliability issues. Conversely, running on Clearnet exposes your home IP address. 
