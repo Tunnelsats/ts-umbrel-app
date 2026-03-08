@@ -131,10 +131,14 @@ async function fetchStatus() {
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (data.wg_status === 'Connected') {
+        if (data.wg_status === 'Connected' && data.target_container && data.rules_synced) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
-            badge.innerText = "Tunnel Active";
+            badge.innerText = "Protected";
             document.getElementById('txt-wg-status').className = "font-mono text-tsgreen font-bold";
+        } else if (data.wg_status === 'Connected') {
+            badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-yellow-900/50 text-tsyellow border border-yellow-700";
+            badge.innerText = "Connected";
+            document.getElementById('txt-wg-status').className = "font-mono text-tsyellow font-bold";
         } else {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-red-900/50 text-red-500 border border-red-700";
             badge.innerText = "Tunnel Down";
