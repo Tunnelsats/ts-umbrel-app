@@ -1,88 +1,86 @@
-# Tunnelsats - Umbrel App
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Tunnelsats/tunnelsats-v2-web/master/images/brand/svg/horizontal_primary.svg" alt="TunnelSats Logo" width="400"/>
+</div>
 
-This repository contains the containerized version of [Tunnelsats](https://tunnelsats.com/) for **umbrelOS 1.6+**.
+<br/>
+
+<div align="center">
+  <img src="https://img.shields.io/github/actions/workflow/status/Tunnelsats/ts-umbrel-app/docker-release.yml?branch=master&label=Docker%20Build&style=flat-square" alt="Build Status"/>
+  <img src="https://img.shields.io/github/license/Tunnelsats/ts-umbrel-app?style=flat-square&color=blue" alt="License"/>
+  <a href="https://tunnelsats.com/join-telegram"><img src="https://img.shields.io/badge/Telegram-Join%20Community-blue?style=flat-square&logo=telegram" alt="Telegram"/></a>
+</div>
+
+<br/>
+
+# TunnelSats for Umbrel
+
+This repository contains the containerized version of [TunnelSats](https://tunnelsats.com/) explicitly built for **umbrelOS 1.6+**. 
+
+## ⚡ What it Solves
+Running a Lightning Network node over Tor ensures privacy but introduces high latency and routing reliability issues. Conversely, running on Clearnet exposes your home IP address. 
+
+TunnelSats provides a hybrid solution: **Privacy-preserving clearnet connectivity**. 
+By establishing a secure WireGuard tunnel to one of our global servers, your node's lightning traffic is routed through our IP address. Your home IP remains hidden, while you benefit from the speed and reliability of the Clearnet.
+
+## 🚀 Features
+- **Buy & Renew In-App**: Purchase WireGuard subscriptions using Lightning right from the Umbrel dashboard.
+- **Docker-Native Routing**: Unlike previous iterations, this app dynamically routes your LND or Core-Lightning traffic over the VPN purely using Docker bridge networking and `nftables` DNAT.
+- **No Sudo Required**: You do not need to modify any host-level `umbrel/app-data` scripts or `docker-compose.yml` files!
+
+---
+
+## 🛠 Architecture & Dataplane
 
 Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
 
-## Docker-Native Architecture
-
-1. The container runs with `network_mode: "host"` and `NET_ADMIN`/`NET_RAW` to manage WireGuard, routing and firewall state.
-2. Runtime detects active Lightning containers (`lnd` or `core-lightning`) via Docker API (`/var/run/docker.sock`).
-3. Runtime ensures a deterministic bridge network:
-   - Network: `docker-tunnelsats`
-   - Subnet: `10.9.9.0/25`
-   - Target node IP: `10.9.9.9`
+1. The container runs with `network_mode: "host"` and `NET_ADMIN`/`NET_RAW` to manage WireGuard, routing, and firewall state.
+2. Runtime detects active Lightning containers (`lnd` or `core-lightning`) via the Docker API (`/var/run/docker.sock`).
+3. Runtime ensures a deterministic bridge network (`docker-tunnelsats` under `10.9.9.0/25` with target IP `10.9.9.9`).
 4. Runtime enforces dataplane parity:
-   - Policy routing table `51820` with blackhole fallback
-   - Inbound DNAT from WireGuard forwarding port to `10.9.9.9:9735`
-   - FORWARD rules between WireGuard interface and docker bridge
-5. A periodic reconcile loop (default: 30s) plus manual reconcile API repairs drift after restarts/network changes.
+   - Policy routing table `51820` with blackhole fallback.
+   - Inbound DNAT from WireGuard forwarding port to `10.9.9.9:9735` (or dynamically selected ports).
+   - FORWARD rules between the WireGuard interface and the docker bridge.
+5. A periodic reconcile loop repairs drift after restarts or localized network changes.
 
-## Runtime API
+---
 
-`GET /api/local/status` includes baseline status and dataplane metadata:
-- `wg_status`, `wg_pubkey`, `configs_found`, `version`
-- `dataplane_mode`, `target_container`, `target_impl`, `target_ip`
-- `docker_network`, `forwarding_port`, `rules_synced`, `last_reconcile_at`, `last_error`
+## 💬 Support & Links
+- **Website**: [tunnelsats.com](https://tunnelsats.com)
+- **FAQ**: [tunnelsats.com/faq](https://tunnelsats.com/faq)
+- **Support**: Join our [Telegram](https://tunnelsats.com/join-telegram) community.
 
-`POST /api/local/reconcile`:
-- Triggers immediate reconcile
-- Returns `202 Accepted` with `request_id` and status URL
+---
 
-`GET /api/local/reconcile/<request_id>`:
-- Returns `202` while pending
-- Returns completed reconcile result once available
+## 💻 Developer Guide & Local Testing
 
-`POST /api/local/restore-node`:
-- Comments out TunnelSats-injected LND/CLN lines in mounted config files
+If you are a developer looking to contribute or run tests locally, follow these steps.
 
-## Local Test Workflow
-
-Backend unit tests:
-
+### Backend Unit Tests
 ```bash
 ./scripts/run-unit-tests.sh -v
 ```
 
-Frontend tests:
-
+### Frontend UI Tests
 ```bash
 cd web && npm test
 ```
 
-End-to-end dataplane scenarios:
-
+### End-to-End Dataplane Scenarios
 ```bash
 ./scripts/e2e-tests.sh
 ```
 
-### E2E Scenarios
+**Available E2E Scenarios**:
+`happy_lnd`, `happy_cln`, `manual_reconcile`, `drift_restart`, `inbound_reachability`, `missing_socket`, `missing_config`, `shutdown_cleanup`.
 
-- `happy_lnd`
-- `happy_cln`
-- `manual_reconcile`
-- `drift_restart`
-- `inbound_reachability`
-- `missing_socket`
-- `missing_config`
-- `shutdown_cleanup`
-
-## Troubleshooting
-
-- Check `GET /api/local/status` first.
-- If `rules_synced` is `false`, inspect `last_error`.
-- Trigger immediate repair:
-
-```bash
-curl -X POST http://127.0.0.1:9739/api/local/reconcile
-```
-
-- Force full restart path:
-
-```bash
-curl -X POST http://127.0.0.1:9739/api/local/restart
-```
-
-## App Store Deployment
-
-This repository contains `umbrel-app.yml` for Umbrel app store compatibility.
+### Troubleshooting API
+- Check `GET /api/local/status` first to view the current `dataplane_mode` and `wg_status`.
+- If `rules_synced` is `false`, inspect `last_error` in the JSON response.
+- **Trigger immediate Dataplane repair:**
+  ```bash
+  curl -X POST http://127.0.0.1:9739/api/local/reconcile
+  ```
+- **Force full app-level restart:**
+  ```bash
+  curl -X POST http://127.0.0.1:9739/api/local/restart
+  ```
