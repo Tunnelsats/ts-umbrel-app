@@ -396,6 +396,10 @@ def _ensure_peer_persistent_keepalive(config_text, keepalive=25):
 
 
 def _derive_wg_public_key(private_key):
+    private_key = str(private_key or "").strip()
+    if not private_key or len(private_key) > 1024:
+        return ""
+
     try:
         result = subprocess.run(
             ["wg", "pubkey"],
@@ -403,6 +407,7 @@ def _derive_wg_public_key(private_key):
             text=True,
             capture_output=True,
             check=True,
+            timeout=5,
         )
         return result.stdout.strip()
     except (subprocess.SubprocessError, OSError) as exc:

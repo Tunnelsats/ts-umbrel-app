@@ -375,6 +375,7 @@ class TestDataplaneAndRegressionFixes:
             text=True,
             capture_output=True,
             check=True,
+            timeout=5,
         )
 
     @patch('app.subprocess.run')
@@ -415,6 +416,25 @@ class TestDataplaneAndRegressionFixes:
         payload = json.loads(res.data)
         assert payload["success"] is False
         assert payload["error"] == "Invalid WireGuard configuration format. Missing Interface PrivateKey."
+
+    @patch('app.subprocess.run')
+    def test_upload_config_rejects_overly_long_private_key_without_spawning_wg(self, mock_run, client):
+        long_key = "A" * 2048
+        config_text = (
+            "[Interface]\n"
+            f"PrivateKey = {long_key}\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == "Unable to derive public key from provided PrivateKey."
+        mock_run.assert_not_called()
 
     def test_local_status_includes_manifest_version_and_dataplane_defaults(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
