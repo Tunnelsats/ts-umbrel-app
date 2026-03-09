@@ -217,6 +217,94 @@ def upsert_config_line(path, prefix, replacement_line):
     return True, changed
 
 
+def upsert_config_line_in_section(path, section_header, prefix, replacement_line):
+    if not os.path.exists(path):
+        return False, False
+
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            lines = conf_fp.readlines()
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Error reading {path} for configure: {exc}")
+        return False, False
+
+    changed = False
+    normalized_line = f"{replacement_line}\n"
+    normalized_section = section_header.strip()
+    section_match = normalized_section.lower()
+
+    section_start = None
+    section_end = len(lines)
+    for idx, line in enumerate(lines):
+        if line.strip().lower() != section_match:
+            continue
+        section_start = idx
+        for next_idx in range(idx + 1, len(lines)):
+            next_line = lines[next_idx].strip()
+            if next_line.startswith("[") and next_line.endswith("]"):
+                section_end = next_idx
+                break
+        break
+
+    if section_start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] = f"{lines[-1]}\n"
+            changed = True
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.append(f"{normalized_section}\n")
+        lines.append(normalized_line)
+        changed = True
+        updated_lines = lines
+    else:
+        found = False
+        updated_section = []
+        for line in lines[section_start + 1 : section_end]:
+            stripped = line.lstrip()
+            candidate = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            if candidate.startswith(prefix):
+                if not found:
+                    if line != normalized_line:
+                        changed = True
+                    updated_section.append(normalized_line)
+                    found = True
+                else:
+                    changed = True
+                continue
+            updated_section.append(line)
+
+        if not found:
+            updated_section.append(normalized_line)
+            changed = True
+
+        updated_lines = lines[: section_start + 1] + updated_section + lines[section_end:]
+
+    if changed:
+        file_mode = None
+        try:
+            file_mode = os.stat(path).st_mode & 0o777
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error reading file mode for {path}: {exc}")
+
+        tmp_path = os.path.join(os.path.dirname(path) or ".", f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as conf_fp:
+                conf_fp.writelines(updated_lines)
+            if file_mode is not None:
+                os.chmod(tmp_path, file_mode)
+            os.replace(tmp_path, path)
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error writing {path} for configure: {exc}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False, False
+
+    return True, changed
+
+
 def _parse_config_comments(config_text):
     meta = {}
     for line in config_text.split("\n"):
@@ -835,8 +923,9 @@ def configure_node():
         return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
     if node_type == "lnd":
-        lnd_processed, lnd_changed = upsert_config_line(
+        lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_TUNNELSATS_CONF_PATH,
+            "[Application Options]",
             "externalhosts=",
             f"externalhosts={dns}:{port}",
         )

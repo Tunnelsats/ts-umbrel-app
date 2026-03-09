@@ -519,6 +519,35 @@ class TestDataplaneAndRegressionFixes:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
 
+    def test_configure_node_lnd_creates_application_options_section_when_missing(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+
+            with open(lnd_path, 'w') as f:
+                f.write('foo=bar\n')
+
+            with patch('app.DATA_DIR', tmp_dir):
+                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                    res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['success'] is True
+            assert payload['lnd'] is True
+
+            with open(lnd_path, 'r') as f:
+                lnd_content = f.read()
+
+            section_idx = lnd_content.find('[Application Options]\n')
+            host_idx = lnd_content.find('externalhosts=de2.tunnelsats.com:35825\n')
+            assert section_idx != -1
+            assert host_idx != -1
+            assert section_idx < host_idx
+
     def test_configure_node_cln_injects_expected_lines_from_metadata(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
