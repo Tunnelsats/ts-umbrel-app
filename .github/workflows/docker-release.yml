@@ -47,7 +47,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and Push
-        uses: docker/build-push-action@4a13e500e55cf31b7a5d59a38ab2040ab0f42f56 # v5
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v5
         with:
           context: .
           # Only push on master or tag, do test builds on PR
