@@ -111,7 +111,7 @@ function switchTab(tabId) {
                 btnCreate.innerText = "Invoice Active...";
                 btnCreate.disabled = true;
             }
-            if (!pollInterval) pollInterval = setInterval(pollPayment, 3000);
+            pollInterval = setInterval(pollPayment, 3000);
         } else {
             // Hide and reset inactive or completed flows
             if (box) box.classList.add('hidden');
