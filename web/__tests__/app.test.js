@@ -699,4 +699,18 @@ describe('Phase 3b: Install Config', () => {
         expect(timeoutSpy).toHaveBeenCalledWith(window.resetReconcileBtn, 3000);
         expect(timeoutSpy.mock.calls.some(([, delay]) => delay === 2000)).toBe(false);
     });
+
+    test('pollReconcileStatus surfaces network issues after repeated fetch failures', async () => {
+        const timeoutSpy = jest.spyOn(window, 'setTimeout');
+        global.fetch = jest.fn(() => Promise.reject(new Error('network down')));
+        document.getElementById('reconcile-text').innerText = 'Reconciling...';
+
+        await window.pollReconcileStatus('/api/local/reconcile/net-err');
+        await window.pollReconcileStatus('/api/local/reconcile/net-err');
+        expect(document.getElementById('reconcile-text').innerText).not.toContain('network issues');
+
+        await window.pollReconcileStatus('/api/local/reconcile/net-err');
+        expect(document.getElementById('reconcile-text').innerText).toBe('Reconciling (network issues)...');
+        expect(timeoutSpy.mock.calls.filter(([, delay]) => delay === 2000).length).toBeGreaterThanOrEqual(3);
+    });
 });

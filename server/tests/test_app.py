@@ -655,6 +655,36 @@ class TestDataplaneAndRegressionFixes:
             assert cln_content.count('always-use-proxy=false\n') == 1
             assert 'old.tunnelsats.com' not in cln_content
 
+    def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            cln_path = os.path.join(tmp_dir, 'config')
+            original_content = (
+                'foo=bar\n'
+                'announce-addr=old.tunnelsats.com:1111\n'
+                'always-use-proxy=true\n'
+            )
+
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            with open(cln_path, 'w') as f:
+                f.write(original_content)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    with patch('app.os.replace', side_effect=OSError('replace failed')):
+                        with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
+                            res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+
+            assert res.status_code == 500
+            payload = json.loads(res.data)
+            assert payload['success'] is False
+            assert payload['error'] == 'Failed to modify CLN config.'
+            mock_restart.assert_not_called()
+
+            with open(cln_path, 'r') as f:
+                assert f.read() == original_content
+
     def test_configure_node_lnd_skips_restart_when_config_already_matches(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')

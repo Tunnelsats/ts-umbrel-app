@@ -210,6 +210,69 @@ def upsert_config_line(path, prefix, replacement_line):
     return True, changed
 
 
+def upsert_config_lines(path, replacements):
+    lines = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as conf_fp:
+                lines = conf_fp.readlines()
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error reading {path} for configure: {exc}")
+            return False, False
+
+    changed = False
+    for prefix, replacement_line in replacements:
+        found = False
+        updated_lines = []
+        normalized_line = f"{replacement_line}\n"
+
+        for line in lines:
+            stripped = line.lstrip()
+            candidate = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            if candidate.startswith(prefix):
+                if not found:
+                    if line != normalized_line:
+                        changed = True
+                    updated_lines.append(normalized_line)
+                    found = True
+                else:
+                    changed = True
+                continue
+            updated_lines.append(line)
+
+        if not found:
+            updated_lines.append(normalized_line)
+            changed = True
+
+        lines = updated_lines
+
+    if changed:
+        file_mode = None
+        if os.path.exists(path):
+            try:
+                file_mode = os.stat(path).st_mode & 0o777
+            except (IOError, OSError) as exc:
+                app.logger.warning(f"Error reading file mode for {path}: {exc}")
+
+        tmp_path = os.path.join(os.path.dirname(path) or ".", f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as conf_fp:
+                conf_fp.writelines(lines)
+            if file_mode is not None:
+                os.chmod(tmp_path, file_mode)
+            os.replace(tmp_path, path)
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Error writing {path} for configure: {exc}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False, False
+
+    return True, changed
+
+
 def upsert_config_line_in_section(path, section_header, prefix, replacement_line):
     lines = []
     if os.path.exists(path):
@@ -984,12 +1047,9 @@ def configure_node():
         ("announce-addr=", f"announce-addr={dns}:{port}"),
         ("always-use-proxy=", "always-use-proxy=false"),
     )
-    cln_changed = False
-    for prefix, line in cln_steps:
-        processed, changed = upsert_config_line(CLN_CONFIG_PATH, prefix, line)
-        if not processed:
-            return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
-        cln_changed = cln_changed or changed
+    cln_processed, cln_changed = upsert_config_lines(CLN_CONFIG_PATH, cln_steps)
+    if not cln_processed:
+        return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
     if cln_changed and not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500

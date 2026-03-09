@@ -567,6 +567,7 @@ async function claimSubscription(mode) {
 
 // 5. Dataplane Reconcile Logic
 let reconcilePollCount = 0;
+let reconcileNetworkErrorCount = 0;
 const MAX_RECONCILE_POLLS = 30; // Max 1 minute polling (30 * 2000ms)
 
 async function reconcileTunnel() {
@@ -585,6 +586,7 @@ async function reconcileTunnel() {
         if (res.status === 202 && data.request_id) {
             text.innerText = "Reconciling...";
             reconcilePollCount = 0;
+            reconcileNetworkErrorCount = 0;
             pollReconcileStatus(data.status_url);
         } else {
             text.innerText = "Error Triggering";
@@ -613,6 +615,7 @@ async function pollReconcileStatus(url) {
             fetchStatus();
             return;
         }
+        reconcileNetworkErrorCount = 0;
         const data = await res.json();
 
         if (data.complete) {
@@ -629,6 +632,10 @@ async function pollReconcileStatus(url) {
             setTimeout(() => pollReconcileStatus(url), 2000);
         }
     } catch (e) {
+        reconcileNetworkErrorCount++;
+        if (reconcileNetworkErrorCount >= 3) {
+            document.getElementById('reconcile-text').innerText = "Reconciling (network issues)...";
+        }
         setTimeout(() => pollReconcileStatus(url), 2000);
     }
 }
