@@ -7,6 +7,7 @@ var purchaseMode = "buy"; // "buy" or "renew"
 const BASE_PRICE_USD = 3;
 const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
+const POLL_INTERVAL_MS = 3000;
 
 async function fetchPricing() {
     try {
@@ -111,7 +112,7 @@ function switchTab(tabId) {
                 btnCreate.innerText = "Invoice Active...";
                 btnCreate.disabled = true;
             }
-            pollInterval = setInterval(pollPayment, 3000);
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
         } else {
             // Hide and reset inactive or completed flows
             if (box) box.classList.add('hidden');
@@ -368,7 +369,7 @@ async function createSub(mode) {
 
             // Start Polling (clear any existing interval first)
             if (pollInterval) clearInterval(pollInterval);
-            pollInterval = setInterval(pollPayment, 3000);
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
         } else if (data.message) {
             displayPurchaseError(data.message);
         }
