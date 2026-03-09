@@ -102,12 +102,23 @@ function switchTab(tabId) {
     }
     ['buy', 'renew'].forEach(mode => {
         const box = document.getElementById(`invoice-box-${mode}`);
-        if (box) box.classList.add('hidden');
-        
         const btnCreate = document.getElementById(`btn-create-${mode}`);
-        if (btnCreate) {
-            btnCreate.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
-            btnCreate.disabled = false;
+        
+        if (activePaymentHash && tabId === mode && purchaseMode === mode) {
+            // Restore active invoice UI and resume polling
+            if (box) box.classList.remove('hidden');
+            if (btnCreate) {
+                btnCreate.innerText = "Invoice Active...";
+                btnCreate.disabled = true;
+            }
+            if (!pollInterval) pollInterval = setInterval(pollPayment, 3000);
+        } else {
+            // Hide and reset inactive or completed flows
+            if (box) box.classList.add('hidden');
+            if (btnCreate) {
+                btnCreate.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+                btnCreate.disabled = false;
+            }
         }
     });
 

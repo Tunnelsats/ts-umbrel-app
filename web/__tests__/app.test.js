@@ -68,6 +68,28 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-error').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('txt-error').querySelector('span').innerText).toBe('Connection timeout');
     });
+
+    test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {
+        window.activePaymentHash = 'test-hash-123';
+        window.purchaseMode = 'buy';
+        
+        // Navigate away, should clear polling
+        window.switchTab('dashboard'); 
+        expect(window.pollInterval).toBeFalsy();
+        expect(document.getElementById('invoice-box-buy').classList.contains('hidden')).toBe(true);
+        
+        // Navigate back to buy tab
+        window.switchTab('buy');
+        
+        // Polling should resume, UI should restore
+        expect(window.pollInterval).not.toBeNull();
+        expect(document.getElementById('invoice-box-buy').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('btn-create-buy').disabled).toBe(true);
+        
+        // Cleanup
+        clearInterval(window.pollInterval);
+        window.activePaymentHash = null;
+    });
 });
 
 
