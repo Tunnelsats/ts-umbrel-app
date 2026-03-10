@@ -358,11 +358,23 @@ ensure_policy_routing() {
     ip route del 10.9.0.0/24 table 51820 >/dev/null 2>&1 || true
 
     local wg_cidrs
-    wg_cidrs="$(ip -4 route show dev "${WG_IFACE}" scope link | awk '{print $1}' || true)"
+    wg_cidrs="$(ip -4 addr show dev "${WG_IFACE}" | awk '/inet / {print $2}' || true)"
     if [ -z "${wg_cidrs}" ]; then
         LAST_ERROR="Failed to discover WireGuard interface addresses on ${WG_IFACE}"
         return 1
     fi
+
+    # Mask the addresses to proper network CIDRs using python3 (e.g. 10.9.0.2/24 -> 10.9.0.0/24, or 10.9.0.100/32 -> 10.9.0.100/32)
+    wg_cidrs="$(python3 -c '
+import sys, ipaddress
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        print(ipaddress.IPv4Network(line, strict=False))
+    except (ValueError, TypeError):
+        pass
+' <<< "${wg_cidrs}")"
 
     while IFS= read -r cidr; do
         [ -n "${cidr}" ] || continue
