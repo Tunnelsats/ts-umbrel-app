@@ -397,6 +397,28 @@ def _write_file_secure(path, content):
     os.replace(tmp_path, path)
 
 
+def _set_restart_pending(meta_path, meta, key, is_pending):
+    has_key = key in meta
+    current_pending = bool(meta.get(key))
+
+    if is_pending:
+        if has_key and current_pending:
+            return True
+        meta[key] = True
+    else:
+        if not has_key:
+            return True
+        meta.pop(key, None)
+
+    try:
+        _write_file_secure(meta_path, json.dumps(meta, indent=2))
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to persist restart-pending state for {key}: {exc}")
+        return False
+
+    return True
+
+
 def _has_required_wireguard_blocks(config_text):
     has_interface = bool(re.search(r"^\s*\[Interface\]\s*$", config_text, flags=re.IGNORECASE | re.MULTILINE))
     has_peer = bool(re.search(r"^\s*\[Peer\]\s*$", config_text, flags=re.IGNORECASE | re.MULTILINE))
@@ -1019,6 +1041,9 @@ def configure_node():
     if not dns or port <= 0:
         return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
+    lnd_pending_key = "lndRestartPending"
+    cln_pending_key = "clnRestartPending"
+
     if node_type == "lnd":
         lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_TUNNELSATS_CONF_PATH,
@@ -1028,8 +1053,12 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if lnd_changed and not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)"):
+        lnd_need_restart = lnd_changed or bool(meta.get(lnd_pending_key))
+        if lnd_need_restart and not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)"):
+            _set_restart_pending(meta_path, meta, lnd_pending_key, True)
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
+        if lnd_need_restart:
+            _set_restart_pending(meta_path, meta, lnd_pending_key, False)
 
         return jsonify(
             {
@@ -1051,8 +1080,12 @@ def configure_node():
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
-    if cln_changed and not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+    cln_need_restart = cln_changed or bool(meta.get(cln_pending_key))
+    if cln_need_restart and not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+        _set_restart_pending(meta_path, meta, cln_pending_key, True)
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
+    if cln_need_restart:
+        _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
     return jsonify(
         {

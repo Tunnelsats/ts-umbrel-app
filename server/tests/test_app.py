@@ -729,6 +729,61 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is False
             assert payload['error'] == 'Failed to restart LND container.'
 
+            with open(meta_path, 'r') as f:
+                updated_meta = json.load(f)
+            assert updated_meta['lndRestartPending'] is True
+
+    def test_configure_node_lnd_retries_restart_when_pending_flag_set(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com', 'lndRestartPending': True}, f)
+
+            with open(lnd_path, 'w') as f:
+                f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
+
+            with patch('app.DATA_DIR', tmp_dir):
+                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                    with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['success'] is True
+            assert payload['lnd_changed'] is False
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
+
+            with open(meta_path, 'r') as f:
+                updated_meta = json.load(f)
+            assert 'lndRestartPending' not in updated_meta
+
+    def test_configure_node_cln_returns_500_when_restart_fails(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+
+            with open(cln_path, 'w') as f:
+                f.write('foo=bar\n')
+
+            with patch('app.DATA_DIR', tmp_dir):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    with patch('app.restart_container_by_pattern', return_value=False):
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+
+            assert res.status_code == 500
+            payload = json.loads(res.data)
+            assert payload['success'] is False
+            assert payload['error'] == 'Failed to restart CLN container.'
+
+            with open(meta_path, 'r') as f:
+                updated_meta = json.load(f)
+            assert updated_meta['clnRestartPending'] is True
+
     def test_restore_node_comments_expected_lines(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
