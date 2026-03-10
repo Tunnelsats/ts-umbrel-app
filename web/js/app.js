@@ -49,14 +49,35 @@ function setActionMessage(elementId, text, tone) {
 }
 
 async function fetchPricing() {
+    if (currentSatsPerDollar !== null) {
+        renderDurations();
+        return; // Already fetched this session
+    }
+
     try {
-        const res = await fetch('https://mempool.space/api/v1/prices');
-        const data = await res.json();
-        if (data && data.USD) {
-            currentSatsPerDollar = 100000000 / data.USD;
+        const res = await fetch('https://lnbits.tunnelsats.com/api/v1/conversion', {
+            method: 'POST',
+            headers: {
+                'accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                from_: 'usd',
+                amount: BASE_PRICE_USD,
+                to: 'sat'
+            })
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.sats && data.USD) {
+                currentSatsPerDollar = data.sats / data.USD;
+            } else if (data && data.sats) {
+                currentSatsPerDollar = data.sats / BASE_PRICE_USD;
+            }
         }
     } catch(e) {
-        console.warn("Could not fetch BTC price", e);
+        console.warn("Could not fetch BTC price from LNBits", e);
     }
     renderDurations();
 }
@@ -114,7 +135,6 @@ document.addEventListener("DOMContentLoaded", () => {
     setNodeType('lnd', false);
     fetchStatus();
     fetchServers();
-    fetchPricing();
 
     // Attach programmatic event listeners
     const btnRecon = document.getElementById('btn-reconcile');
@@ -162,6 +182,11 @@ function switchTab(tabId) {
             }
         }
     });
+
+    // Fetch pricing on-demand when entering purchase flows
+    if (tabId === 'buy' || tabId === 'renew') {
+        fetchPricing();
+    }
 
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
