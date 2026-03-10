@@ -128,9 +128,9 @@ docker_api_with_code() {
 
 read_wg_config_path() {
     local -a files=()
-    mapfile -t files < <(find /data -name "tunnelsats*.conf" -type f | sort)
+    mapfile -t files < <(ls -1t /data/tunnelsats*.conf 2>/dev/null || true)
     if [ "${#files[@]}" -gt 1 ]; then
-        log WARN "Multiple tunnelsats*.conf files found, using first: ${files[0]}"
+        log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
     fi
     echo "${files[0]:-}"
 }
@@ -358,7 +358,7 @@ ensure_policy_routing() {
     ip route del 10.9.0.0/24 table 51820 >/dev/null 2>&1 || true
 
     local wg_cidrs
-    wg_cidrs="$(ip -4 addr show dev "${WG_IFACE}" | awk '/inet / {print $2}' || true)"
+    wg_cidrs="$(ip -4 route show dev "${WG_IFACE}" scope link | awk '{print $1}' || true)"
     if [ -z "${wg_cidrs}" ]; then
         LAST_ERROR="Failed to discover WireGuard interface addresses on ${WG_IFACE}"
         return 1
