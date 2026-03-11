@@ -130,6 +130,7 @@ def comment_out_config_lines(path, prefixes):
             updated_lines.append(line)
 
     if changed:
+        file_mode = None
         file_uid = 1000
         file_gid = 1000
         try:
@@ -197,6 +198,7 @@ def upsert_config_line(path, prefix, replacement_line):
         changed = True
 
     if changed:
+        file_mode = None
         file_uid = 1000
         file_gid = 1000
         if os.path.exists(path):
@@ -268,6 +270,7 @@ def upsert_config_lines(path, replacements):
         lines = updated_lines
 
     if changed:
+        file_mode = None
         file_uid = 1000
         file_gid = 1000
         if os.path.exists(path):
@@ -364,6 +367,7 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
         updated_lines = lines[: section_start + 1] + updated_section + lines[section_end:]
 
     if changed:
+        file_mode = None
         file_uid = 1000
         file_gid = 1000
         if os.path.exists(path):
@@ -430,7 +434,7 @@ def _write_file_secure(path, content):
     tmp_path = os.path.join(parent_dir, f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
     with open(tmp_path, "w", encoding="utf-8") as fp:
         fp.write(content)
-    os.chmod(tmp_path, 0o644)
+    os.chmod(tmp_path, 0o600)
     try:
         os.chown(tmp_path, 1000, 1000)
     except OSError:

@@ -274,6 +274,10 @@ ensure_wg_up() {
     mkdir -p /etc/wireguard
     cp "${source_cfg}" "${WG_CONF_PATH}"
 
+    # Ensure WireGuard doesn't aggressively hijack the host routing table via AllowedIPs=0.0.0.0/0
+    sed -i '/^\s*Table\s*=/Id' "${WG_CONF_PATH}"
+    sed -i '/^\[Interface\]/a Table = off' "${WG_CONF_PATH}"
+
     FORWARDING_PORT="$(extract_forwarding_port "${source_cfg}" || true)"
     if [ -z "${FORWARDING_PORT}" ]; then
         LAST_ERROR="No forwarding port metadata found in config"
