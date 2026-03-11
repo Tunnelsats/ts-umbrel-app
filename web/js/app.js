@@ -365,13 +365,13 @@ async function createSub(mode) {
     const duration = parseInt(document.getElementById(`${mode}-duration-select`).value);
     let serverId = null;
     const createBtn = document.getElementById(`btn-create-${mode}`);
+    const previousPaymentHash = activePaymentHash;
+    const hadActiveInvoiceForModeBeforeCall = Boolean(activePaymentHash && purchaseMode === mode);
+    let invoiceCreatedInThisCall = false;
     if (mode === 'buy') {
         serverId = document.getElementById('buy-server-select').value;
         if (!serverId) return;
     }
-
-    // Save purchase mode globally for polling
-    purchaseMode = mode;
 
     // Helper for ui errors
     function displayPurchaseError(msg) {
@@ -427,6 +427,8 @@ async function createSub(mode) {
 
         if (res.ok && data.paymentHash && data.invoice) {
             activePaymentHash = data.paymentHash;
+            purchaseMode = mode;
+            invoiceCreatedInThisCall = true;
             document.getElementById(`invoice-bolt11-${mode}`).value = data.invoice;
             document.getElementById(`pay-link-${mode}`).href = `lightning:${data.invoice}`;
 
@@ -444,8 +446,17 @@ async function createSub(mode) {
         }
     } catch (e) {
         displayPurchaseError("Error creating subscription: " + e.message);
+        // If invoice setup fails after receiving data, reset state so retry is possible.
+        if (activePaymentHash && activePaymentHash !== previousPaymentHash && purchaseMode === mode) {
+            activePaymentHash = null;
+            invoiceCreatedInThisCall = false;
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
     } finally {
-        const hasActiveInvoice = Boolean(activePaymentHash && purchaseMode === mode);
+        const hasActiveInvoice = invoiceCreatedInThisCall || hadActiveInvoiceForModeBeforeCall;
         if (hasActiveInvoice) {
             createBtn.innerText = "Invoice Active...";
             createBtn.disabled = true;

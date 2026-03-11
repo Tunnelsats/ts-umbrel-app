@@ -366,6 +366,26 @@ describe('Phase 1: createSub generates invoice', () => {
         expect(createBtn.disabled).toBe(false);
         expect(createBtn.innerText).toBe('Generate Lightning Invoice');
     });
+
+    test('resets active invoice state if post-fetch UI setup throws', async () => {
+        await window.fetchServers();
+        jest.spyOn(window, 'renderQR').mockImplementation(() => {
+            throw new Error('QR render failed');
+        });
+
+        await window.createSub('buy');
+
+        expect(window.activePaymentHash).toBeNull();
+        expect(window.pollInterval).toBeFalsy();
+
+        const errEl = document.getElementById('purchase-error-buy');
+        expect(errEl).toBeTruthy();
+        expect(errEl.innerText).toContain('QR render failed');
+
+        const createBtn = document.getElementById('btn-create-buy');
+        expect(createBtn.disabled).toBe(false);
+        expect(createBtn.innerText).toBe('Generate Lightning Invoice');
+    });
 });
 
 describe('Phase 2: Renew Flow', () => {
@@ -421,6 +441,48 @@ describe('Phase 2: Renew Flow', () => {
         const bolt11 = document.getElementById('invoice-bolt11-renew');
         expect(bolt11.value).toBe('lnbcrenewtest');
         expect(window.activePaymentHash).toBe('renew-hash-123');
+    });
+
+    test('renew failure does not lock button when only buy invoice is active', async () => {
+        // Existing buy invoice is active in global state.
+        window.activePaymentHash = 'buy-hash-123';
+        window.purchaseMode = 'buy';
+
+        // Load renew metadata so createSub('renew') can proceed.
+        window.switchTab('renew');
+        await new Promise(process.nextTick);
+
+        // Force renew API failure response.
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/meta') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ serverId: 'ch-zrh', wgPublicKey: 'pubkey789' }),
+                    ok: true
+                });
+            }
+            if (url === '/api/subscription/renew') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ error: 'Renew endpoint unavailable' }),
+                    ok: false
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.createSub('renew');
+
+        // Renew button must remain usable after failed renew attempt.
+        const renewBtn = document.getElementById('btn-create-renew');
+        expect(renewBtn.disabled).toBe(false);
+        expect(renewBtn.innerText).toBe('Generate Renewal Invoice');
+
+        // Existing buy invoice state remains intact and uncorrupted.
+        expect(window.activePaymentHash).toBe('buy-hash-123');
+        expect(window.purchaseMode).toBe('buy');
+
+        const errEl = document.getElementById('purchase-error-renew');
+        expect(errEl).toBeTruthy();
+        expect(errEl.innerText).toContain('Renew endpoint unavailable');
     });
 });
 
