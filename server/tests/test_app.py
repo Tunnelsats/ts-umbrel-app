@@ -327,6 +327,12 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 200
 
+    def test_local_api_allows_ipv6_ula(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': 'fd00::1'
+        })
+        assert res.status_code == 200
+
     def test_local_api_rejects_ipv6_link_local(self, client):
         res = client.get('/api/local/status', environ_base={
             'REMOTE_ADDR': 'fe80::1'
