@@ -368,6 +368,9 @@ describe('Phase 1: createSub generates invoice', () => {
     });
 
     test('resets active invoice state if post-fetch UI setup throws', async () => {
+        if (window.pollInterval) clearInterval(window.pollInterval);
+        window.pollInterval = null;
+        window.activePaymentHash = null;
         await window.fetchServers();
         jest.spyOn(window, 'renderQR').mockImplementation(() => {
             throw new Error('QR render failed');
@@ -385,6 +388,24 @@ describe('Phase 1: createSub generates invoice', () => {
         const createBtn = document.getElementById('btn-create-buy');
         expect(createBtn.disabled).toBe(false);
         expect(createBtn.innerText).toBe('Generate Lightning Invoice');
+    });
+
+    test('does not clear pre-existing poll interval if setup fails before creating new interval', async () => {
+        await window.fetchServers();
+        const clearSpy = jest.spyOn(window, 'clearInterval');
+
+        window.activePaymentHash = 'existing-hash';
+        window.purchaseMode = 'renew';
+        window.pollInterval = 98765;
+
+        jest.spyOn(window, 'renderQR').mockImplementation(() => {
+            throw new Error('QR render failed');
+        });
+
+        await window.createSub('buy');
+
+        expect(clearSpy).not.toHaveBeenCalledWith(98765);
+        expect(window.pollInterval).toBe(98765);
     });
 });
 

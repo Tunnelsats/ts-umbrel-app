@@ -366,6 +366,7 @@ async function createSub(mode) {
     let serverId = null;
     const createBtn = document.getElementById(`btn-create-${mode}`);
     const previousPaymentHash = activePaymentHash;
+    const previousPollInterval = pollInterval;
     const hadActiveInvoiceForModeBeforeCall = Boolean(activePaymentHash && purchaseMode === mode);
     let invoiceCreatedInThisCall = false;
     if (mode === 'buy') {
@@ -448,7 +449,8 @@ async function createSub(mode) {
         if (activePaymentHash && activePaymentHash !== previousPaymentHash && purchaseMode === mode) {
             activePaymentHash = null;
             invoiceCreatedInThisCall = false;
-            if (pollInterval) {
+            // Only clear polling if this call created a new interval.
+            if (pollInterval && pollInterval !== previousPollInterval) {
                 clearInterval(pollInterval);
                 pollInterval = null;
             }
