@@ -33,3 +33,11 @@ If you attempt to run both node implementations in parallel on your Umbrel:
 1. Tunnelsats will strictly prioritize LND. LND will be tunneled, and CLN will be ignored.
 2. If you transition between nodes (e.g., stopping LND and starting CLN), the active node will successfully acquire the tunnel.
 **Warning:** If you have tunneled CLN, and then subsequently click "Start" on LND via the Umbrel UI while CLN is still running, Docker will encounter an IP conflict (`Address already in use`) and LND will fail to boot. You must ensure only one lightning implementation is actively running before using Tunnelsats.
+
+### 5. Why does Tunnelsats use two different ports for CLN?
+When configuring CLN for hybrid mode, Tunnelsats injects two distinct port values that serve entirely different purposes:
+
+- **`bind-addr=0.0.0.0:9736`** — This is CLN's internal daemon socket port (hardcoded by Umbrel as `APP_CORE_LIGHTNING_DAEMON_PORT=9736`). It tells CLN's `connectd` subprocess where to bind locally inside the container before it can open any outbound Tor connections. This port is **never visible** to the outside world.
+- **`announce-addr=<vpn-server>:<vpnPort>`** — This is the clearnet address that gets gossiped to the Lightning Network, allowing remote nodes to reach you through the Tunnelsats VPN. The port here (e.g. `39486`) is the external VPN forwarding port assigned by Tunnelsats — completely separate from the internal `9736`.
+
+Mixing these up (e.g. using the VPN port as `bind-addr`) would cause CLN to crash on boot, as there is no local process listening on the external VPN port.
