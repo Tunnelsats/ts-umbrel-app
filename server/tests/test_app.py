@@ -321,6 +321,18 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 403
 
+    def test_local_api_allows_ipv6_loopback(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': '::1'
+        })
+        assert res.status_code == 200
+
+    def test_local_api_allows_ipv4_mapped_private_address(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': '::ffff:192.168.1.50'
+        })
+        assert res.status_code == 200
+
     @patch('app.subprocess.run')
     def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, client, data_dir):
         old_conf = data_dir / 'tunnelsats-old.conf'

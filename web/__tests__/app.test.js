@@ -319,6 +319,52 @@ describe('Phase 1: createSub generates invoice', () => {
 
         // Payment hash should be stored
         expect(window.activePaymentHash).toBe('hash-xyz-123');
+
+        // Button remains disabled while invoice is active to prevent duplicate invoices
+        const createBtn = document.getElementById('btn-create-buy');
+        expect(createBtn.disabled).toBe(true);
+        expect(createBtn.innerText).toBe('Invoice Active...');
+    });
+
+    test('surfaces backend errors for createSub', async () => {
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/status') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        wg_status: 'Disconnected', wg_pubkey: '', configs_found: [], version: 'v3.0.0'
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/servers') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        servers: [
+                            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' }
+                        ]
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/subscription/create') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({ error: 'Upstream unavailable' }),
+                    ok: false
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.fetchServers();
+        await window.createSub('buy');
+
+        const errEl = document.getElementById('purchase-error-buy');
+        expect(errEl).toBeTruthy();
+        expect(errEl.innerText).toContain('Upstream unavailable');
+
+        const createBtn = document.getElementById('btn-create-buy');
+        expect(createBtn.disabled).toBe(false);
+        expect(createBtn.innerText).toBe('Generate Lightning Invoice');
     });
 });
 

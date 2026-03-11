@@ -364,6 +364,7 @@ function renderQR(mode, text) {
 async function createSub(mode) {
     const duration = parseInt(document.getElementById(`${mode}-duration-select`).value);
     let serverId = null;
+    const createBtn = document.getElementById(`btn-create-${mode}`);
     if (mode === 'buy') {
         serverId = document.getElementById('buy-server-select').value;
         if (!serverId) return;
@@ -388,8 +389,8 @@ async function createSub(mode) {
     const oldErr = document.getElementById(`purchase-error-${mode}`);
     if (oldErr) oldErr.remove();
 
-    document.getElementById(`btn-create-${mode}`).innerText = "Loading...";
-    document.getElementById(`btn-create-${mode}`).disabled = true;
+    createBtn.innerText = "Loading...";
+    createBtn.disabled = true;
 
     try {
         let endpoint = '/api/subscription/create';
@@ -411,8 +412,8 @@ async function createSub(mode) {
 
             if (!payload.wgPublicKey) {
                 displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
-                document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
-                document.getElementById(`btn-create-${mode}`).disabled = false;
+                createBtn.innerText = "Generate Renewal Invoice";
+                createBtn.disabled = false;
                 return;
             }
         }
@@ -424,7 +425,7 @@ async function createSub(mode) {
         });
         const data = await res.json();
 
-        if (data.paymentHash && data.invoice) {
+        if (res.ok && data.paymentHash && data.invoice) {
             activePaymentHash = data.paymentHash;
             document.getElementById(`invoice-bolt11-${mode}`).value = data.invoice;
             document.getElementById(`pay-link-${mode}`).href = `lightning:${data.invoice}`;
@@ -435,14 +436,23 @@ async function createSub(mode) {
             // Start Polling (clear any existing interval first)
             if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
-        } else if (data.message) {
-            displayPurchaseError(data.message);
+        } else {
+            const fallbackError = mode === 'renew'
+                ? "Unable to create renewal invoice."
+                : "Unable to create subscription invoice.";
+            displayPurchaseError(data.error || data.message || fallbackError);
         }
     } catch (e) {
         displayPurchaseError("Error creating subscription: " + e.message);
     } finally {
-        document.getElementById(`btn-create-${mode}`).innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
-        document.getElementById(`btn-create-${mode}`).disabled = false;
+        const hasActiveInvoice = Boolean(activePaymentHash && purchaseMode === mode);
+        if (hasActiveInvoice) {
+            createBtn.innerText = "Invoice Active...";
+            createBtn.disabled = true;
+        } else {
+            createBtn.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+            createBtn.disabled = false;
+        }
     }
 }
 
