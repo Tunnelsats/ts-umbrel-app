@@ -412,8 +412,6 @@ async function createSub(mode) {
 
             if (!payload.wgPublicKey) {
                 displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
-                createBtn.innerText = "Generate Renewal Invoice";
-                createBtn.disabled = false;
                 return;
             }
         }
