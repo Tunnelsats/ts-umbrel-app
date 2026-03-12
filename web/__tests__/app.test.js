@@ -409,6 +409,29 @@ describe('Phase 1: createSub generates invoice', () => {
         expect(window.activePaymentHash).toBe('existing-hash');
         expect(window.purchaseMode).toBe('renew');
     });
+
+    test('rolls back mode state when setup fails even if payment hash is reused', async () => {
+        await window.fetchServers();
+
+        // Existing renew invoice is active before creating a buy invoice.
+        window.activePaymentHash = 'hash-xyz-123';
+        window.purchaseMode = 'renew';
+
+        jest.spyOn(window, 'renderQR').mockImplementation(() => {
+            throw new Error('QR render failed');
+        });
+
+        await window.createSub('buy');
+
+        // Existing active invoice context must remain unchanged.
+        expect(window.activePaymentHash).toBe('hash-xyz-123');
+        expect(window.purchaseMode).toBe('renew');
+
+        // Buy button must stay usable because buy has no active invoice.
+        const buyBtn = document.getElementById('btn-create-buy');
+        expect(buyBtn.disabled).toBe(false);
+        expect(buyBtn.innerText).toBe('Generate Lightning Invoice');
+    });
 });
 
 describe('Phase 2: Renew Flow', () => {

@@ -447,7 +447,7 @@ async function createSub(mode) {
     } catch (e) {
         displayPurchaseError("Error creating subscription: " + e.message);
         // If invoice setup fails after receiving data, reset state so retry is possible.
-        if (activePaymentHash && activePaymentHash !== previousPaymentHash && purchaseMode === mode) {
+        if (invoiceCreatedInThisCall && purchaseMode === mode) {
             activePaymentHash = previousPaymentHash;
             purchaseMode = previousPurchaseMode;
             invoiceCreatedInThisCall = false;
