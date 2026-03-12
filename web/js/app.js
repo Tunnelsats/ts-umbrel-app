@@ -364,13 +364,16 @@ function renderQR(mode, text) {
 async function createSub(mode) {
     const duration = parseInt(document.getElementById(`${mode}-duration-select`).value);
     let serverId = null;
+    const createBtn = document.getElementById(`btn-create-${mode}`);
+    const previousPaymentHash = activePaymentHash;
+    const previousPurchaseMode = purchaseMode;
+    const previousPollInterval = pollInterval;
+    const hadActiveInvoiceForModeBeforeCall = Boolean(activePaymentHash && purchaseMode === mode);
+    let invoiceCreatedInThisCall = false;
     if (mode === 'buy') {
         serverId = document.getElementById('buy-server-select').value;
         if (!serverId) return;
     }
-
-    // Save purchase mode globally for polling
-    purchaseMode = mode;
 
     // Helper for ui errors
     function displayPurchaseError(msg) {
@@ -388,8 +391,8 @@ async function createSub(mode) {
     const oldErr = document.getElementById(`purchase-error-${mode}`);
     if (oldErr) oldErr.remove();
 
-    document.getElementById(`btn-create-${mode}`).innerText = "Loading...";
-    document.getElementById(`btn-create-${mode}`).disabled = true;
+    createBtn.innerText = "Loading...";
+    createBtn.disabled = true;
 
     try {
         let endpoint = '/api/subscription/create';
@@ -411,8 +414,6 @@ async function createSub(mode) {
 
             if (!payload.wgPublicKey) {
                 displayPurchaseError("No target public key found. Please purchase a new subscription or import an existing configuration.");
-                document.getElementById(`btn-create-${mode}`).innerText = "Generate Renewal Invoice";
-                document.getElementById(`btn-create-${mode}`).disabled = false;
                 return;
             }
         }
@@ -424,8 +425,10 @@ async function createSub(mode) {
         });
         const data = await res.json();
 
-        if (data.paymentHash && data.invoice) {
+        if (res.ok && data.paymentHash && data.invoice) {
             activePaymentHash = data.paymentHash;
+            purchaseMode = mode;
+            invoiceCreatedInThisCall = true;
             document.getElementById(`invoice-bolt11-${mode}`).value = data.invoice;
             document.getElementById(`pay-link-${mode}`).href = `lightning:${data.invoice}`;
 
@@ -435,14 +438,34 @@ async function createSub(mode) {
             // Start Polling (clear any existing interval first)
             if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
-        } else if (data.message) {
-            displayPurchaseError(data.message);
+        } else {
+            const fallbackError = mode === 'renew'
+                ? "Unable to create renewal invoice."
+                : "Unable to create subscription invoice.";
+            displayPurchaseError(data.error || data.message || fallbackError);
         }
     } catch (e) {
         displayPurchaseError("Error creating subscription: " + e.message);
+        // If invoice setup fails after receiving data, reset state so retry is possible.
+        if (invoiceCreatedInThisCall && purchaseMode === mode) {
+            activePaymentHash = previousPaymentHash;
+            purchaseMode = previousPurchaseMode;
+            invoiceCreatedInThisCall = false;
+            // Only clear polling if this call created a new interval.
+            if (pollInterval && pollInterval !== previousPollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
     } finally {
-        document.getElementById(`btn-create-${mode}`).innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
-        document.getElementById(`btn-create-${mode}`).disabled = false;
+        const hasActiveInvoice = invoiceCreatedInThisCall || hadActiveInvoiceForModeBeforeCall;
+        if (hasActiveInvoice) {
+            createBtn.innerText = "Invoice Active...";
+            createBtn.disabled = true;
+        } else {
+            createBtn.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+            createBtn.disabled = false;
+        }
     }
 }
 

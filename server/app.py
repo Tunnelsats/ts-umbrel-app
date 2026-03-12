@@ -34,6 +34,9 @@ ALLOWED_NETWORKS = (
     ip_network("10.0.0.0/8"),
     ip_network("172.16.0.0/12"),
     ip_network("192.168.0.0/16"),
+    ip_network("::1/128"),
+    ip_network("fc00::/7"),
+    # NOTE: fe80::/10 (IPv6 link-local) is intentionally excluded.
 )
 
 
@@ -42,6 +45,8 @@ def client_is_allowed(remote_addr):
         return False
     try:
         remote_ip = ip_address(remote_addr)
+        if getattr(remote_ip, "ipv4_mapped", None):
+            remote_ip = remote_ip.ipv4_mapped
     except ValueError:
         return False
     return any(remote_ip in subnet for subnet in ALLOWED_NETWORKS)
