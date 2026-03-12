@@ -27,7 +27,7 @@ RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 LND_TUNNELSATS_CONF_PATH = "/lightning-data/lnd/tunnelsats.conf"
-CLN_CONFIG_PATH = "/lightning-data/cln/bitcoin/config"
+CLN_CONFIG_PATH = "/lightning-data/cln/config"
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -1156,6 +1156,7 @@ def restore_node():
     cln_processed, cln_changed = comment_out_config_lines(
         CLN_CONFIG_PATH,
         (
+            "bind-addr=",
             "announce-addr=",
             "always-use-proxy=",
         ),

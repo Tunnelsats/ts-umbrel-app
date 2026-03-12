@@ -39,6 +39,12 @@ def test_proxy_fix(client):
     })
     assert res.status_code == 200
 
+
+def test_default_cln_config_path_matches_compose_mount_contract():
+    # docker-compose mounts .../lightningd/bitcoin at /lightning-data/cln.
+    # The default CLN config path must stay aligned with that runtime contract.
+    assert app_module.CLN_CONFIG_PATH == '/lightning-data/cln/config'
+
 # --- Phase 1: Claim Tests ---
 
 MOCK_CLAIM_RESPONSE = {
@@ -647,6 +653,7 @@ class TestDataplaneAndRegressionFixes:
 
             with open(cln_path, 'r') as f:
                 cln_content = f.read()
+            assert 'bind-addr=0.0.0.0:9736' in cln_content
             assert 'announce-addr=de2.tunnelsats.com:35825' in cln_content
             assert 'always-use-proxy=false' in cln_content
 
@@ -677,6 +684,7 @@ class TestDataplaneAndRegressionFixes:
 
             assert cln_content.count('announce-addr=de2.tunnelsats.com:35825\n') == 1
             assert cln_content.count('always-use-proxy=false\n') == 1
+            assert cln_content.count('bind-addr=0.0.0.0:9736\n') == 1
             assert 'old.tunnelsats.com' not in cln_content
 
     def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, client):
@@ -849,7 +857,7 @@ class TestDataplaneAndRegressionFixes:
 
             with open(cln_path, 'r') as f:
                 cln_content = f.read()
-            assert 'bind-addr=0.0.0.0:9735\n' in cln_content
+            assert '# bind-addr=0.0.0.0:9735\n' in cln_content
             assert '# announce-addr=vpn.tunnelsats.com:9735\n' in cln_content
             assert '# always-use-proxy=false\n' in cln_content
             assert '# bind-addr=already-commented\n' in cln_content
