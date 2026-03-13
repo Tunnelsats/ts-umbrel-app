@@ -449,7 +449,7 @@ ensure_nat_forward_rules() {
         ! grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" <<< "${dnat_rules}"; then
         log INFO "Syncing DNAT rules (reason: missing or multiple rules)"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-        if ! iptables -t nat -A PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+        if ! iptables -t nat -I PREROUTING 1 -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
             LAST_ERROR="Failed to add DNAT rule for port ${internal_match_port}"
             return 1
@@ -465,7 +465,7 @@ ensure_nat_forward_rules() {
         ! grep -qF -- "-j ACCEPT" <<< "${forward_in_rules}"; then
         log INFO "Syncing FORWARD inbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        if ! iptables -A FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+        if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
             -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
             LAST_ERROR="Failed to add FORWARD inbound rule"
             return 1
@@ -481,7 +481,7 @@ ensure_nat_forward_rules() {
         ! grep -qF -- "-j ACCEPT" <<< "${forward_out_rules}"; then
         log INFO "Syncing FORWARD outbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        if ! iptables -A FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+        if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
             -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
             LAST_ERROR="Failed to add FORWARD outbound rule"
             return 1
