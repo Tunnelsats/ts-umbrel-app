@@ -134,10 +134,56 @@ scenario_drift_restart() {
 }
 
 scenario_inbound_reachability() {
-  log "Scenario: inbound_reachability (rule presence)"
-  docker exec tunnelsats sh -lc 'iptables -t nat -S PREROUTING | grep -q tunnelsats-dnat'
-  docker exec tunnelsats sh -lc 'iptables -S FORWARD | grep -q tunnelsats-forward-in'
-  docker exec tunnelsats sh -lc 'iptables -S FORWARD | grep -q tunnelsats-forward-out'
+  log "Scenario: inbound_reachability (rule semantics)"
+
+  local status
+  local target_impl
+  local target_ip
+  local subnet
+  local bridge_name
+  local bridge_gw
+  local expected_ln_port
+  local dnat_rules
+  local forward_in_rules
+  local forward_out_rules
+
+  status=$(curl -fsS "${BASE_URL}/api/local/status")
+  target_impl=$(echo "${status}" | jq -r '.target_impl // "lnd"')
+  target_ip=$(echo "${status}" | jq -r '.target_ip // "10.9.9.9"')
+  subnet=$(echo "${status}" | jq -r '.docker_network.subnet // "10.9.9.0/25"')
+  bridge_name=$(echo "${status}" | jq -r '.docker_network.bridge // empty')
+
+  if [ -z "${bridge_name}" ] || [ "${bridge_name}" = "null" ]; then
+    echo "Expected docker_network.bridge in status payload"
+    exit 1
+  fi
+
+  expected_ln_port="9735"
+  if [ "${target_impl}" = "cln" ]; then
+    expected_ln_port="9736"
+  fi
+  bridge_gw="${subnet%.*}.1"
+
+  dnat_rules=$(docker exec tunnelsats sh -lc 'iptables -t nat -S PREROUTING | grep tunnelsats-dnat || true')
+  [ "$(echo "${dnat_rules}" | grep -c "tunnelsats-dnat" || true)" -eq 1 ]
+  echo "${dnat_rules}" | grep -q -- "-i tunnelsatsv2"
+  echo "${dnat_rules}" | grep -q -- "--dport 9735"
+  echo "${dnat_rules}" | grep -q -- "--to-destination ${target_ip}:${expected_ln_port}"
+
+  forward_in_rules=$(docker exec tunnelsats sh -lc 'iptables -S FORWARD | grep tunnelsats-forward-in || true')
+  [ "$(echo "${forward_in_rules}" | grep -c "tunnelsats-forward-in" || true)" -eq 1 ]
+  echo "${forward_in_rules}" | grep -q -- "-i tunnelsatsv2"
+  echo "${forward_in_rules}" | grep -q -- "-o ${bridge_name}"
+  echo "${forward_in_rules}" | grep -q -- "-j ACCEPT"
+
+  forward_out_rules=$(docker exec tunnelsats sh -lc 'iptables -S FORWARD | grep tunnelsats-forward-out || true')
+  [ "$(echo "${forward_out_rules}" | grep -c "tunnelsats-forward-out" || true)" -eq 1 ]
+  echo "${forward_out_rules}" | grep -q -- "-i ${bridge_name}"
+  echo "${forward_out_rules}" | grep -q -- "-o tunnelsatsv2"
+  echo "${forward_out_rules}" | grep -q -- "-j ACCEPT"
+
+  docker exec tunnelsats sh -lc "ip rule show pref 32500 | grep -qF -- 'from ${subnet} to ${subnet} lookup main'"
+  docker exec tunnelsats sh -lc "ip rule show pref 32763 | grep -qF -- 'from ${bridge_gw} lookup 51820'"
 }
 
 scenario_missing_socket() {

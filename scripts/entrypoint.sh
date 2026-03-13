@@ -347,7 +347,7 @@ EOF_RULES
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
-    
+
     # Priority 32500: Local-to-Local bypass.
     # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
     if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
@@ -369,7 +369,7 @@ ensure_policy_routing() {
         changed=1
     fi
 
-    # Ensure the tunnelsats bridge gateway itself (10.9.9.1) is also routed through the tunnel 
+    # Ensure the tunnelsats bridge gateway itself (10.9.9.1) is also routed through the tunnel
     # to prevent outbound leaks from this container during diagnostics (e.g. curl ifconfig.me)
     local bridge_gw
     bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
@@ -434,12 +434,19 @@ ensure_nat_forward_rules() {
     local dnat_count
     local forward_in_count
     local forward_out_count
+    local dnat_rules
+    local forward_in_rules
+    local forward_out_rules
 
     # We match 9735 on the tunnel interface to catch these translated packets.
     local internal_match_port="9735"
-    
-    dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
-    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+
+    dnat_rules="$(iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" || true)"
+    dnat_count=$(echo "${dnat_rules}" | grep -c "tunnelsats-dnat" || true)
+    if [ "${dnat_count}" -ne 1 ] || \
+        ! grep -qF -- "-i ${WG_IFACE}" <<< "${dnat_rules}" || \
+        ! grep -qF -- "--dport ${internal_match_port}" <<< "${dnat_rules}" || \
+        ! grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" <<< "${dnat_rules}"; then
         log INFO "Syncing DNAT rules (reason: missing or multiple rules)"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
         if ! iptables -t nat -A PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
@@ -450,8 +457,12 @@ ensure_nat_forward_rules() {
         changed=1
     fi
 
-    forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+    forward_in_rules="$(iptables -S FORWARD | grep -F "tunnelsats-forward-in" || true)"
+    forward_in_count=$(echo "${forward_in_rules}" | grep -c "tunnelsats-forward-in" || true)
+    if [ "${forward_in_count}" -ne 1 ] || \
+        ! grep -qF -- "-i ${WG_IFACE}" <<< "${forward_in_rules}" || \
+        ! grep -qF -- "-o ${BRIDGE_NAME}" <<< "${forward_in_rules}" || \
+        ! grep -qF -- "-j ACCEPT" <<< "${forward_in_rules}"; then
         log INFO "Syncing FORWARD inbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
         if ! iptables -A FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
@@ -462,8 +473,12 @@ ensure_nat_forward_rules() {
         changed=1
     fi
 
-    forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" | grep -qF -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+    forward_out_rules="$(iptables -S FORWARD | grep -F "tunnelsats-forward-out" || true)"
+    forward_out_count=$(echo "${forward_out_rules}" | grep -c "tunnelsats-forward-out" || true)
+    if [ "${forward_out_count}" -ne 1 ] || \
+        ! grep -qF -- "-i ${BRIDGE_NAME}" <<< "${forward_out_rules}" || \
+        ! grep -qF -- "-o ${WG_IFACE}" <<< "${forward_out_rules}" || \
+        ! grep -qF -- "-j ACCEPT" <<< "${forward_out_rules}"; then
         log INFO "Syncing FORWARD outbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
         if ! iptables -A FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
