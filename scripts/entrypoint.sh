@@ -427,36 +427,36 @@ ensure_nat_forward_rules() {
     local internal_match_port="9735"
     
     dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
-    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
-        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
+    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+        log INFO "Syncing DNAT rules (reason: missing or multiple rules)"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-        if ! iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
-            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables DNAT rule for ${WG_IFACE}:${internal_match_port}"
+        if ! iptables -t nat -A PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+            LAST_ERROR="Failed to add DNAT rule for port ${internal_match_port}"
             return 1
         fi
         changed=1
     fi
 
     forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-    if [ "${forward_in_count}" -ne 1 ] || ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-        -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
+    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+        log INFO "Syncing FORWARD inbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        if ! iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-            -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables FORWARD ingress rule (${WG_IFACE} -> ${BRIDGE_NAME})"
+        if ! iptables -A FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
+            LAST_ERROR="Failed to add FORWARD inbound rule"
             return 1
         fi
         changed=1
     fi
 
     forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-    if [ "${forward_out_count}" -ne 1 ] || ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-        -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
+    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" | grep -qF -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+        log INFO "Syncing FORWARD outbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        if ! iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-            -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables FORWARD egress rule (${BRIDGE_NAME} -> ${WG_IFACE})"
+        if ! iptables -A FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
+            LAST_ERROR="Failed to add FORWARD outbound rule"
             return 1
         fi
         changed=1
@@ -469,14 +469,41 @@ ensure_nat_forward_rules() {
 rules_are_synced() {
     # We match 9735 on the tunnel interface to catch these translated packets.
     local internal_match_port="9735"
+    local debug_log="/tmp/reconcile_debug.log"
 
-    ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" || return 1
-    iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
-        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1 || return 1
-    iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-        -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1 || return 1
-    iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-        -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1 || return 1
+    # 1. IP Rule check
+    if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
+        echo "$(date) rules_are_synced: IP rule FAIL" >> "${debug_log}"
+        return 1
+    fi
+
+    # 2. NAT PREROUTING check (DNAT)
+    if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport ${internal_match_port}.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
+         # Try an even looser check if the above regexp is too strict for some kernels
+         if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" || \
+            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "--dport ${internal_match_port}" || \
+            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+             echo "$(date) rules_are_synced: NAT rule FAIL" >> "${debug_log}"
+             return 1
+         fi
+    fi
+
+    # 3. FORWARD Inbound check
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" || \
+       ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-o ${BRIDGE_NAME}" || \
+       ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-j ACCEPT"; then
+        echo "$(date) rules_are_synced: FORWARD in FAIL" >> "${debug_log}"
+        return 1
+    fi
+
+    # 4. FORWARD Outbound check
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" || \
+       ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-o ${WG_IFACE}" || \
+       ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-j ACCEPT"; then
+        echo "$(date) rules_are_synced: FORWARD out FAIL" >> "${debug_log}"
+        return 1
+    fi
+
     return 0
 }
 

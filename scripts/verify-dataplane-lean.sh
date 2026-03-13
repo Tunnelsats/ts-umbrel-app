@@ -6,20 +6,29 @@
 set -e
 
 # Config
-VPN_IP="157.180.94.206"
-VPN_HOST="fi1.tunnelsats.com"
-VPN_PORT="39486"
+VPN_IP="REPLACE_WITH_VPN_IP"
+VPN_HOST="REPLACE_WITH_VPN_HOST"
+VPN_PORT="REPLACE_WITH_VPN_PORT"
 
-# Load metadata if available (Support Umbrel app-data or direct /app/data)
-for meta_path in "/app/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" "./tunnelsats-meta.json"; do
+# Load metadata if available
+for meta_path in \
+    "/app/data/tunnelsats-meta.json" \
+    "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
+    "/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
+    "./tunnelsats-meta.json"; do
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
         METADATA=$(cat "$meta_path")
-        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // "157.180.94.206"')
-        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // "fi1.tunnelsats.com"')
-        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // "39486"')
-        break
+        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty')
+        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // empty')
+        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // empty')
+        [ -n "$VPN_IP" ] && [ -n "$VPN_HOST" ] && [ -n "$VPN_PORT" ] && break
     fi
 done
+
+if [[ "$VPN_IP" == "REPLACE_WITH_VPN_IP" || -z "$VPN_IP" ]]; then
+    echo "ERROR: No VPN configuration found (meta file missing and no manual config set)."
+    exit 1
+fi
 
 EXIT_CODE=0
 
