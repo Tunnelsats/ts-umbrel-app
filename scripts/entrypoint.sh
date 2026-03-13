@@ -488,6 +488,14 @@ cleanup_dataplane() {
 
     local max_attempts=10
     local attempt=0
+    # Remove local bypass rule (pref 32500)
+    ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
+
+    # Remove bridge gateway tunnel rule (pref 32763)
+    local bridge_gw
+    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+    ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
     while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
         ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
         attempt=$((attempt + 1))

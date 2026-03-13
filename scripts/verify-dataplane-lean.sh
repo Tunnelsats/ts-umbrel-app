@@ -10,6 +10,17 @@ VPN_IP="157.180.94.206"
 VPN_HOST="fi1.tunnelsats.com"
 VPN_PORT="39486"
 
+# Load metadata if available (Support Umbrel app-data or direct /app/data)
+for meta_path in "/app/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" "./tunnelsats-meta.json"; do
+    if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
+        METADATA=$(cat "$meta_path")
+        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // "157.180.94.206"')
+        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // "fi1.tunnelsats.com"')
+        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // "39486"')
+        break
+    fi
+done
+
 EXIT_CODE=0
 
 echo "[CI] Starting TunnelSats Dataplane Check..."
