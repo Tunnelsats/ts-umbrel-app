@@ -351,13 +351,20 @@ ensure_policy_routing() {
     # Priority 32500: Local-to-Local bypass.
     # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
     if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
-        ip rule add from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
+        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1; then
+            if ! ip rule show pref 32500 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                LAST_ERROR="Failed to add local-to-local bypass rule for ${DOCKER_NETWORK_SUBNET}"
+                return 1
+            fi
+        fi
     fi
 
     if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
         if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 pref 32764 >/dev/null 2>&1; then
-            LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
-            return 1
+            if ! ip rule show pref 32764 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
+                return 1
+            fi
         fi
         changed=1
     fi
@@ -367,7 +374,12 @@ ensure_policy_routing() {
     local bridge_gw
     bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
     if ! ip rule show | grep -qE "from ${bridge_gw//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
-        ip rule add from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+        if ! ip rule add from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1; then
+            if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
+                LAST_ERROR="Failed to add policy routing rule for bridge gateway ${bridge_gw}"
+                return 1
+            fi
+        fi
     fi
 
     if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
@@ -471,9 +483,15 @@ rules_are_synced() {
     local internal_match_port="9735"
     local debug_log="/tmp/reconcile_debug.log"
 
-    # 1. IP Rule check
+    # 1. IP Rule check (Subnet routing)
     if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
-        echo "$(date) rules_are_synced: IP rule FAIL" >> "${debug_log}"
+        echo "$(date) rules_are_synced: IP Subnet rule FAIL" >> "${debug_log}"
+        return 1
+    fi
+
+    # 1b. IP Rule check (Bypass bridge)
+    if ! ip rule show pref 32500 | grep -q "lookup main"; then
+        echo "$(date) rules_are_synced: IP Bypass rule FAIL" >> "${debug_log}"
         return 1
     fi
 

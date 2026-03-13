@@ -12,20 +12,21 @@ VPN_PORT="REPLACE_WITH_VPN_PORT"
 
 # Load metadata if available
 for meta_path in \
+    "/data/tunnelsats-meta.json" \
     "/app/data/tunnelsats-meta.json" \
     "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
     "/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
     "./tunnelsats-meta.json"; do
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
         METADATA=$(cat "$meta_path")
-        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty')
-        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // empty')
-        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // empty')
-        [ -n "$VPN_IP" ] && [ -n "$VPN_HOST" ] && [ -n "$VPN_PORT" ] && break
+        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty' | grep -m1 -oE '^[0-9.]+$' || echo "INVALID")
+        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // empty' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
+        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // empty' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
+        [ "$VPN_IP" != "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
     fi
 done
 
-if [[ "$VPN_IP" == "REPLACE_WITH_VPN_IP" || -z "$VPN_IP" ]]; then
+if [[ "$VPN_IP" == "REPLACE_WITH_VPN_IP" || "$VPN_IP" == "INVALID" || -z "$VPN_IP" ]]; then
     echo "ERROR: No VPN configuration found (meta file missing and no manual config set)."
     exit 1
 fi
