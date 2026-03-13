@@ -19,10 +19,15 @@ for meta_path in \
     "./tunnelsats-meta.json"; do
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
         METADATA=$(cat "$meta_path")
-        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty' | grep -m1 -oE '^[0-9.]+$' || echo "INVALID")
-        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // empty' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
-        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // empty' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
-        [ "$VPN_IP" != "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
+        VPN_HOST=$(echo "$METADATA" | jq -r '.serverDomain // empty' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
+        VPN_PORT=$(echo "$METADATA" | jq -r '.vpnPort // empty' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
+        
+        # Resolve IP from host
+        if [ "$VPN_HOST" != "INVALID" ] && [ -n "$VPN_HOST" ]; then
+            VPN_IP=$(getent hosts "$VPN_HOST" | awk '{ print $1 }' | head -n 1 || echo "INVALID")
+        fi
+        
+        [ "$VPN_IP" != "INVALID" ] && [ -n "$VPN_IP" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
     fi
 done
 
@@ -37,7 +42,11 @@ echo "[CI] Starting TunnelSats Dataplane Check..."
 
 # 1. Outbound Test
 echo -n "[1/3] Outbound Tunnel Alignment: "
-OUTBOUND=$(docker exec tunnelsats curl -sL --interface 10.9.9.1 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+if [[ -f "/.dockerenv" ]]; then
+    OUTBOUND=$(curl -sL --interface 10.9.9.1 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+else
+    OUTBOUND=$(docker exec tunnelsats curl -sL --interface 10.9.9.1 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+fi
 if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
     echo "OK"
 else

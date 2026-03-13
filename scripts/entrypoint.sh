@@ -435,26 +435,33 @@ ensure_nat_forward_rules() {
     local forward_in_count
     local forward_out_count
 
-    # We match 9735 on the tunnel interface to catch these translated packets.
-    local internal_match_port="9735"
+    # We match the config-defined VPNPort on the tunnel interface to catch these packets.
+    local internal_match_port="${FORWARDING_PORT}"
     
     dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
-    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-        log INFO "Syncing DNAT rules (reason: missing or multiple rules)"
+    if [ "${dnat_count}" -lt 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+        log INFO "Syncing DNAT rules (reason: missing primary rule)"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-        if ! iptables -t nat -A PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+        if ! iptables -t nat -I PREROUTING 1 -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-            LAST_ERROR="Failed to add DNAT rule for port ${internal_match_port}"
+            LAST_ERROR="Failed to add primary DNAT rule for port ${internal_match_port}"
             return 1
+        fi
+        # Add fallback DNAT for port 9735 in case the VPN server translates before the tunnel
+        if [ "${internal_match_port}" != "9735" ]; then
+            if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
+                -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+                log WARN "Failed to add fallback DNAT rule for port 9735"
+            fi
         fi
         changed=1
     fi
 
     forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" | grep -qF -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
         log INFO "Syncing FORWARD inbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        if ! iptables -A FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+        if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
             -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
             LAST_ERROR="Failed to add FORWARD inbound rule"
             return 1
@@ -463,10 +470,10 @@ ensure_nat_forward_rules() {
     fi
 
     forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" | grep -qF -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${BRIDGE_NAME}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
         log INFO "Syncing FORWARD outbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        if ! iptables -A FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+        if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
             -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
             LAST_ERROR="Failed to add FORWARD outbound rule"
             return 1
@@ -475,12 +482,21 @@ ensure_nat_forward_rules() {
     fi
 
     NAT_CHANGED="${changed}"
+    
+    if ! iptables -t nat -S POSTROUTING | grep -qE -- "-o ${WG_IFACE}.*-j MASQUERADE"; then
+        log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
+        if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+            log WARN "Failed to add MASQUERADE rule for ${WG_IFACE}"
+        fi
+        NAT_CHANGED="1"
+    fi
+    
     return 0
 }
 
 rules_are_synced() {
-    # We match 9735 on the tunnel interface to catch these translated packets.
-    local internal_match_port="9735"
+    # We match the config-defined VPNPort on the tunnel interface to catch these packets.
+    local internal_match_port="${FORWARDING_PORT}"
     local debug_log="/tmp/reconcile_debug.log"
 
     # 1. IP Rule check (Subnet routing)
