@@ -489,28 +489,33 @@ ensure_nat_forward_rules() {
         changed=1
     fi
 
+    NAT_CHANGED="${changed}"
+
+    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
+        if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+            LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
+            return 1
+        fi
         NAT_CHANGED="1"
     fi
 
-    NAT_CHANGED="${changed}"
     return 0
-}
 }
 
 rules_are_synced() {
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
-    local debug_log="/tmp/reconcile_debug.log"
 
     # 1. IP Rule check (Subnet routing)
     if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
-        echo "$(date) rules_are_synced: IP Subnet rule FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: IP Subnet rule FAIL"
         return 1
     fi
 
     # 1b. IP Rule check (Bypass bridge)
     if ! ip rule show pref 32500 | grep -q "lookup main"; then
-        echo "$(date) rules_are_synced: IP Bypass rule FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: IP Bypass rule FAIL"
         return 1
     fi
 
@@ -518,7 +523,7 @@ rules_are_synced() {
     local bridge_gw
     bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
     if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
-        echo "$(date) rules_are_synced: IP Bridge-GW rule FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: IP Bridge-GW rule FAIL"
         return 1
     fi
 
@@ -528,14 +533,14 @@ rules_are_synced() {
          if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" || \
             ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "--dport ${internal_match_port}" || \
             ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-             echo "$(date) rules_are_synced: NAT rule FAIL" >> "${debug_log}"
+             log WARN "rules_are_synced: NAT rule FAIL"
              return 1
          fi
     fi
 
     # 2b. NAT PREROUTING fallback check for translated 9735 traffic
     if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport 9735.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
-        echo "$(date) rules_are_synced: NAT fallback rule FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: NAT fallback rule FAIL"
         return 1
     fi
 
@@ -543,7 +548,7 @@ rules_are_synced() {
     if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" || \
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-o ${BRIDGE_NAME}" || \
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-j ACCEPT"; then
-        echo "$(date) rules_are_synced: FORWARD in FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: FORWARD in FAIL"
         return 1
     fi
 
@@ -551,13 +556,13 @@ rules_are_synced() {
     if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" || \
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-o ${WG_IFACE}" || \
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-j ACCEPT"; then
-        echo "$(date) rules_are_synced: FORWARD out FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: FORWARD out FAIL"
         return 1
     fi
 
     # 5. MASQUERADE check
     if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
-        echo "$(date) rules_are_synced: MASQUERADE rule FAIL" >> "${debug_log}"
+        log WARN "rules_are_synced: MASQUERADE rule FAIL"
         return 1
     fi
 
