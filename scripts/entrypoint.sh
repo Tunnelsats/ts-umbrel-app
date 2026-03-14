@@ -14,7 +14,7 @@ RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
-LN_TARGET_PORT="9735"
+LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 
 API_PID=""
@@ -114,13 +114,13 @@ docker_api_with_code() {
     local data="${3:-}"
 
     if [ -n "${data}" ]; then
-        curl -sS --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --noproxy "*" --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             -H "Content-Type: application/json" \
             -d "${data}" \
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     else
-        curl -sS --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --noproxy "*" --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     fi
@@ -166,6 +166,7 @@ detect_lightning_container() {
         [ .[]
           | {id: .Id, name: cname}
           | select(.name | test("(^|[_-])lnd([_-]|$)"))
+          | select(.name | test("(app|proxy|tor|web|ui)") | not)
         ]
         | if length > 0 then .[0] else empty end
         | "\(.id)|\(.name)|lnd"
@@ -177,6 +178,7 @@ detect_lightning_container() {
             [ .[]
               | {id: .Id, name: cname}
               | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
+              | select(.name | test("(app|proxy|tor|web|ui)") | not)
             ]
             | if length > 0 then .[0] else empty end
             | "\(.id)|\(.name)|cln"
@@ -191,6 +193,12 @@ detect_lightning_container() {
     local rest="${pick#*|}"
     TARGET_CONTAINER_NAME="${rest%%|*}"
     TARGET_IMPL="${rest##*|}"
+
+    if [ "${TARGET_IMPL}" = "cln" ]; then
+        LN_TARGET_PORT="9736"
+    else
+        LN_TARGET_PORT="9735"
+    fi
 
     return 0
 }
@@ -251,8 +259,8 @@ ensure_container_attached() {
         return 0
     fi
 
-    if [ "${attached}" = "true" ] && [ -n "${current_ip}" ] && [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
-        log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (current IP: ${current_ip})"
+    if [ "${attached}" = "true" ] && [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
+        log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (force clean for IP: ${current_ip:-NONE})"
         docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')" >/dev/null || true
     fi
 
@@ -339,11 +347,39 @@ EOF_RULES
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
+    
+    # Priority 32500: Local-to-Local bypass.
+    # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
+    if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
+        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1; then
+            if ! ip rule show pref 32500 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                LAST_ERROR="Failed to add local-to-local bypass rule for ${DOCKER_NETWORK_SUBNET}"
+                return 1
+            fi
+        fi
+        changed=1
+    fi
 
     if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
-        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1; then
-            LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
-            return 1
+        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 pref 32764 >/dev/null 2>&1; then
+            if ! ip rule show pref 32764 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
+                return 1
+            fi
+        fi
+        changed=1
+    fi
+
+    # Ensure the tunnelsats bridge gateway itself (10.9.9.1) is also routed through the tunnel 
+    # to prevent outbound leaks from this container during diagnostics (e.g. curl ifconfig.me)
+    local bridge_gw
+    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+    if ! ip rule show | grep -qE "from ${bridge_gw//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
+        if ! ip rule add from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1; then
+            if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
+                LAST_ERROR="Failed to add policy routing rule for bridge gateway ${bridge_gw}"
+                return 1
+            fi
         fi
         changed=1
     fi
@@ -400,66 +436,166 @@ ensure_nat_forward_rules() {
     local dnat_count
     local forward_in_count
     local forward_out_count
+    local primary_dnat_missing=0
+    local fallback_dnat_missing=0
 
+    # We match the config-defined VPNPort on the tunnel interface to catch these packets.
+    local internal_match_port="${FORWARDING_PORT}"
+
+    if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+        primary_dnat_missing=1
+    fi
+
+    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport 9735" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+        fallback_dnat_missing=1
+    fi
+    
     dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
-    if [ "${dnat_count}" -ne 1 ] || ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
-        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
+    if [ "${dnat_count}" -lt 1 ] || [ "${primary_dnat_missing}" -eq 1 ]; then
+        log INFO "Syncing DNAT rules"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
-        if ! iptables -t nat -I PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
-            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables DNAT rule for ${WG_IFACE}:${FORWARDING_PORT}"
+        if ! iptables -t nat -I PREROUTING 1 -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+            LAST_ERROR="Failed to add primary DNAT rule for port ${internal_match_port}"
             return 1
         fi
+        # Add fallback DNAT for port 9735 in case the VPN server translates before the tunnel
+        if [ "${internal_match_port}" != "9735" ]; then
+            if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
+                -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+                LAST_ERROR="Failed to add fallback DNAT rule for port 9735"
+                return 1
+            fi
+        fi
         changed=1
+    elif [ "${internal_match_port}" != "9735" ] && [ "${fallback_dnat_missing}" -eq 1 ]; then
+        log INFO "Adding fallback DNAT rule for port 9735"
+        if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+            LAST_ERROR="Failed to add fallback DNAT rule for port 9735"
+            return 1
+        else
+            changed=1
+        fi
     fi
 
     forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-    if [ "${forward_in_count}" -ne 1 ] || ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-        -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
+    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+        log INFO "Syncing FORWARD inbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        if ! iptables -I FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-            -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables FORWARD ingress rule (${WG_IFACE} -> ${BRIDGE_NAME})"
+        if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
+            LAST_ERROR="Failed to add FORWARD inbound rule"
             return 1
         fi
         changed=1
     fi
 
     forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-    if [ "${forward_out_count}" -ne 1 ] || ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-        -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
+    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${BRIDGE_NAME}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+        log INFO "Syncing FORWARD outbound rules"
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        if ! iptables -I FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-            -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1; then
-            LAST_ERROR="Failed to install iptables FORWARD egress rule (${BRIDGE_NAME} -> ${WG_IFACE})"
+        if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
+            LAST_ERROR="Failed to add FORWARD outbound rule"
             return 1
         fi
         changed=1
     fi
 
     NAT_CHANGED="${changed}"
+
+    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
+        if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+            LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
+            return 1
+        fi
+        NAT_CHANGED="1"
+    fi
+
     return 0
 }
 
 rules_are_synced() {
-    ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" || return 1
-    iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${FORWARDING_PORT}" \
-        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" >/dev/null 2>&1 || return 1
-    iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-        -m comment --comment "tunnelsats-forward-in" -j ACCEPT >/dev/null 2>&1 || return 1
-    iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-        -m comment --comment "tunnelsats-forward-out" -j ACCEPT >/dev/null 2>&1 || return 1
+    # We match the config-defined VPNPort on the tunnel interface to catch these packets.
+    local internal_match_port="${FORWARDING_PORT}"
+
+    # 1. IP Rule check (Subnet routing)
+    if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
+        log WARN "rules_are_synced: IP Subnet rule FAIL"
+        return 1
+    fi
+
+    # 1b. IP Rule check (Bypass bridge)
+    if ! ip rule show pref 32500 | grep -q "lookup main"; then
+        log WARN "rules_are_synced: IP Bypass rule FAIL"
+        return 1
+    fi
+
+    # 1c. IP Rule check (Bridge gateway tunnel rule)
+    local bridge_gw
+    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+    if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
+        log WARN "rules_are_synced: IP Bridge-GW rule FAIL"
+        return 1
+    fi
+
+    # 2. NAT PREROUTING check (DNAT)
+    if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport ${internal_match_port}.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
+         # Try an even looser check if the above regexp is too strict for some kernels
+         if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" || \
+            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "--dport ${internal_match_port}" || \
+            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+             log WARN "rules_are_synced: NAT rule FAIL"
+             return 1
+         fi
+    fi
+
+    # 2b. NAT PREROUTING fallback check for translated 9735 traffic
+    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport 9735.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
+        log WARN "rules_are_synced: NAT fallback rule FAIL"
+        return 1
+    fi
+
+    # 3. FORWARD Inbound check
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qE -- "-i ${WG_IFACE}.*-o ${BRIDGE_NAME}.*-j ACCEPT"; then
+        log WARN "rules_are_synced: FORWARD in FAIL"
+        return 1
+    fi
+
+    # 4. FORWARD Outbound check
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qE -- "-i ${BRIDGE_NAME}.*-o ${WG_IFACE}.*-j ACCEPT"; then
+        log WARN "rules_are_synced: FORWARD out FAIL"
+        return 1
+    fi
+
+    # 5. MASQUERADE check
+    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log WARN "rules_are_synced: MASQUERADE rule FAIL"
+        return 1
+    fi
+
     return 0
 }
 
 cleanup_dataplane() {
     log INFO "Cleaning dataplane rules"
     remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
+    remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
 
     local max_attempts=10
     local attempt=0
+    # Remove local bypass rule (pref 32500)
+    ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
+
+    # Remove bridge gateway tunnel rule (pref 32763)
+    local bridge_gw
+    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+    ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
     while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
         ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
         attempt=$((attempt + 1))
