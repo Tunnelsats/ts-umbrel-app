@@ -559,17 +559,13 @@ rules_are_synced() {
     fi
 
     # 3. FORWARD Inbound check
-    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-i ${WG_IFACE}" || \
-       ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-o ${BRIDGE_NAME}" || \
-       ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-j ACCEPT"; then
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qE -- "-i ${WG_IFACE}.*-o ${BRIDGE_NAME}.*-j ACCEPT"; then
         log WARN "rules_are_synced: FORWARD in FAIL"
         return 1
     fi
 
     # 4. FORWARD Outbound check
-    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${BRIDGE_NAME}" || \
-       ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-o ${WG_IFACE}" || \
-       ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-j ACCEPT"; then
+    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qE -- "-i ${BRIDGE_NAME}.*-o ${WG_IFACE}.*-j ACCEPT"; then
         log WARN "rules_are_synced: FORWARD out FAIL"
         return 1
     fi
