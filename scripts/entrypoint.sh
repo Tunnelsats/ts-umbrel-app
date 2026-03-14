@@ -489,12 +489,11 @@ ensure_nat_forward_rules() {
         changed=1
     fi
 
-    NAT_CHANGED="${changed}"
-    
     if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
         log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
         if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
-            log WARN "Failed to add MASQUERADE rule for ${WG_IFACE}"
+            LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
+            return 1
         fi
         NAT_CHANGED="1"
     fi
