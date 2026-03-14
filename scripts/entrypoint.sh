@@ -463,7 +463,8 @@ ensure_nat_forward_rules() {
         if [ "${internal_match_port}" != "9735" ]; then
             if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
                 -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-                log WARN "Failed to add fallback DNAT rule for port 9735; continuing without it"
+                LAST_ERROR="Failed to add fallback DNAT rule for port 9735"
+                return 1
             fi
         fi
         changed=1
@@ -471,7 +472,8 @@ ensure_nat_forward_rules() {
         log INFO "Adding fallback DNAT rule for port 9735"
         if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-            log WARN "Failed to add fallback DNAT rule for port 9735; continuing without it"
+            LAST_ERROR="Failed to add fallback DNAT rule for port 9735"
+            return 1
         else
             changed=1
         fi
