@@ -28,7 +28,9 @@ for meta_path in \
             VPN_IP=$(getent hosts "$VPN_HOST" | awk '{ print $1 }' | head -n 1 || echo "INVALID")
         fi
         
-        [ "$VPN_IP" != "INVALID" ] && [ -n "$VPN_IP" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
+        if [ "$VPN_IP" != "INVALID" ] && [ -n "$VPN_IP" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ]; then
+            break
+        fi
     fi
 done
 
