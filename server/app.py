@@ -1098,7 +1098,7 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        lnd_need_restart = lnd_changed or bool(meta.get(lnd_pending_key))
+        lnd_need_restart = True
         if lnd_need_restart and not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)"):
             _set_restart_pending(meta_path, meta, lnd_pending_key, True)
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
@@ -1126,7 +1126,7 @@ def configure_node():
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
-    cln_need_restart = cln_changed or bool(meta.get(cln_pending_key))
+    cln_need_restart = True
     if cln_need_restart and not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
         _set_restart_pending(meta_path, meta, cln_pending_key, True)
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
@@ -1161,6 +1161,11 @@ def restore_node():
             "always-use-proxy=",
         ),
     )
+
+    if lnd_processed:
+        restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)")
+    if cln_processed:
+        restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
 
     return jsonify(
         {

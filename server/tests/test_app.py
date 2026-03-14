@@ -717,7 +717,7 @@ class TestDataplaneAndRegressionFixes:
             with open(cln_path, 'r') as f:
                 assert f.read() == original_content
 
-    def test_configure_node_lnd_skips_restart_when_config_already_matches(self, client):
+    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -738,7 +738,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_not_called()
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
 
     def test_configure_node_lnd_returns_500_when_restart_fails(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -887,3 +887,28 @@ class TestDataplaneAndRegressionFixes:
     def test_restore_node_route_declared_once(self):
         rules = [rule for rule in app_module.app.url_map.iter_rules() if rule.rule == '/api/local/restore-node']
         assert len(rules) == 1
+
+    def test_restore_node_forces_restarts(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(lnd_path, 'w') as f:
+                f.write('externalhosts=de2.tunnelsats.com:35825\n')
+            with open(cln_path, 'w') as f:
+                f.write('announce-addr=de2.tunnelsats.com:35825\n')
+
+            with patch('app.DATA_DIR', tmp_dir):
+                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                    with patch('app.CLN_CONFIG_PATH', cln_path):
+                        with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
+                            res = client.post('/api/local/restore-node')
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['lnd'] is True
+            assert payload['cln'] is True
+            # Should have called restart for both LND and CLN
+            assert mock_restart.call_count == 2
+            mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)')
+            mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
