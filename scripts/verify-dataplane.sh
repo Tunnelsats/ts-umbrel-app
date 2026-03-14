@@ -26,8 +26,11 @@ for meta_path in \
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
         METADATA=$(cat "$meta_path")
         VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty' | grep -m1 -oE '^[0-9.]+$' || echo "INVALID")
-        VPN_HOST=$(echo "$METADATA" | jq -r '.vpn_host // empty' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
-        VPN_PORT=$(echo "$METADATA" | jq -r '.vpn_port // empty' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
+        VPN_HOST=$(echo "$METADATA" | jq -r '(.vpn_host // .serverDomain // empty)' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
+        VPN_PORT=$(echo "$METADATA" | jq -r '(.vpn_port // .vpnPort // empty)' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
+        if [ "$VPN_IP" = "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ -n "$VPN_HOST" ]; then
+            VPN_IP=$(getent hosts "$VPN_HOST" | awk '{ print $1 }' | head -n 1 || echo "INVALID")
+        fi
         [ "$VPN_IP" != "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
     fi
 done

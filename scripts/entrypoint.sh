@@ -357,6 +357,7 @@ ensure_policy_routing() {
                 return 1
             fi
         fi
+        changed=1
     fi
 
     if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
@@ -380,6 +381,7 @@ ensure_policy_routing() {
                 return 1
             fi
         fi
+        changed=1
     fi
 
     if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
@@ -544,6 +546,7 @@ rules_are_synced() {
 cleanup_dataplane() {
     log INFO "Cleaning dataplane rules"
     remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
+    remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
 

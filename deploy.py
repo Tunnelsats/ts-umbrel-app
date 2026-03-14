@@ -1,6 +1,7 @@
-import paramiko
-import time
 import os
+import sys
+
+import paramiko
 
 # Load credentials from .env.local
 def load_env(filepath):
@@ -21,7 +22,11 @@ if not password:
     exit(1)
 
 ssh = paramiko.SSHClient()
-ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ssh.load_system_host_keys()
+known_hosts_path = os.path.expanduser("~/.ssh/known_hosts")
+if os.path.exists(known_hosts_path):
+    ssh.load_host_keys(known_hosts_path)
+ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
 try:
     print("Connecting to umbrel.lan...")
     ssh.connect('umbrel.lan', username='umbrel', password=password, timeout=10)
@@ -38,6 +43,11 @@ try:
     print("Restart completed with exit status:", exit_status)
     print("STDOUT:", stdout.read().decode())
     print("STDERR:", stderr.read().decode())
+except paramiko.ssh_exception.SSHException as exc:
+    print("SSH error:", exc)
+    print("Host key verification failed or SSH session could not be established.")
+    print("Ensure umbrel.lan exists in ~/.ssh/known_hosts and retry.")
+    sys.exit(1)
 
 finally:
     ssh.close()
