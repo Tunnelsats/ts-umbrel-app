@@ -33,9 +33,11 @@ try:
     ssh.connect('umbrel.lan', username='umbrel', password=password, timeout=10)
     print("Starting SFTP transfer...")
     sftp = ssh.open_sftp()
-    sftp.put('scripts/entrypoint.sh', '/home/umbrel/tunnelsats-entrypoint.sh')
-    sftp.put('scripts/verify-dataplane-lean.sh', '/home/umbrel/verify-dataplane-lean.sh')
-    sftp.close()
+    try:
+        sftp.put('scripts/entrypoint.sh', '/home/umbrel/tunnelsats-entrypoint.sh')
+        sftp.put('scripts/verify-dataplane-lean.sh', '/home/umbrel/verify-dataplane-lean.sh')
+    finally:
+        sftp.close()
     print("Executing Docker sync and restart...")
     stdin, stdout, stderr = ssh.exec_command(
         'docker cp /home/umbrel/tunnelsats-entrypoint.sh tunnelsats:/app/scripts/entrypoint.sh '
@@ -72,6 +74,9 @@ except paramiko.ssh_exception.SSHException as exc:
     print("SSH error:", exc)
     print("Host key verification failed or SSH session could not be established.")
     print("Ensure umbrel.lan exists in ~/.ssh/known_hosts and retry.")
+    sys.exit(1)
+except Exception as exc:
+    print("Deployment error:", exc)
     sys.exit(1)
 
 finally:
