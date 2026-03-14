@@ -436,13 +436,18 @@ ensure_nat_forward_rules() {
     local dnat_count
     local forward_in_count
     local forward_out_count
+    local fallback_dnat_missing=0
 
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
+
+    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport 9735" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+        fallback_dnat_missing=1
+    fi
     
     dnat_count=$(iptables -t nat -S PREROUTING | grep -c "tunnelsats-dnat" || true)
-    if [ "${dnat_count}" -lt 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-        log INFO "Syncing DNAT rules (reason: missing primary rule)"
+    if [ "${dnat_count}" -lt 1 ] || ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" || [ "${fallback_dnat_missing}" -eq 1 ]; then
+        log INFO "Syncing DNAT rules"
         remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
         if ! iptables -t nat -I PREROUTING 1 -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
@@ -453,7 +458,8 @@ ensure_nat_forward_rules() {
         if [ "${internal_match_port}" != "9735" ]; then
             if ! iptables -t nat -I PREROUTING 2 -i "${WG_IFACE}" -p tcp --dport 9735 \
                 -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-                log WARN "Failed to add fallback DNAT rule for port 9735"
+                LAST_ERROR="Failed to add fallback DNAT rule for port 9735"
+                return 1
             fi
         fi
         changed=1
@@ -530,6 +536,12 @@ rules_are_synced() {
              echo "$(date) rules_are_synced: NAT rule FAIL" >> "${debug_log}"
              return 1
          fi
+    fi
+
+    # 2b. NAT PREROUTING fallback check for translated 9735 traffic
+    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport 9735.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
+        echo "$(date) rules_are_synced: NAT fallback rule FAIL" >> "${debug_log}"
+        return 1
     fi
 
     # 3. FORWARD Inbound check

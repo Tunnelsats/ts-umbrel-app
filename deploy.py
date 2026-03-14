@@ -12,7 +12,7 @@ def load_env(filepath):
             for line in f:
                 if "=" in line:
                     key, value = line.strip().split('=', 1)
-                    env[key] = value
+                    env[key] = value.strip('"\'')
     return env
 
 env = load_env('.env.local')

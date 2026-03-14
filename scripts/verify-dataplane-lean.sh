@@ -18,7 +18,7 @@ for meta_path in \
     "/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
     "./tunnelsats-meta.json"; do
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
-        METADATA=$(cat "$meta_path")
+        METADATA="$(cat "$meta_path" 2>/dev/null)" || continue
         VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty' | grep -m1 -oE '^[0-9.]+$' || echo "INVALID")
         VPN_HOST=$(echo "$METADATA" | jq -r '(.vpn_host // .serverDomain // empty)' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
         VPN_PORT=$(echo "$METADATA" | jq -r '(.vpn_port // .vpnPort // empty)' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
