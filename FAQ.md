@@ -13,6 +13,9 @@ Yes. The TunnelSats daemon handles dynamic reloading:
 - **On App Startup:** The app reads the most recently modified `.conf` file in the `data/` folder and establishes the connection.
 - **On Demand:** Pressing **"Reconcile"** in the UI instructs the daemon to instantly rescan the folder and apply your configuration without restarting the container.
 
+> [!WARNING]
+> Note that applying a new configuration via the **Install** tab or using the **Restore Node Networking** function will force a restart of your Lightning node container. This is required to ensure your node's networking information is correctly broadcast to the Lightning Network.
+
 ### 3. How can I verify my connection from the command line?
 The dashboard uses our internal **Dataplane API**. You can query this directly via SSH to debug your network state:
 

@@ -840,7 +840,8 @@ class TestDataplaneAndRegressionFixes:
 
             with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
-                    res = client.post('/api/local/restore-node')
+                    with patch('app.restart_container_by_pattern', return_value=True):
+                        res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -875,7 +876,8 @@ class TestDataplaneAndRegressionFixes:
 
             with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
-                    res = client.post('/api/local/restore-node')
+                    with patch('app.restart_container_by_pattern', return_value=True):
+                        res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)
