@@ -1,43 +1,40 @@
-# Tunnelsats Umbrel App - FAQ
+# TunnelSats v3 - Frequently Asked Questions
 
-### 1. How do I manually add a WireGuard configuration without using the UI?
-The Tunnelsats app automatically watches the `~/umbrel/app-data/tunnelsats/data/` directory on your Umbrel hard drive for configuration files. 
+### 1. How do I manually add a WireGuard configuration?
+The TunnelSats app automatically watches the `/data/` directory for configuration files. If you are using SSH or restoring a backup, place your `.conf` file into this folder:
 
-If you prefer to load a configuration manually (e.g. via SSH or restoring a backup), simply place your `.conf` file directly into this folder:
-`mv tunnelsats_eu-fi.conf ~/umbrel/app-data/tunnelsats/data/`
+`~/umbrel/app-data/tunnelsats/data/`
 
-*(Note: Files placed in the parent directory `~/umbrel/app-data/tunnelsats/` will be ignored!)*
+> [!NOTE]
+> Files placed in the parent directory `~/umbrel/app-data/tunnelsats/` will be ignored.
 
 ### 2. Are manual configuration files picked up automatically?
-Yes! The Tunnelsats background daemon natively handles dynamic reloading:
-- **On App Startup:** The app reads the most recently modified `.conf` file in the `data/` folder and immediately wires up the connection.
-- **Via the Reconcile Button:** Pressing **Reconcile Now** in the user interface instructs the daemon to instantly rescan the folder and hot-hook your configuration without dropping the container connection.
+Yes. The TunnelSats daemon handles dynamic reloading:
+- **On App Startup:** The app reads the most recently modified `.conf` file in the `data/` folder and establishes the connection.
+- **On Demand:** Pressing **"Reconcile"** in the UI instructs the daemon to instantly rescan the folder and apply your configuration without restarting the container.
 
-### 3. How can I verify my connection state from the command line?
-The UI dashboard relies on our native **Dataplane API**. You can query this API yourself via SSH to easily debug your network state.
-Running the following command acts as the single source of truth for the container's health:
-`curl -s http://umbrel.lan:9739/api/local/status | jq`
+### 3. How can I verify my connection from the command line?
+The dashboard uses our internal **Dataplane API**. You can query this directly via SSH to debug your network state:
 
-This instantly returns a comprehensive JSON payload containing:
-- The active WireGuard endpoint & public key
-- Internal IP routing metrics
-- Currently matched `.conf` files
-- Any explicit tunnel failure errors (`last_error`)
+```bash
+curl -s http://umbrel.lan:9739/api/local/status | jq
+```
 
-Additionally, if you want to verify the cryptographic WireGuard handshake itself, you can directly query the tunnel metrics using:
-`docker exec tunnelsats wg show`
+This returns a JSON payload containing the active WireGuard endpoint, internal routing metrics, and any failure logs (`last_error`). To check the live WireGuard handshake:
 
-### 4. Can I tunnel both LND and CLN simultaneously?
-No. Tunnelsats is designed to route traffic for exactly **one** distinct Lightning node (LND *or* CLN) at any given time.
-If you attempt to run both node implementations in parallel on your Umbrel:
-1. Tunnelsats will strictly prioritize LND. LND will be tunneled, and CLN will be ignored.
-2. If you transition between nodes (e.g., stopping LND and starting CLN), the active node will successfully acquire the tunnel.
-**Warning:** If you have tunneled CLN, and then subsequently click "Start" on LND via the Umbrel UI while CLN is still running, Docker will encounter an IP conflict (`Address already in use`) and LND will fail to boot. You must ensure only one lightning implementation is actively running before using Tunnelsats.
+```bash
+docker exec tunnelsats wg show
+```
 
-### 5. Why does Tunnelsats use two different ports for CLN?
-When configuring CLN for hybrid mode, Tunnelsats injects two distinct port values that serve entirely different purposes:
+### 4. Can I tunnel both LND and Core-Lightning (CLN) simultaneously?
+**No.** TunnelSats routes traffic for exactly **one** Lightning node at a time.
+1. **Priority:** If both are running, TunnelSats will prioritize LND.
+2. **Switching:** If you stop LND and start CLN, the daemon will automatically detect the change and reroute the tunnel to CLN.
+3. **Warning:** Starting a second node while one is already tunneled may cause an IP conflict in Docker. Always stop one before starting the other.
 
-- **`bind-addr=0.0.0.0:9736`** — This is CLN's internal daemon socket port (hardcoded by Umbrel as `APP_CORE_LIGHTNING_DAEMON_PORT=9736`). It tells CLN's `connectd` subprocess where to bind locally inside the container before it can open any outbound Tor connections. This port is **never visible** to the outside world.
-- **`announce-addr=<vpn-server>:<vpnPort>`** — This is the clearnet address that gets gossiped to the Lightning Network, allowing remote nodes to reach you through the Tunnelsats VPN. The port here (e.g. `39486`) is the external VPN forwarding port assigned by Tunnelsats — completely separate from the internal `9736`.
+### 5. Why does CLN use port 9736 internally?
+When TunnelSats detects CLN, it handles two distinct ports:
+- **Internal (9736):** This is the local bind port required by the Umbrel architecture. It is used for local communication inside the Docker network.
+- **External (VPN Port):** This is the port assigned by your TunnelSats subscription (e.g., 39486). This port is gossiped to the network so other nodes can reach you.
 
-Mixing these up (e.g. using the VPN port as `bind-addr`) would cause CLN to crash on boot, as there is no local process listening on the external VPN port.
+TunnelSats handles this mapping automatically—you do not need to manually change your CLN `bind-addr`.
