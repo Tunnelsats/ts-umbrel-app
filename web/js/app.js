@@ -698,8 +698,91 @@ function resetReconcileBtn() {
     text.innerText = "Reconcile Now";
 }
 
+async function confirmRestartModal(nodeType) {
+    return new Promise((resolve) => {
+        const existingModal = document.getElementById('restart-confirmation-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const overlay = document.createElement('div');
+        overlay.id = 'restart-confirmation-modal';
+        overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm transition-opacity duration-300';
+
+        const panel = document.createElement('div');
+        panel.className = 'w-full max-w-md rounded-2xl border border-gray-700/50 bg-gray-950 p-8 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transform transition-all duration-300 scale-95 opacity-0';
+        
+        // Modal Content
+        const title = document.createElement('h3');
+        title.className = 'text-xl font-bold text-white flex items-center gap-3 mb-4';
+        title.innerHTML = `
+            <div class="p-2 bg-tsyellow/10 rounded-lg">
+                <svg class="w-6 h-6 text-tsyellow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                </svg>
+            </div>
+            Restart Required`;
+
+        const body = document.createElement('p');
+        body.className = 'text-gray-300 leading-relaxed mb-8';
+        body.innerText = `Applying these settings requires a restart of your ${nodeType.toUpperCase()} container. This will cause a brief (10-20s) downtime for your Lightning node while it re-initializes with the new TunnelSats configuration.`;
+
+        const actions = document.createElement('div');
+        actions.className = 'flex flex-col sm:flex-row gap-3';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'flex-1 rounded-xl border border-gray-700 px-6 py-3.5 text-sm font-bold text-gray-400 hover:bg-gray-800 hover:text-white transition-all cursor-pointer';
+        cancelBtn.innerText = 'No, Cancel';
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'flex-1 rounded-xl bg-gradient-to-r from-tsyellow to-yellow-500 px-6 py-3.5 text-sm font-bold text-black hover:from-yellow-400 hover:to-yellow-300 transition-all shadow-lg hover:shadow-tsyellow/20 cursor-pointer';
+        confirmBtn.innerText = 'Yes, Restart Node';
+
+        actions.append(cancelBtn, confirmBtn);
+        panel.append(title, body, actions);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+
+        // Animate in
+        setTimeout(() => {
+            panel.classList.remove('scale-95', 'opacity-0');
+            panel.classList.add('scale-100', 'opacity-100');
+        }, 10);
+
+        let settled = false;
+        const complete = (choice) => {
+            if (settled) return;
+            settled = true;
+            
+            // Animate out
+            panel.classList.add('scale-95', 'opacity-0');
+            overlay.classList.add('opacity-0');
+            
+            setTimeout(() => {
+                overlay.remove();
+                resolve(choice);
+            }, 200);
+        };
+
+        cancelBtn.addEventListener('click', () => complete(false));
+        confirmBtn.addEventListener('click', () => complete(true));
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) complete(false);
+        });
+
+        confirmBtn.focus();
+    });
+}
+
 async function configureNode() {
     const selectedNodeType = (document.getElementById('node-type-selected') || {}).value || 'lnd';
+    
+    // Warn user about restart
+    const confirmed = await confirmRestartModal(selectedNodeType);
+    if (!confirmed) return;
+
     const btn = document.getElementById('btn-configure-node');
     if (btn) {
         btn.disabled = true;
@@ -733,6 +816,10 @@ async function configureNode() {
 }
 
 async function restoreNode() {
+    // Warn user about restart
+    const confirmed = await confirmRestartModal('Lightning');
+    if (!confirmed) return;
+
     const btn = document.getElementById('btn-restore-node');
     if (btn) {
         btn.disabled = true;
