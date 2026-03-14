@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 
 import paramiko
 
@@ -36,13 +37,34 @@ try:
     sftp.put('scripts/verify-dataplane-lean.sh', '/home/umbrel/verify-dataplane-lean.sh')
     sftp.close()
     print("Executing Docker sync and restart...")
-    stdin, stdout, stderr = ssh.exec_command('docker cp /home/umbrel/tunnelsats-entrypoint.sh tunnelsats:/app/scripts/entrypoint.sh && docker cp /home/umbrel/verify-dataplane-lean.sh tunnelsats:/app/scripts/verify-dataplane-lean.sh && docker exec tunnelsats chmod +x /app/scripts/entrypoint.sh /app/scripts/verify-dataplane-lean.sh && docker restart tunnelsats')
-    
-    # Wait for completion
+    stdin, stdout, stderr = ssh.exec_command(
+        'docker cp /home/umbrel/tunnelsats-entrypoint.sh tunnelsats:/app/scripts/entrypoint.sh '
+        '&& docker cp /home/umbrel/verify-dataplane-lean.sh tunnelsats:/app/scripts/verify-dataplane-lean.sh '
+        '&& docker exec tunnelsats chmod +x /app/scripts/entrypoint.sh /app/scripts/verify-dataplane-lean.sh '
+        '&& docker restart tunnelsats'
+    )
+
+    stdout_chunks = []
+    stderr_chunks = []
+
+    def _drain_stream(stream, bucket):
+        bucket.append(stream.read())
+
+    stdout_thread = threading.Thread(target=_drain_stream, args=(stdout, stdout_chunks))
+    stderr_thread = threading.Thread(target=_drain_stream, args=(stderr, stderr_chunks))
+    stdout_thread.start()
+    stderr_thread.start()
+
     exit_status = stdout.channel.recv_exit_status()
+    stdout_thread.join()
+    stderr_thread.join()
+
+    stdout_text = b"".join(stdout_chunks).decode(errors="replace")
+    stderr_text = b"".join(stderr_chunks).decode(errors="replace")
+
     print("Restart completed with exit status:", exit_status)
-    print("STDOUT:", stdout.read().decode())
-    print("STDERR:", stderr.read().decode())
+    print("STDOUT:", stdout_text)
+    print("STDERR:", stderr_text)
     if exit_status != 0:
         print("ERROR: Remote command returned non-zero exit status.")
         sys.exit(exit_status)

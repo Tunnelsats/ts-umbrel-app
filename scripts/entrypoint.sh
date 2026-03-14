@@ -485,7 +485,7 @@ ensure_nat_forward_rules() {
 
     NAT_CHANGED="${changed}"
     
-    if ! iptables -t nat -S POSTROUTING | grep -qE -- "-o ${WG_IFACE}.*-j MASQUERADE"; then
+    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
         log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
         if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
             log WARN "Failed to add MASQUERADE rule for ${WG_IFACE}"
@@ -545,6 +545,12 @@ rules_are_synced() {
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-o ${WG_IFACE}" || \
        ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-j ACCEPT"; then
         echo "$(date) rules_are_synced: FORWARD out FAIL" >> "${debug_log}"
+        return 1
+    fi
+
+    # 5. MASQUERADE check
+    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        echo "$(date) rules_are_synced: MASQUERADE rule FAIL" >> "${debug_log}"
         return 1
     fi
 
