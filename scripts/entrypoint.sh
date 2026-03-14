@@ -513,6 +513,14 @@ rules_are_synced() {
         return 1
     fi
 
+    # 1c. IP Rule check (Bridge gateway tunnel rule)
+    local bridge_gw
+    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+    if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
+        echo "$(date) rules_are_synced: IP Bridge-GW rule FAIL" >> "${debug_log}"
+        return 1
+    fi
+
     # 2. NAT PREROUTING check (DNAT)
     if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport ${internal_match_port}.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
          # Try an even looser check if the above regexp is too strict for some kernels

@@ -43,6 +43,9 @@ try:
     print("Restart completed with exit status:", exit_status)
     print("STDOUT:", stdout.read().decode())
     print("STDERR:", stderr.read().decode())
+    if exit_status != 0:
+        print("ERROR: Remote command returned non-zero exit status.")
+        sys.exit(exit_status)
 except paramiko.ssh_exception.SSHException as exc:
     print("SSH error:", exc)
     print("Host key verification failed or SSH session could not be established.")
