@@ -9,6 +9,70 @@ const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 
+// Local Development Mocking
+const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+// Override fetch for mocking if enabled
+const originalFetch = window.fetch;
+window.fetch = async (...args) => {
+    if (IS_MOCK_MODE && typeof args[0] === 'string' && (args[0].startsWith('/api/local/') || args[0].startsWith('/api/'))) {
+        const responseData = await mockFetch(args[0]);
+        const body = JSON.stringify(responseData.body || {});
+        return new Response(body, {
+            status: responseData.status || 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    return originalFetch(...args);
+};
+
+async function mockFetch(url) {
+    console.log(`[MOCK] Fetching: ${url}`);
+    if (url === '/api/local/status') {
+        return {
+            ok: true,
+            body: {
+                wg_status: 'Connected',
+                wg_pubkey: 'MOCK_PUBKEY_1234567890abcdef',
+                configs_found: ['tunnelsats.conf', 'mullvad.conf'],
+                version: 'v3.1.0-modern',
+                target_container: 'lightning_lnd_1',
+                target_ip: '10.0.0.2',
+                rules_synced: true,
+                forwarding_port: '35825',
+                last_reconcile_at: new Date().toISOString(),
+                last_error: null
+            }
+        };
+    }
+    if (url === '/api/local/meta') {
+        return {
+            ok: true,
+            body: {
+                serverId: 'de2.tunnelsats.com',
+                wgPublicKey: 'MOCK_WG_PUBKEY_XYZ'
+            }
+        };
+    }
+    if (url === '/api/servers' || url === '/api/local/servers') {
+        return {
+            ok: true,
+            body: [
+                { id: 'de2', country: 'Germany', city: 'Frankfurt', flag: '🇩🇪' },
+                { id: 'fi1', country: 'Finland', city: 'Helsinki', flag: '🇫🇮' }
+            ]
+        };
+    }
+    return { ok: false, status: 404, body: { error: 'Not Found' } };
+}
+
+function toggleMobileMenu() {
+    const nav = document.getElementById('sidebar-nav');
+    if (nav) {
+        nav.classList.toggle('hidden');
+    }
+}
+
 function setNodeType(nodeType, fromUser = true) {
     const normalized = nodeType === 'cln' ? 'cln' : 'lnd';
     const hiddenInput = document.getElementById('node-type-selected');
@@ -33,19 +97,50 @@ function setNodeType(nodeType, fromUser = true) {
 }
 
 function setActionMessage(elementId, text, tone) {
+    // Legacy support for existing IDs, but move to toasts for better UX
+    if (tone === 'error' || tone === 'success') {
+        showToast(text, tone);
+        return;
+    }
+    
     const el = document.getElementById(elementId);
     if (!el) return;
-
     el.innerText = text;
-    if (tone === 'success') {
-        el.className = 'text-center mt-3 text-sm font-semibold text-tsgreen';
-        return;
-    }
-    if (tone === 'error') {
-        el.className = 'text-center mt-3 text-sm font-semibold text-red-500';
-        return;
-    }
     el.className = 'text-center mt-3 text-sm font-semibold text-gray-400';
+}
+
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    const colors = {
+        success: 'border-tsgreen bg-gray-900 text-tsgreen',
+        error: 'border-red-500 bg-gray-900 text-red-500',
+        info: 'border-blue-400 bg-gray-900 text-white'
+    };
+
+    toast.className = `flex items-center space-x-3 px-6 py-4 rounded-xl border-l-4 shadow-2xl transition-all duration-500 transform translate-y-10 opacity-0 pointer-events-auto ${colors[type] || colors.info}`;
+    
+    // Icon based on type
+    const iconSvg = type === 'error' 
+        ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
+        : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
+
+    toast.innerHTML = `${iconSvg} <span class="font-bold text-sm text-gray-200">${message}</span>`;
+    
+    container.appendChild(toast);
+
+    // Animate in
+    requestAnimationFrame(() => {
+        toast.classList.remove('translate-y-10', 'opacity-0');
+    });
+
+    // Auto remove
+    setTimeout(() => {
+        toast.classList.add('translate-y-[-20px]', 'opacity-0');
+        setTimeout(() => toast.remove(), 500);
+    }, 4000);
 }
 
 async function fetchPricing() {
@@ -136,10 +231,16 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchStatus();
     fetchServers();
 
-    // Attach programmatic event listeners
-    const btnRecon = document.getElementById('btn-reconcile');
-    if (btnRecon) {
-        btnRecon.addEventListener('click', reconcileTunnel);
+    // Attach spotlight effect
+    const spotlight = document.querySelector('.spotlight');
+    if (spotlight) {
+        spotlight.addEventListener('mousemove', (e) => {
+            const rect = spotlight.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            spotlight.style.setProperty('--mouse-x', `${x}px`);
+            spotlight.style.setProperty('--mouse-y', `${y}px`);
+        });
     }
 });
 
@@ -198,6 +299,12 @@ function switchTab(tabId) {
             document.getElementById('renew-pubkey').value = 'Error loading';
         });
     }
+
+    // Close sidebar on mobile after navigation
+    if (window.innerWidth < 768) {
+        const nav = document.getElementById('sidebar-nav');
+        if (nav) nav.classList.add('hidden');
+    }
 }
 
 // 1. Fetch Local Status
@@ -211,37 +318,71 @@ async function fetchStatus() {
         if (data.wg_status === 'Connected' && data.target_container && data.rules_synced) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.innerText = "Protected";
-            document.getElementById('txt-wg-status').className = "font-mono text-tsgreen font-bold";
+            const pingDot = document.getElementById('ping-tunnel');
+            if (pingDot) pingDot.classList.remove('hidden');
+            const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
+            if (statusIcon) {
+                statusIcon.classList.add('text-tsgreen', 'animate-pulse');
+                statusIcon.classList.remove('text-tsyellow', 'text-red-500');
+            }
+            document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsgreen font-bold";
         } else if (data.wg_status === 'Connected') {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-yellow-900/50 text-tsyellow border border-yellow-700";
             badge.innerText = "Connected";
-            document.getElementById('txt-wg-status').className = "font-mono text-tsyellow font-bold";
+            const pingDot = document.getElementById('ping-tunnel');
+            if (pingDot) pingDot.classList.add('hidden');
+            const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
+            if (statusIcon) {
+                statusIcon.classList.add('text-tsyellow');
+                statusIcon.classList.remove('animate-pulse', 'text-tsgreen', 'text-red-500');
+            }
+            document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsyellow font-bold";
         } else {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-red-900/50 text-red-500 border border-red-700";
             badge.innerText = "Tunnel Down";
-            document.getElementById('txt-wg-status').className = "font-mono text-red-500 font-bold";
+            const pingDot = document.getElementById('ping-tunnel');
+            if (pingDot) pingDot.classList.add('hidden');
+            const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
+            if (statusIcon) {
+                statusIcon.classList.add('text-red-500');
+                statusIcon.classList.remove('animate-pulse', 'text-tsgreen', 'text-tsyellow');
+            }
+            document.getElementById('txt-wg-status').className = "text-2xl font-mono text-red-500 font-bold";
         }
 
         // Update Dashboard Text
-        document.getElementById('txt-wg-status').innerText = data.wg_status;
+        const statusEl = document.getElementById('txt-wg-status');
+        if (statusEl) {
+            statusEl.replaceChildren(document.createTextNode(data.wg_status));
+        }
+        
         const pk = data.wg_pubkey || "Not available";
-        document.getElementById('txt-pubkey').innerText = pk;
+        const pubkeyEl = document.getElementById('txt-pubkey');
+        if (pubkeyEl) {
+            pubkeyEl.replaceChildren(document.createTextNode(pk));
+        }
 
         // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.
 
         let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
-        document.getElementById('txt-configs').innerText = confs;
+        const configsEl = document.getElementById('txt-configs');
+        if (configsEl) {
+            configsEl.replaceChildren(document.createTextNode(confs));
+        }
 
         // --- PR A: Update Dataplane UI ---
         const targetContainer = data.target_container;
         const targetIp = data.target_ip;
-        document.getElementById('txt-target').innerText = targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured";
+        const targetEl = document.getElementById('txt-target');
+        if (targetEl) {
+            targetEl.replaceChildren(document.createTextNode(targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured"));
+        }
 
         const fwdPort = data.forwarding_port;
         const fwdEl = document.getElementById('txt-forwarding');
         const fwdSpan = fwdEl ? fwdEl.querySelector('span') : null;
         if (fwdSpan) {
-            fwdSpan.innerText = fwdPort || '--';
+            fwdSpan.textContent = fwdPort || '--';
             fwdSpan.className = fwdPort ? "text-white font-mono" : "text-gray-400 font-mono";
         }
 
@@ -307,28 +448,29 @@ async function fetchServers() {
     try {
         const res = await fetch('/api/servers');
         const data = await res.json();
-        // Handle both {servers: [...]} (upstream API) and flat array formats
         const servers = Array.isArray(data) ? data : (data.servers || []);
 
         const selBuyList = document.getElementById('buy-server-list');
-        selBuyList.innerHTML = "";
-        servers.forEach(s => {
-            let btn = document.createElement('button');
-            btn.type = 'button';
-            const label = `${s.flag} ${s.country} — ${s.city}`;
-            btn.addEventListener('click', () => selectOption('buy-server', s.id, label));
-            btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
-            btn.innerText = label;
-            selBuyList.appendChild(btn);
-        });
+        if (selBuyList) {
+            selBuyList.replaceChildren(); // Clear skeletons
+            servers.forEach(s => {
+                let btn = document.createElement('button');
+                btn.type = 'button';
+                const label = `${s.flag} ${s.country} — ${s.city}`;
+                btn.addEventListener('click', () => selectOption('buy-server', s.id, label));
+                btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
+                btn.innerText = label;
+                selBuyList.appendChild(btn);
+            });
+        }
 
         if (servers.length > 0) {
             const firstLabel = `${servers[0].flag} ${servers[0].country} — ${servers[0].city}`;
             selectOption('buy-server', servers[0].id, firstLabel);
-        } else {
-            document.getElementById('buy-server-label').innerText = "No servers available";
         }
-    } catch (e) { }
+    } catch (e) {
+        console.warn("Failed to fetch servers", e);
+    }
 }
 
 // Purchase / Renew Mode Switch (Removed, handled by tabs now)
