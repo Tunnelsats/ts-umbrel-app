@@ -740,6 +740,8 @@ describe('Phase 3b: Install Config', () => {
             });
         });
         evalScript();
+        // Mock the restart confirmation modal to always confirm by default
+        window.confirmRestartModal = jest.fn().mockResolvedValue(true);
     });
 
     afterEach(() => { jest.restoreAllMocks(); });
@@ -755,6 +757,7 @@ describe('Phase 3b: Install Config', () => {
         window.setNodeType('lnd');
         await window.configureNode();
 
+        expect(window.confirmRestartModal).toHaveBeenCalledWith('lnd');
         expect(global.fetch).toHaveBeenCalledWith(
             '/api/local/configure-node',
             expect.objectContaining({
@@ -770,6 +773,7 @@ describe('Phase 3b: Install Config', () => {
         window.setNodeType('cln');
         await window.configureNode();
 
+        expect(window.confirmRestartModal).toHaveBeenCalledWith('cln');
         expect(global.fetch).toHaveBeenCalledWith(
             '/api/local/configure-node',
             expect.objectContaining({
@@ -783,6 +787,7 @@ describe('Phase 3b: Install Config', () => {
     test('restoreNode calls backend and renders result summary', async () => {
         await window.restoreNode();
 
+        expect(window.confirmRestartModal).toHaveBeenCalledWith('Lightning');
         expect(global.fetch).toHaveBeenCalledWith(
             '/api/local/restore-node',
             expect.objectContaining({ method: 'POST' })
