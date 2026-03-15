@@ -154,6 +154,46 @@ function showToast(message, type = 'success') {
     }, 4000);
 }
 
+async function copyToClipboard(text, label) {
+    // 1. Try modern Buffer/Clipboard API
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+            await navigator.clipboard.writeText(text);
+            showToast(`${label} copied to clipboard!`, 'success');
+            return;
+        } catch (err) {
+            console.warn('Modern clipboard API failed, trying fallback...', err);
+        }
+    }
+
+    // 2. Fallback: Create temporary textarea for document.execCommand('copy')
+    try {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        
+        // Ensure textarea is not visible but part of DOM
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        textArea.style.top = "0";
+        document.body.appendChild(textArea);
+        
+        textArea.focus();
+        textArea.select();
+        
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        
+        if (successful) {
+            showToast(`${label} copied to clipboard!`, 'success');
+        } else {
+            throw new Error('execCommand returned false');
+        }
+    } catch (err) {
+        console.error('Clipboard fallback error:', err);
+        showToast(`Failed to copy ${label}`, 'error');
+    }
+}
+
 async function fetchPricing() {
     if (currentSatsPerDollar !== null) {
         renderDurations();
@@ -278,8 +318,15 @@ document.addEventListener("DOMContentLoaded", () => {
     attachListener('node-type-lnd', 'click', () => setNodeType('lnd'));
     attachListener('node-type-cln', 'click', () => setNodeType('cln'));
     attachListener('btn-configure-node', 'click', () => configureNode());
-    attachListener('btn-import-config', 'click', () => importConfig());
     attachListener('btn-restore-node', 'click', () => restoreNode());
+    attachListener('btn-copy-pubkey', 'click', () => {
+        const val = document.getElementById('renew-pubkey').value;
+        if (val && val !== 'Not found') copyToClipboard(val, 'Public Key');
+    });
+    attachListener('btn-copy-ip', 'click', () => {
+        const val = document.getElementById('renew-ip-suffix').innerText;
+        if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
+    });
 });
 
 // UI Routing
@@ -398,6 +445,16 @@ async function fetchStatus() {
         const pubkeyEl = document.getElementById('txt-pubkey');
         if (pubkeyEl) {
             pubkeyEl.replaceChildren(document.createTextNode(pk));
+        }
+
+        // Update Renew IP Suffix
+        if (data.vpn_internal_ip) {
+            const parts = data.vpn_internal_ip.split('.');
+            if (parts.length === 4) {
+                const suffix = '.' + parts[3];
+                const suffixEl = document.getElementById('renew-ip-suffix');
+                if (suffixEl) suffixEl.innerText = suffix;
+            }
         }
 
         // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.

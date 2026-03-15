@@ -914,3 +914,25 @@ class TestDataplaneAndRegressionFixes:
             assert mock_restart.call_count == 2
             mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)')
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
+
+    @patch('app.subprocess.check_output')
+    def test_local_status_includes_vpn_internal_ip(self, mock_subprocess, client):
+        # Mocking the output of 'ip -4 addr show dev tunnelsatsv2'
+        mock_output = """
+1875: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/none 
+    inet 10.9.0.100/32 scope global tunnelsatsv2
+       valid_lft forever preferred_lft forever
+"""
+        mock_subprocess.return_value = mock_output.encode('utf-8')
+
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['vpn_internal_ip'] == '10.9.0.100'
+
+        # Verify subprocess was called correctly
+        mock_subprocess.assert_called_with(
+            ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"],
+            stderr=app_module.subprocess.STDOUT
+        )

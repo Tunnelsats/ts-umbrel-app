@@ -873,3 +873,58 @@ describe('Phase 3b: Install Config', () => {
         expect(timeoutSpy.mock.calls.filter(([, delay]) => delay === 2000).length).toBeGreaterThanOrEqual(3);
     });
 });
+
+describe('NWC Auto-Renew Features', () => {
+    beforeEach(() => {
+        setupDOM();
+        evalScript();
+        // Manually trigger initialization as JSDOM won't fire DOMContentLoaded for eval'd script
+        document.dispatchEvent(new Event('DOMContentLoaded'));
+        // Mock clipboard API
+        Object.defineProperty(navigator, 'clipboard', {
+            value: {
+                writeText: jest.fn().mockImplementation(() => Promise.resolve()),
+            },
+            configurable: true
+        });
+    });
+
+    afterEach(() => { jest.restoreAllMocks(); });
+
+    test('fetchStatus updates NWC IP suffix element', async () => {
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    wg_status: 'Connected',
+                    vpn_internal_ip: '10.9.0.100',
+                    configs_found: [],
+                    target_container: 'lnd'
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+        expect(document.getElementById('renew-ip-suffix').innerText).toBe('.100');
+    });
+
+    test('copy buttons trigger clipboard API with correct values', async () => {
+        const writeTextSpy = jest.spyOn(navigator.clipboard, 'writeText');
+        
+        // Mock public key
+        document.getElementById('renew-pubkey').value = 'test-pubkey-abc';
+        document.getElementById('btn-copy-pubkey').click();
+        expect(writeTextSpy).toHaveBeenCalledWith('test-pubkey-abc');
+
+        // Mock IP suffix
+        document.getElementById('renew-ip-suffix').innerText = '.100';
+        document.getElementById('btn-copy-ip').click();
+        expect(writeTextSpy).toHaveBeenCalledWith('100');
+    });
+
+    test('NWC promo card links to correct FAQ', () => {
+        const promoLink = document.querySelector('a[href*="nwc-renewals-work"]');
+        expect(promoLink).toBeTruthy();
+        expect(promoLink.getAttribute('target')).toBe('_blank');
+    });
+});

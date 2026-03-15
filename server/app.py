@@ -890,10 +890,21 @@ def local_status():
     lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
     cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
 
+    # Dynamic Internal IP Recovery
+    vpn_internal_ip = ""
+    try:
+        # Source of Truth: the live interface state
+        ip_out = subprocess.check_output(["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"], stderr=subprocess.STDOUT).decode("utf-8")
+        if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", ip_out):
+            vpn_internal_ip = match.group(1)
+    except Exception:
+        pass
+
     return jsonify(
         {
             "wg_status": wg_status,
             "wg_pubkey": wg_pubkey,
+            "vpn_internal_ip": vpn_internal_ip,
             "configs_found": configs,
             "version": read_app_version(),
             "lnd_ip": lnd_ip,
