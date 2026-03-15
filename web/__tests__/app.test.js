@@ -132,11 +132,11 @@ describe('Phase 1: fetchServers', () => {
 
         expect(buttons.length).toBe(2);
         // Should use flag + country + city, NOT wireguardPort
-        expect(buttons[0].innerText).toContain('Germany');
-        expect(buttons[0].innerText).toContain('Nuremberg');
-        expect(buttons[0].innerText).toContain('🇩🇪');
-        expect(buttons[0].innerText).not.toContain('Port');
-        expect(buttons[0].innerText).not.toContain('undefined');
+        expect(buttons[0].textContent).toContain('Germany');
+        expect(buttons[0].textContent).toContain('Nuremberg');
+        expect(buttons[0].textContent).toContain('🇩🇪');
+        expect(buttons[0].textContent).not.toContain('Port');
+        expect(buttons[0].textContent).not.toContain('undefined');
     });
 
     test('first server is auto-selected', async () => {
@@ -145,7 +145,7 @@ describe('Phase 1: fetchServers', () => {
         expect(selectEl.value).toBe('eu-de');
 
         const labelEl = document.getElementById('buy-server-label');
-        expect(labelEl.innerText).toContain('Germany');
+        expect(labelEl.textContent).toContain('Germany');
     });
 });
 
@@ -323,7 +323,7 @@ describe('Phase 1: createSub generates invoice', () => {
         // Button remains disabled while invoice is active to prevent duplicate invoices
         const createBtn = document.getElementById('btn-create-buy');
         expect(createBtn.disabled).toBe(true);
-        expect(createBtn.innerText).toBe('Invoice Active...');
+        expect(createBtn.textContent).toBe('Invoice Active...');
     });
 
     test('surfaces backend errors for createSub', async () => {
@@ -360,11 +360,11 @@ describe('Phase 1: createSub generates invoice', () => {
 
         const errEl = document.getElementById('purchase-error-buy');
         expect(errEl).toBeTruthy();
-        expect(errEl.innerText).toContain('Upstream unavailable');
+        expect(errEl.textContent).toContain('Upstream unavailable');
 
         const createBtn = document.getElementById('btn-create-buy');
         expect(createBtn.disabled).toBe(false);
-        expect(createBtn.innerText).toBe('Generate Lightning Invoice');
+        expect(createBtn.textContent).toBe('Generate Lightning Invoice');
     });
 
     test('resets active invoice state if post-fetch UI setup throws', async () => {
@@ -383,11 +383,11 @@ describe('Phase 1: createSub generates invoice', () => {
 
         const errEl = document.getElementById('purchase-error-buy');
         expect(errEl).toBeTruthy();
-        expect(errEl.innerText).toContain('QR render failed');
+        expect(errEl.textContent).toContain('QR render failed');
 
         const createBtn = document.getElementById('btn-create-buy');
         expect(createBtn.disabled).toBe(false);
-        expect(createBtn.innerText).toBe('Generate Lightning Invoice');
+        expect(createBtn.textContent).toBe('Generate Lightning Invoice');
     });
 
     test('does not clear pre-existing poll interval if setup fails before creating new interval', async () => {
@@ -430,7 +430,7 @@ describe('Phase 1: createSub generates invoice', () => {
         // Buy button must stay usable because buy has no active invoice.
         const buyBtn = document.getElementById('btn-create-buy');
         expect(buyBtn.disabled).toBe(false);
-        expect(buyBtn.innerText).toBe('Generate Lightning Invoice');
+        expect(buyBtn.textContent).toBe('Generate Lightning Invoice');
     });
 });
 
@@ -520,7 +520,7 @@ describe('Phase 2: Renew Flow', () => {
         // Renew button must remain usable after failed renew attempt.
         const renewBtn = document.getElementById('btn-create-renew');
         expect(renewBtn.disabled).toBe(false);
-        expect(renewBtn.innerText).toBe('Generate Renewal Invoice');
+        expect(renewBtn.textContent).toBe('Generate Renewal Invoice');
 
         // Existing buy invoice state remains intact and uncorrupted.
         expect(window.activePaymentHash).toBe('buy-hash-123');
@@ -528,7 +528,7 @@ describe('Phase 2: Renew Flow', () => {
 
         const errEl = document.getElementById('purchase-error-renew');
         expect(errEl).toBeTruthy();
-        expect(errEl.innerText).toContain('Renew endpoint unavailable');
+        expect(errEl.textContent).toContain('Renew endpoint unavailable');
     });
 });
 
@@ -569,24 +569,24 @@ describe('Phase 3a: Import Config', () => {
 
     test('pre-validation rejects empty import payload', async () => {
         document.getElementById('config-text').value = '   ';
-        document.getElementById('txt-configs').innerText = 'None Detected';
+        document.getElementById('txt-configs').textContent = 'None Detected';
         global.fetch.mockClear();
 
         await window.importConfig();
 
-        const msg = document.getElementById('import-msg').innerText;
+        const msg = document.getElementById('import-msg').textContent;
         expect(msg).toContain('Please paste a WireGuard config');
         expect(global.fetch).not.toHaveBeenCalled();
     });
 
     test('pre-validation rejects config missing [Peer] block', async () => {
         document.getElementById('config-text').value = '[Interface]\nPrivateKey = abc\n';
-        document.getElementById('txt-configs').innerText = 'None Detected';
+        document.getElementById('txt-configs').textContent = 'None Detected';
         global.fetch.mockClear();
 
         await window.importConfig();
 
-        const msg = document.getElementById('import-msg').innerText;
+        const msg = document.getElementById('import-msg').textContent;
         expect(msg).toContain('Missing [Interface] or [Peer] block');
         expect(global.fetch).not.toHaveBeenCalled();
     });
@@ -595,7 +595,7 @@ describe('Phase 3a: Import Config', () => {
         const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\nEndpoint = de2.tunnelsats.com:51820\n';
         const expectedConfig = config.trim();
         document.getElementById('config-text').value = config;
-        document.getElementById('txt-configs').innerText = 'None Detected';
+        document.getElementById('txt-configs').textContent = 'None Detected';
         global.fetch.mockClear();
 
         await window.importConfig();
@@ -608,41 +608,41 @@ describe('Phase 3a: Import Config', () => {
                 body: JSON.stringify({ config: expectedConfig })
             })
         );
-        const msg = document.getElementById('import-msg').innerText;
+        const msg = document.getElementById('import-msg').textContent;
         expect(msg).toContain('Configuration saved and parsed.');
     });
 
     test('existing config cancel keeps import local and does not call backend', async () => {
         const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\n';
         document.getElementById('config-text').value = config;
-        document.getElementById('txt-configs').innerText = 'tunnelsats.conf';
+        document.getElementById('txt-configs').textContent = 'tunnelsats.conf';
         global.fetch.mockClear();
 
         const importPromise = window.importConfig();
         const modal = document.getElementById('import-overwrite-modal');
         expect(modal).toBeTruthy();
 
-        const cancelBtn = Array.from(modal.querySelectorAll('button')).find((btn) => btn.innerText === 'Cancel');
+        const cancelBtn = Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Cancel');
         cancelBtn.click();
         await importPromise;
 
         expect(document.getElementById('import-overwrite-modal')).toBeNull();
         expect(global.fetch).not.toHaveBeenCalled();
-        expect(document.getElementById('import-msg').innerText).toContain('Import cancelled.');
+        expect(document.getElementById('import-msg').textContent).toContain('Import cancelled.');
     });
 
     test('existing config confirm proceeds with upload request', async () => {
         const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\nEndpoint = de2.tunnelsats.com:51820\n';
         const expectedConfig = config.trim();
         document.getElementById('config-text').value = config;
-        document.getElementById('txt-configs').innerText = 'tunnelsats.conf';
+        document.getElementById('txt-configs').textContent = 'tunnelsats.conf';
         global.fetch.mockClear();
 
         const importPromise = window.importConfig();
         const modal = document.getElementById('import-overwrite-modal');
         expect(modal).toBeTruthy();
 
-        const confirmBtn = Array.from(modal.querySelectorAll('button')).find((btn) => btn.innerText === 'Import Anyway');
+        const confirmBtn = Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Import Anyway');
         confirmBtn.click();
         await importPromise;
 
@@ -678,11 +678,11 @@ describe('Phase 3a: Import Config', () => {
 
         const config = '[Interface]\nPrivateKey = abc\n\n[Peer]\nPublicKey = def\n';
         document.getElementById('config-text').value = config;
-        document.getElementById('txt-configs').innerText = 'None Detected';
+        document.getElementById('txt-configs').textContent = 'None Detected';
 
         await window.importConfig();
 
-        const msg = document.getElementById('import-msg').innerText;
+        const msg = document.getElementById('import-msg').textContent;
         expect(msg).toContain('Invalid WireGuard configuration format');
     });
 });
@@ -766,7 +766,7 @@ describe('Phase 3b: Install Config', () => {
                 body: JSON.stringify({ nodeType: 'lnd' })
             })
         );
-        expect(document.getElementById('configure-node-msg').innerText).toContain('de2.tunnelsats.com:35825');
+        expect(document.getElementById('configure-node-msg').textContent).toContain('de2.tunnelsats.com:35825');
     });
 
     test('configureNode supports cln nodeType payload', async () => {
@@ -792,7 +792,7 @@ describe('Phase 3b: Install Config', () => {
             '/api/local/restore-node',
             expect.objectContaining({ method: 'POST' })
         );
-        const msg = document.getElementById('restore-node-msg').innerText;
+        const msg = document.getElementById('restore-node-msg').textContent;
         expect(msg).toContain('LND');
         expect(msg).toContain('CLN');
     });
@@ -825,7 +825,7 @@ describe('Phase 3b: Install Config', () => {
 
         await window.restoreNode();
 
-        const msg = document.getElementById('restore-node-msg').innerText;
+        const msg = document.getElementById('restore-node-msg').textContent;
         expect(msg).toContain('LND: config not found');
         expect(msg).toContain('CLN: config not found');
     });
@@ -854,7 +854,7 @@ describe('Phase 3b: Install Config', () => {
 
         await window.pollReconcileStatus('/api/local/reconcile/failure-case');
 
-        expect(document.getElementById('reconcile-text').innerText).toBe('Failed');
+        expect(document.getElementById('reconcile-text').textContent).toBe('Failed');
         expect(timeoutSpy).toHaveBeenCalledWith(window.resetReconcileBtn, 3000);
         expect(timeoutSpy.mock.calls.some(([, delay]) => delay === 2000)).toBe(false);
     });
@@ -862,14 +862,14 @@ describe('Phase 3b: Install Config', () => {
     test('pollReconcileStatus surfaces network issues after repeated fetch failures', async () => {
         const timeoutSpy = jest.spyOn(window, 'setTimeout');
         global.fetch = jest.fn(() => Promise.reject(new Error('network down')));
-        document.getElementById('reconcile-text').innerText = 'Reconciling...';
+        document.getElementById('reconcile-text').textContent = 'Reconciling...';
 
         await window.pollReconcileStatus('/api/local/reconcile/net-err');
         await window.pollReconcileStatus('/api/local/reconcile/net-err');
-        expect(document.getElementById('reconcile-text').innerText).not.toContain('network issues');
+        expect(document.getElementById('reconcile-text').textContent).not.toContain('network issues');
 
         await window.pollReconcileStatus('/api/local/reconcile/net-err');
-        expect(document.getElementById('reconcile-text').innerText).toBe('Reconciling (network issues)...');
+        expect(document.getElementById('reconcile-text').textContent).toBe('Reconciling (network issues)...');
         expect(timeoutSpy.mock.calls.filter(([, delay]) => delay === 2000).length).toBeGreaterThanOrEqual(3);
     });
 });
@@ -905,7 +905,7 @@ describe('NWC Auto-Renew Features', () => {
         );
 
         await window.fetchStatus();
-        expect(document.getElementById('renew-ip-suffix').innerText).toBe('.100');
+        expect(document.getElementById('renew-ip-suffix').textContent).toBe('.100');
     });
 
     test('copy buttons trigger clipboard API with correct values', async () => {
@@ -917,7 +917,7 @@ describe('NWC Auto-Renew Features', () => {
         expect(writeTextSpy).toHaveBeenCalledWith('test-pubkey-abc');
 
         // Mock IP suffix
-        document.getElementById('renew-ip-suffix').innerText = '.100';
+        document.getElementById('renew-ip-suffix').textContent = '.100';
         document.getElementById('btn-copy-ip').click();
         expect(writeTextSpy).toHaveBeenCalledWith('100');
     });

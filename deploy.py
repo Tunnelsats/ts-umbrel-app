@@ -31,7 +31,7 @@ ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
 
 def sftp_put_dir(sftp, local_dir, remote_dir):
     """Recursively syncs a local directory to a remote directory via SFTP, excluding env artifacts."""
-    EXCLUDES = {'node_modules', '.venv', '__pycache__', '.git', '.pytest_cache'}
+    EXCLUDES = {'node_modules', '.venv', '__pycache__', '.git', '.pytest_cache', '.env', '.env.local'}
     try:
         sftp.mkdir(remote_dir)
     except IOError:

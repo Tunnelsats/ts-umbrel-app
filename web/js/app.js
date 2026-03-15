@@ -104,7 +104,7 @@ function setActionMessage(elementId, text, tone) {
     // Always update the target DOM element for legacy support (and testing)
     const el = document.getElementById(elementId);
     if (el) {
-        el.innerText = text;
+        el.textContent = text;
         el.className = 'text-center mt-3 text-sm font-semibold text-gray-400';
         if (tone === 'error') el.classList.add('text-red-500');
         if (tone === 'success') el.classList.add('text-tsgreen');
@@ -265,12 +265,12 @@ function renderDurations() {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
-            btn.innerText = label;
+            btn.textContent = label;
             btn.addEventListener('click', () => selectOption(mode, String(months), label));
             listEl.appendChild(btn);
             
             if (String(months) === currentValue && labelEl) {
-                labelEl.innerText = label;
+                labelEl.textContent = label;
             }
         });
     });
@@ -324,7 +324,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (val && val !== 'Not found') copyToClipboard(val, 'Public Key');
     });
     attachListener('btn-copy-ip', 'click', () => {
-        const val = document.getElementById('renew-ip-suffix').innerText;
+        const val = document.getElementById('renew-ip-suffix').textContent;
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
 });
@@ -355,7 +355,7 @@ function switchTab(tabId) {
             // Restore active invoice UI and resume polling
             if (box) box.classList.remove('hidden');
             if (btnCreate) {
-                btnCreate.innerText = "Invoice Active...";
+                btnCreate.textContent = "Invoice Active...";
                 btnCreate.disabled = true;
             }
             pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
@@ -363,7 +363,7 @@ function switchTab(tabId) {
             // Hide and reset inactive or completed flows
             if (box) box.classList.add('hidden');
             if (btnCreate) {
-                btnCreate.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+                btnCreate.textContent = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
                 btnCreate.disabled = false;
             }
         }
@@ -402,7 +402,7 @@ async function fetchStatus() {
         const badge = document.getElementById('statusBadge');
         if (data.wg_status === 'Connected' && data.target_container && data.rules_synced) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
-            badge.innerText = "Protected";
+            badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
             if (pingDot) pingDot.classList.remove('hidden');
             const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
@@ -413,7 +413,7 @@ async function fetchStatus() {
             document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsgreen font-bold";
         } else if (data.wg_status === 'Connected') {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-yellow-900/50 text-tsyellow border border-yellow-700";
-            badge.innerText = "Connected";
+            badge.textContent = "Connected";
             const pingDot = document.getElementById('ping-tunnel');
             if (pingDot) pingDot.classList.add('hidden');
             const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
@@ -424,7 +424,7 @@ async function fetchStatus() {
             document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsyellow font-bold";
         } else {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-red-900/50 text-red-500 border border-red-700";
-            badge.innerText = "Tunnel Down";
+            badge.textContent = "Tunnel Down";
             const pingDot = document.getElementById('ping-tunnel');
             if (pingDot) pingDot.classList.add('hidden');
             const statusIcon = document.getElementById('icon-tunnel-state') ? document.getElementById('icon-tunnel-state').querySelector('svg') : null;
@@ -453,7 +453,7 @@ async function fetchStatus() {
             if (parts.length === 4) {
                 const suffix = '.' + parts[3];
                 const suffixEl = document.getElementById('renew-ip-suffix');
-                if (suffixEl) suffixEl.innerText = suffix;
+                if (suffixEl) suffixEl.textContent = suffix;
             }
         }
 
@@ -504,7 +504,7 @@ async function fetchStatus() {
         }
 
         const lastRec = data.last_reconcile_at;
-        document.getElementById('txt-reconcile').innerText = lastRec ? new Date(lastRec).toLocaleString() : "Never";
+        document.getElementById('txt-reconcile').textContent = lastRec ? new Date(lastRec).toLocaleString() : "Never";
 
         const errEl = document.getElementById('txt-error');
         if (data.last_error) {
@@ -515,7 +515,7 @@ async function fetchStatus() {
         }
 
         if (data.version) {
-            document.getElementById('app-version').innerText = data.version;
+            document.getElementById('app-version').textContent = data.version;
         }
 
         // Update Dashboard Banner
@@ -524,12 +524,12 @@ async function fetchStatus() {
         const bannerDots = document.getElementById('dashboard-banner-dots');
 
         if (data.wg_status === 'Connected') {
-            bannerTitle.innerText = "Network Layer Active";
-            bannerText.innerText = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
+            bannerTitle.textContent = "Network Layer Active";
+            bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
             bannerDots.classList.remove('hidden');
         } else {
-            bannerTitle.innerText = "Hybrid Lightning Connectivity";
-            bannerText.innerText = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
+            bannerTitle.textContent = "Hybrid Lightning Connectivity";
+            bannerText.textContent = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
             bannerDots.classList.add('hidden');
         }
 
@@ -554,7 +554,7 @@ async function fetchServers() {
                 const label = `${s.flag} ${s.country} — ${s.city}`;
                 btn.addEventListener('click', () => selectOption('buy-server', s.id, label));
                 btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
-                btn.innerText = label;
+                btn.textContent = label;
                 selBuyList.appendChild(btn);
             });
         }
@@ -622,13 +622,13 @@ async function createSub(mode) {
             const container = document.getElementById(`btn-create-${mode}`).parentNode;
             container.appendChild(errEl);
         }
-        errEl.innerText = msg;
+        errEl.textContent = msg;
     }
 
     const oldErr = document.getElementById(`purchase-error-${mode}`);
     if (oldErr) oldErr.remove();
 
-    createBtn.innerText = "Loading...";
+    createBtn.textContent = "Loading...";
     createBtn.disabled = true;
 
     try {
@@ -697,10 +697,10 @@ async function createSub(mode) {
     } finally {
         const hasActiveInvoice = invoiceCreatedInThisCall || hadActiveInvoiceForModeBeforeCall;
         if (hasActiveInvoice) {
-            createBtn.innerText = "Invoice Active...";
+            createBtn.textContent = "Invoice Active...";
             createBtn.disabled = true;
         } else {
-            createBtn.innerText = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
+            createBtn.textContent = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
             createBtn.disabled = false;
         }
     }
@@ -787,7 +787,7 @@ async function claimSubscription(mode) {
     if (mode === 'import') {
         btnInstall = document.getElementById('btn-claim-install');
         btnInstall.disabled = true;
-        btnInstall.innerText = "Installing...";
+        btnInstall.textContent = "Installing...";
     }
 
     try {
@@ -839,13 +839,13 @@ async function claimSubscription(mode) {
             invoiceBox.append(h3, p);
             if (btnInstall) {
                 btnInstall.disabled = false;
-                btnInstall.innerText = "Retry Installation";
+                btnInstall.textContent = "Retry Installation";
             }
         }
     } catch (e) {
         if (btnInstall) {
             btnInstall.disabled = false;
-            btnInstall.innerText = "Retry Installation";
+            btnInstall.textContent = "Retry Installation";
         }
     }
 }
@@ -862,30 +862,30 @@ async function reconcileTunnel() {
 
     btn.disabled = true;
     spinner.classList.remove('hidden');
-    text.innerText = "Triggering...";
+    text.textContent = "Triggering...";
 
     try {
         const res = await fetch('/api/local/reconcile', { method: 'POST' });
         const data = await res.json();
 
         if (res.status === 202 && data.request_id) {
-            text.innerText = "Reconciling...";
+            text.textContent = "Reconciling...";
             reconcilePollCount = 0;
             reconcileNetworkErrorCount = 0;
             pollReconcileStatus(data.status_url);
         } else {
-            text.innerText = "Error Triggering";
+            text.textContent = "Error Triggering";
             setTimeout(resetReconcileBtn, 3000);
         }
     } catch (e) {
-        text.innerText = "Network Error";
+        text.textContent = "Network Error";
         setTimeout(resetReconcileBtn, 3000);
     }
 }
 
 async function pollReconcileStatus(url) {
     if (reconcilePollCount >= MAX_RECONCILE_POLLS) {
-        document.getElementById('reconcile-text').innerText = "Timeout waiting for Dataplane";
+        document.getElementById('reconcile-text').textContent = "Timeout waiting for Dataplane";
         setTimeout(resetReconcileBtn, 4000);
         fetchStatus();
         return;
@@ -895,7 +895,7 @@ async function pollReconcileStatus(url) {
     try {
         const res = await fetch(url);
         if (!res.ok) {
-            document.getElementById('reconcile-text').innerText = "Failed";
+            document.getElementById('reconcile-text').textContent = "Failed";
             setTimeout(resetReconcileBtn, 3000);
             fetchStatus();
             return;
@@ -905,10 +905,10 @@ async function pollReconcileStatus(url) {
 
         if (data.complete) {
             if (data.success) {
-                document.getElementById('reconcile-text').innerText = "Success!";
+                document.getElementById('reconcile-text').textContent = "Success!";
                 setTimeout(resetReconcileBtn, 3000);
             } else {
-                document.getElementById('reconcile-text').innerText = "Failed";
+                document.getElementById('reconcile-text').textContent = "Failed";
                 setTimeout(resetReconcileBtn, 3000);
             }
             fetchStatus(); // Refresh cards
@@ -919,7 +919,7 @@ async function pollReconcileStatus(url) {
     } catch (e) {
         reconcileNetworkErrorCount++;
         if (reconcileNetworkErrorCount >= 3) {
-            document.getElementById('reconcile-text').innerText = "Reconciling (network issues)...";
+            document.getElementById('reconcile-text').textContent = "Reconciling (network issues)...";
         }
         setTimeout(() => pollReconcileStatus(url), 2000);
     }
@@ -932,7 +932,7 @@ function resetReconcileBtn() {
     
     btn.disabled = false;
     spinner.classList.add('hidden');
-    text.innerText = "Reconcile Now";
+    text.textContent = "Reconcile Now";
 }
 
 async function confirmRestartModal(nodeType) {
@@ -974,7 +974,7 @@ async function confirmRestartModal(nodeType) {
 
         const body = document.createElement('p');
         body.className = 'text-gray-300 leading-relaxed mb-8';
-        body.innerText = `Applying these settings requires a restart of your ${nodeType.toUpperCase()} container. This will cause a brief (10-20s) downtime for your Lightning node while it re-initializes with the new TunnelSats configuration.`;
+        body.textContent = `Applying these settings requires a restart of your ${nodeType.toUpperCase()} container. This will cause a brief (10-20s) downtime for your Lightning node while it re-initializes with the new TunnelSats configuration.`;
 
         const actions = document.createElement('div');
         actions.className = 'flex flex-col sm:flex-row gap-3';
@@ -982,12 +982,12 @@ async function confirmRestartModal(nodeType) {
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'flex-1 rounded-xl border border-gray-700 px-6 py-3.5 text-sm font-bold text-gray-400 hover:bg-gray-800 hover:text-white transition-all cursor-pointer';
-        cancelBtn.innerText = 'No, Cancel';
+        cancelBtn.textContent = 'No, Cancel';
 
         const confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
         confirmBtn.className = 'flex-1 rounded-xl bg-gradient-to-r from-tsyellow to-yellow-500 px-6 py-3.5 text-sm font-bold text-black hover:from-yellow-400 hover:to-yellow-300 transition-all shadow-lg hover:shadow-tsyellow/20 cursor-pointer';
-        confirmBtn.innerText = 'Yes, Restart Node';
+        confirmBtn.textContent = 'Yes, Restart Node';
 
         actions.append(cancelBtn, confirmBtn);
         panel.append(title, body, actions);
@@ -1035,7 +1035,7 @@ async function configureNode() {
     const btn = document.getElementById('btn-configure-node');
     if (btn) {
         btn.disabled = true;
-        btn.innerText = 'Configuring...';
+        btn.textContent = 'Configuring...';
     }
     setActionMessage('configure-node-msg', 'Applying node configuration...', 'info');
 
@@ -1059,7 +1059,7 @@ async function configureNode() {
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerText = 'Configure Node';
+            btn.textContent = 'Configure Node';
         }
     }
 }
@@ -1072,7 +1072,7 @@ async function restoreNode() {
     const btn = document.getElementById('btn-restore-node');
     if (btn) {
         btn.disabled = true;
-        btn.innerText = 'Restoring...';
+        btn.textContent = 'Restoring...';
     }
     setActionMessage('restore-node-msg', 'Restoring node configuration...', 'info');
 
@@ -1093,7 +1093,7 @@ async function restoreNode() {
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerText = 'Restore Node Networking';
+            btn.textContent = 'Restore Node Networking';
         }
     }
 }
@@ -1114,11 +1114,11 @@ function confirmOverwriteImport() {
 
         const title = document.createElement('h3');
         title.className = 'text-lg font-bold text-white';
-        title.innerText = 'Replace Existing Config?';
+        title.textContent = 'Replace Existing Config?';
 
         const body = document.createElement('p');
         body.className = 'mt-3 text-sm text-gray-300';
-        body.innerText = 'A TunnelSats configuration already exists on this node. Importing will replace the active config.';
+        body.textContent = 'A TunnelSats configuration already exists on this node. Importing will replace the active config.';
 
         const actions = document.createElement('div');
         actions.className = 'mt-6 flex justify-end gap-3';
@@ -1126,12 +1126,12 @@ function confirmOverwriteImport() {
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'rounded-lg border border-gray-600 px-4 py-2 text-sm font-semibold text-gray-200 hover:bg-gray-800';
-        cancelBtn.innerText = 'Cancel';
+        cancelBtn.textContent = 'Cancel';
 
         const confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
         confirmBtn.className = 'rounded-lg bg-tsyellow px-4 py-2 text-sm font-bold text-black hover:bg-yellow-400';
-        confirmBtn.innerText = 'Import Anyway';
+        confirmBtn.textContent = 'Import Anyway';
 
         actions.append(cancelBtn, confirmBtn);
         panel.append(title, body, actions);
@@ -1163,10 +1163,10 @@ async function importConfig() {
     const txt = document.getElementById('config-text').value;
     const config = (txt || '').trim();
     const msg = document.getElementById('import-msg');
-    const existingConfigs = document.getElementById('txt-configs').innerText;
+    const existingConfigs = document.getElementById('txt-configs').textContent;
 
     function setImportMessage(text, tone) {
-        msg.innerText = text;
+        msg.textContent = text;
         if (tone === 'success') {
             msg.className = "text-center mt-4 text-sm font-bold text-tsgreen";
             return;
@@ -1301,7 +1301,7 @@ function selectOption(dropdownId, value, label) {
     const labelEl = document.getElementById(`${dropdownId}-label`);
     if (selectEl) selectEl.value = value;
     if (labelEl) {
-        labelEl.innerText = label;
+        labelEl.textContent = label;
         labelEl.classList.replace('text-gray-400', 'text-white');
     }
     closeDropdown(dropdownId);

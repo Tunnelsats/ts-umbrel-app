@@ -893,11 +893,15 @@ def local_status():
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""
     try:
-        # Source of Truth: the live interface state
-        ip_out = subprocess.check_output(["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"], stderr=subprocess.STDOUT).decode("utf-8")
-        if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", ip_out):
-            vpn_internal_ip = match.group(1)
-    except Exception:
+        # Source of Truth: the live interface state. 
+        # check=False in subprocess.run is more robust than check_output if "ip" is missing.
+        res = subprocess.run(["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"], 
+                             capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout):
+                vpn_internal_ip = match.group(1)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        # Handle cases where "ip" is missing or dev doesn't exist gracefully
         pass
 
     return jsonify(
