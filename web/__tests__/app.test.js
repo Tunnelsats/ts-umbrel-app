@@ -8,8 +8,6 @@ const script = fs.readFileSync(path.resolve(__dirname, '../js/app.js'), 'utf8');
 
 function setupDOM() {
     document.documentElement.innerHTML = html.toString();
-    // Mark as Jest environment for app.js conditional logic
-    window._isJest = true;
     // Mock QRCode globally (loaded via CDN in real app)
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
