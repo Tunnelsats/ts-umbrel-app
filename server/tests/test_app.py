@@ -44,6 +44,14 @@ def test_default_cln_config_path_matches_compose_mount_contract():
     # docker-compose mounts .../lightningd/bitcoin at /lightning-data/cln.
     # The default CLN config path must stay aligned with that runtime contract.
     assert app_module.CLN_CONFIG_PATH == '/lightning-data/cln/config'
+ 
+ 
+def test_default_lnd_config_path_matches_compose_mount_contract():
+    # docker-compose mounts .../lightning/data/lnd at /lightning-data/lnd.
+    # The default LND config path must stay aligned with that runtime contract.
+    assert app_module.LND_CONFIG_PATH == '/lightning-data/lnd/lnd.conf'
+
+
 
 # --- Phase 1: Claim Tests ---
 
@@ -554,7 +562,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nfoo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -583,7 +591,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('foo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -610,7 +618,7 @@ class TestDataplaneAndRegressionFixes:
                 json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -729,7 +737,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -752,7 +760,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nfoo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=False):
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -777,7 +785,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -838,7 +846,7 @@ class TestDataplaneAndRegressionFixes:
                     '# bind-addr=already-commented\n'
                 )
 
-            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+            with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/restore-node')
@@ -874,7 +882,7 @@ class TestDataplaneAndRegressionFixes:
             with open(cln_path, 'w') as f:
                 f.write('foo=bar\n')
 
-            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+            with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/restore-node')
@@ -901,7 +909,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('announce-addr=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.CLN_CONFIG_PATH', cln_path):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                             res = client.post('/api/local/restore-node')
