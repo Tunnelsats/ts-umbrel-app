@@ -315,6 +315,7 @@ document.addEventListener("DOMContentLoaded", () => {
     attachListener('btn-copy-invoice-buy', 'click', () => copyInvoice('buy'));
     attachListener('btn-copy-invoice-renew', 'click', () => copyInvoice('renew'));
     attachListener('btn-claim-install', 'click', () => claimSubscription('import'));
+    attachListener('btn-import-config', 'click', () => importConfig());
     attachListener('node-type-lnd', 'click', () => setNodeType('lnd'));
     attachListener('node-type-cln', 'click', () => setNodeType('cln'));
     attachListener('btn-configure-node', 'click', () => configureNode());
@@ -324,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (val && val !== 'Not found') copyToClipboard(val, 'Public Key');
     });
     attachListener('btn-copy-ip', 'click', () => {
-        const val = document.getElementById('renew-ip-suffix').textContent;
+        const val = document.getElementById('renew-ip-suffix').innerText;
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
 });
