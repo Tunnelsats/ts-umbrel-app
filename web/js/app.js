@@ -129,12 +129,16 @@ function showToast(message, type = 'success') {
 
     toast.className = `flex items-center space-x-3 px-6 py-4 rounded-xl border-l-4 shadow-2xl transition-all duration-500 transform translate-y-10 opacity-0 pointer-events-auto ${colors[type] || colors.info}`;
     
-    // Icon based on type
+    // Securely add icon and message
     const iconSvg = type === 'error' 
         ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
         : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
 
-    toast.innerHTML = `${iconSvg} <span class="font-bold text-sm text-gray-200">${message}</span>`;
+    toast.insertAdjacentHTML('afterbegin', iconSvg);
+    const msgSpan = document.createElement('span');
+    msgSpan.className = 'font-bold text-sm text-gray-200';
+    msgSpan.textContent = message;
+    toast.appendChild(msgSpan);
     
     container.appendChild(toast);
 
@@ -249,6 +253,33 @@ document.addEventListener("DOMContentLoaded", () => {
             spotlight.style.setProperty('--mouse-y', `${y}px`);
         });
     }
+
+    // Attach programmatic listeners
+    const attachListener = (id, event, fn) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(event, fn);
+    };
+
+    attachListener('btn-mobile-menu', 'click', () => toggleMobileMenu());
+    attachListener('nav-dashboard', 'click', () => switchTab('dashboard'));
+    attachListener('nav-buy', 'click', () => switchTab('buy'));
+    attachListener('nav-renew', 'click', () => switchTab('renew'));
+    attachListener('nav-import', 'click', () => switchTab('import'));
+    attachListener('nav-uninstall', 'click', () => switchTab('uninstall'));
+    attachListener('btn-reconcile', 'click', () => reconcileTunnel());
+    attachListener('buy-server-btn', 'click', () => toggleDropdown('buy-server'));
+    attachListener('buy-duration-btn', 'click', () => toggleDropdown('buy-duration'));
+    attachListener('renew-duration-btn', 'click', () => toggleDropdown('renew-duration'));
+    attachListener('btn-create-buy', 'click', () => createSub('buy'));
+    attachListener('btn-create-renew', 'click', () => createSub('renew'));
+    attachListener('btn-copy-invoice-buy', 'click', () => copyInvoice('buy'));
+    attachListener('btn-copy-invoice-renew', 'click', () => copyInvoice('renew'));
+    attachListener('btn-claim-install', 'click', () => claimSubscription('import'));
+    attachListener('node-type-lnd', 'click', () => setNodeType('lnd'));
+    attachListener('node-type-cln', 'click', () => setNodeType('cln'));
+    attachListener('btn-configure-node', 'click', () => configureNode());
+    attachListener('btn-import-config', 'click', () => importConfig());
+    attachListener('btn-restore-node', 'click', () => restoreNode());
 });
 
 // UI Routing

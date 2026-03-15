@@ -100,6 +100,19 @@
             vertical-align: middle;
         }
 
+        .sidebar-logo {
+            filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.5));
+        }
+
+        .main-content-mask {
+            -webkit-mask-image: linear-gradient(to bottom, black 90%, transparent 100%);
+            mask-image: linear-gradient(to bottom, black 90%, transparent 100%);
+        }
+
+        .invoice-input {
+            word-break: break-all;
+        }
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: .5; }
@@ -114,7 +127,7 @@
             <img src="img/brand/logo.svg" alt="Logo" class="h-8 w-8">
             <h1 class="text-lg font-bold text-white tracking-wider">Tunnel<span class="text-tsyellow">Sats</span></h1>
         </div>
-        <button onclick="toggleMobileMenu()" class="text-gray-400 hover:text-white p-2">
+        <button id="btn-mobile-menu" class="text-gray-400 hover:text-white p-2">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
             </svg>
@@ -127,8 +140,7 @@
         <aside id="sidebar" class="w-full md:w-64 bg-gray-950/80 border-b md:border-b-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
             <!-- Sidebar Header (Desktop Only) -->
             <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
-                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10"
-                    style="filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.5));">
+                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
                 <div class="flex flex-col">
                     <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
                             class="text-tsyellow">Sats</span></h1>
@@ -139,7 +151,7 @@
 
             <!-- Navigation -->
             <nav id="sidebar-nav" class="hidden md:block flex-1 px-4 py-6 space-y-2">
-                <button id="nav-dashboard" onclick="switchTab('dashboard')"
+                <button id="nav-dashboard"
                     class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
                     <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
                         stroke="currentColor" viewBox="0 0 24 24">
@@ -149,7 +161,7 @@
                     </svg>
                     <span>Dashboard</span>
                 </button>
-                <button id="nav-buy" onclick="switchTab('buy')"
+                <button id="nav-buy"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
                     <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -158,7 +170,7 @@
                     </svg>
                     <span>Purchase New</span>
                 </button>
-                <button id="nav-renew" onclick="switchTab('renew')"
+                <button id="nav-renew"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
                     <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -168,7 +180,7 @@
                     </svg>
                     <span>Renew Target</span>
                 </button>
-                <button id="nav-import" onclick="switchTab('import')"
+                <button id="nav-import"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
                     <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -177,7 +189,7 @@
                     </svg>
                     <span>Install / Import</span>
                 </button>
-                <button id="nav-uninstall" onclick="switchTab('uninstall')"
+                <button id="nav-uninstall"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
                     <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -232,8 +244,7 @@
 
         <!-- Main Content Area -->
         <main
-            class="flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60"
-            style="-webkit-mask-image: linear-gradient(to bottom, black 90%, transparent 100%); mask-image: linear-gradient(to bottom, black 90%, transparent 100%);">
+            class="flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
             <!-- Dynamic Background Glows -->
             <div
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
@@ -364,7 +375,7 @@
                         <div class="relative group" id="buy-server-dropdown-container">
                             <label class="block text-sm font-semibold text-gray-300 mb-2">Select Server</label>
                             <div class="relative">
-                                <button type="button" onclick="toggleDropdown('buy-server')" id="buy-server-btn"
+                                <button type="button" id="buy-server-btn"
                                     class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-gray-400 rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
                                     <span id="buy-server-label">
                                         <span class="skeleton w-24"></span></span>
@@ -385,7 +396,7 @@
                         <div class="relative group" id="buy-duration-dropdown-container">
                             <label class="block text-sm font-semibold text-gray-300 mb-2">Duration</label>
                             <div class="relative">
-                                <button type="button" onclick="toggleDropdown('buy-duration')" id="buy-duration-btn"
+                                <button type="button" id="buy-duration-btn"
                                     class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
                                     <span id="buy-duration-label">1 Month</span>
                                     <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
@@ -403,7 +414,7 @@
                         </div>
 
                         <div class="mt-8">
-                            <button id="btn-create-buy" onclick="createSub('buy')"
+                            <button id="btn-create-buy"
                                 class="w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] active:scale-95 ease-out duration-200 focus:ring-4 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
                                 <svg class="w-5 h-5 text-black animate-pulse" fill="none" stroke="currentColor"
                                     viewBox="0 0 24 24">
@@ -428,9 +439,8 @@
                             </a>
                             <div class="flex items-center gap-2 w-full mb-2">
                                 <input id="invoice-bolt11-buy" type="text" readonly
-                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis"
-                                    style="word-break: break-all;" />
-                                <button onclick="copyInvoice('buy')" title="Copy Invoice"
+                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis invoice-input" />
+                                <button id="btn-copy-invoice-buy" title="Copy Invoice"
                                     class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
                                     <svg id="copy-icon-buy" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
@@ -464,7 +474,7 @@
                         <div class="relative group" id="renew-duration-dropdown-container">
                             <label class="block text-sm font-semibold text-gray-300 mb-2">Duration to Add</label>
                             <div class="relative">
-                                <button type="button" onclick="toggleDropdown('renew-duration')" id="renew-duration-btn"
+                                <button type="button" id="renew-duration-btn"
                                     class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
                                     <span id="renew-duration-label">1 Month</span>
                                     <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
@@ -482,7 +492,7 @@
                         </div>
 
                         <div class="mt-8">
-                            <button id="btn-create-renew" onclick="createSub('renew')"
+                            <button id="btn-create-renew"
                                 class="w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] active:scale-95 ease-out duration-200 focus:ring-4 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
                                 <svg class="w-5 h-5 text-black group-hover:rotate-180 transition-transform duration-500"
                                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -508,9 +518,8 @@
                             </a>
                             <div class="flex items-center gap-2 w-full mb-2">
                                 <input id="invoice-bolt11-renew" type="text" readonly
-                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis"
-                                    style="word-break: break-all;" />
-                                <button onclick="copyInvoice('renew')" title="Copy Invoice"
+                                    class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis invoice-input" />
+                                <button id="btn-copy-invoice-renew" title="Copy Invoice"
                                     class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
                                     <svg id="copy-icon-renew" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
@@ -531,7 +540,7 @@
                     <h2 class="text-xl font-bold text-white mb-2">Finalize New Installation</h2>
                     <p class="text-sm text-gray-300 mb-4">Your payment was confirmed. Click the button below to
                         provision your VPN config and configure your lightning node.</p>
-                    <button onclick="claimSubscription('import')" id="btn-claim-install"
+                    <button id="btn-claim-install"
                         class="w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-3 rounded-xl transition shadow-lg active:scale-95 ease-out duration-200 focus:ring-4 focus:ring-offset-2 focus:ring-offset-gray-900">
                         Install Now
                     </button>
@@ -544,18 +553,18 @@
                     <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats forwarding host.</p>
 
                     <div class="grid grid-cols-2 gap-3 mb-4">
-                        <button id="node-type-lnd" type="button" onclick="setNodeType('lnd')"
+                        <button id="node-type-lnd" type="button"
                             class="rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-sm font-bold text-gray-200 transition hover:border-tsyellow">
                             LND
                         </button>
-                        <button id="node-type-cln" type="button" onclick="setNodeType('cln')"
+                        <button id="node-type-cln" type="button"
                             class="rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-sm font-bold text-gray-200 transition hover:border-tsyellow">
                             CLN
                         </button>
                     </div>
                     <input id="node-type-selected" type="hidden" value="lnd">
 
-                    <button id="btn-configure-node" type="button" onclick="configureNode()"
+                    <button id="btn-configure-node" type="button"
                         class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-3 rounded-xl transition shadow-lg">
                         Configure Node
                     </button>
@@ -571,7 +580,7 @@
                         class="w-full bg-gray-900 border border-gray-700 text-tsgreen font-mono text-sm rounded-xl p-5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen transition-all shadow-inner scrollbar-hide"
                         placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."></textarea>
 
-                    <button onclick="importConfig()"
+                    <button id="btn-import-config"
                         class="mt-6 w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
                         <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -592,7 +601,7 @@
                     <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
                         <h3 class="text-white font-bold mb-2">Restore Node Config</h3>
                         <p class="text-sm text-gray-300 mb-4">Revert TunnelSats node configuration changes before uninstalling.</p>
-                        <button id="btn-restore-node" type="button" onclick="restoreNode()"
+                        <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
                             Restore Node Networking
                         </button>
