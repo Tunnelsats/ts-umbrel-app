@@ -8,8 +8,11 @@ if [ -z "${VENV_DIR:-}" ]; then
   WORKSPACE_ROOT_VENV="$(cd "${ROOT_DIR}/.." && pwd)/.venv"
   VENV_DIR="${WORKSPACE_ROOT_VENV}"
 
-  # Fallback to local .venv if workspace root is missing
+  # Fallback to local .venv if workspace root is missing or not writable
   if [ ! -d "${VENV_DIR}" ] && [ -d "${ROOT_DIR}/.venv" ]; then
+    VENV_DIR="${ROOT_DIR}/.venv"
+  elif [ ! -d "${VENV_DIR}" ] && [ ! -w "$(dirname "${VENV_DIR}")" ]; then
+    # Parent directory not writable; fall back to creating a local venv
     VENV_DIR="${ROOT_DIR}/.venv"
   fi
 fi

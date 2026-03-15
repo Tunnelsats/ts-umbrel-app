@@ -14,7 +14,7 @@ const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location
 
 // Override fetch for mocking if enabled, but skip if we are in a Jest test environment
 // where global.fetch is already a mock.
-const isJest = typeof jest !== 'undefined' || (typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID);
+const isJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
 if (!isJest) {
     const originalFetch = window.fetch;
     window.fetch = async (...args) => {
