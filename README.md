@@ -54,9 +54,11 @@ Because Umbrel is immutable, host-level WireGuard services and persistent host n
 If you are a developer looking to contribute or run tests locally, follow these steps.
 
 ### Backend Unit Tests
+The workspace uses a single **Source of Truth (SOT)** for Python dependencies located at the root `.venv`.
 ```bash
 ./scripts/run-unit-tests.sh -v
 ```
+*Note: This script automatically detects and uses the workspace-level virtual environment.*
 
 ### Frontend UI Tests
 ```bash

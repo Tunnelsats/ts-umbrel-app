@@ -914,3 +914,44 @@ class TestDataplaneAndRegressionFixes:
             assert mock_restart.call_count == 2
             mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)')
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
+
+    @patch('app.read_dataplane_state')
+    @patch('app.docker_api')
+    @patch('app.subprocess.run')
+    def test_local_status_includes_vpn_internal_ip(self, mock_run, mock_docker_api, mock_read_dataplane, client):
+        # Mocking the output of 'ip -4 addr show dev tunnelsatsv2'
+        mock_output = """
+1875: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/none 
+    inet 10.9.0.100/32 scope global tunnelsatsv2
+       valid_lft forever preferred_lft forever
+"""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = mock_output
+        mock_run.return_value = mock_result
+
+        # Mock dependencies called by local_status
+        mock_docker_api.return_value = []
+        mock_read_dataplane.return_value = {
+            "dataplane_mode": "container",
+            "target_container": "lnd",
+            "target_ip": "172.18.0.2",
+            "target_impl": "lnd",
+            "docker_network": "umbrel_main_network",
+            "forwarding_port": 35825,
+            "rules_synced": True,
+            "last_reconcile_at": "2026-03-15T12:00:00Z",
+            "last_error": None
+        }
+
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['vpn_internal_ip'] == '10.9.0.100'
+
+        # Verify subprocess was called correctly
+        mock_run.assert_called_with(
+            ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"],
+            capture_output=True, text=True, timeout=2
+        )

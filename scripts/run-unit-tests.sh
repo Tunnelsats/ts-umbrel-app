@@ -3,7 +3,19 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv-tests}"
+if [ -z "${VENV_DIR:-}" ]; then
+  # Prioritize workspace root .venv as Source of Truth (SOT)
+  WORKSPACE_ROOT_VENV="$(cd "${ROOT_DIR}/.." && pwd)/.venv"
+  VENV_DIR="${WORKSPACE_ROOT_VENV}"
+
+  # Fallback to local .venv if workspace root is missing or not writable
+  if [ ! -d "${VENV_DIR}" ] && [ -d "${ROOT_DIR}/.venv" ]; then
+    VENV_DIR="${ROOT_DIR}/.venv"
+  elif [ ! -d "${VENV_DIR}" ] && [ ! -w "$(dirname "${VENV_DIR}")" ]; then
+    # Parent directory not writable; fall back to creating a local venv
+    VENV_DIR="${ROOT_DIR}/.venv"
+  fi
+fi
 REQ_FILE="${ROOT_DIR}/server/requirements-test.txt"
 REQ_HASH_FILE="${VENV_DIR}/.requirements-test.sha256"
 
