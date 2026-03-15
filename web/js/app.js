@@ -12,19 +12,23 @@ const POLL_INTERVAL_MS = 3000;
 // Local Development Mocking
 const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// Override fetch for mocking if enabled
-const originalFetch = window.fetch;
-window.fetch = async (...args) => {
-    if (IS_MOCK_MODE && typeof args[0] === 'string' && (args[0].startsWith('/api/local/') || args[0].startsWith('/api/'))) {
-        const responseData = await mockFetch(args[0]);
-        const body = JSON.stringify(responseData.body || {});
-        return new Response(body, {
-            status: responseData.status || 200,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-    return originalFetch(...args);
-};
+// Override fetch for mocking if enabled, but skip if we are in a Jest test environment
+// where global.fetch is already a mock.
+const isJest = typeof jest !== 'undefined' || window._isJest;
+if (!isJest) {
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+        if (IS_MOCK_MODE && typeof args[0] === 'string' && (args[0].startsWith('/api/local/') || args[0].startsWith('/api/'))) {
+            const responseData = await mockFetch(args[0]);
+            const body = JSON.stringify(responseData.body || {});
+            return new Response(body, {
+                status: responseData.status || 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        return originalFetch(...args);
+    };
+}
 
 async function mockFetch(url) {
     console.log(`[MOCK] Fetching: ${url}`);
@@ -97,16 +101,19 @@ function setNodeType(nodeType, fromUser = true) {
 }
 
 function setActionMessage(elementId, text, tone) {
-    // Legacy support for existing IDs, but move to toasts for better UX
-    if (tone === 'error' || tone === 'success') {
-        showToast(text, tone);
-        return;
-    }
-    
+    // Always update the target DOM element for legacy support (and testing)
     const el = document.getElementById(elementId);
-    if (!el) return;
-    el.innerText = text;
-    el.className = 'text-center mt-3 text-sm font-semibold text-gray-400';
+    if (el) {
+        el.innerText = text;
+        el.className = 'text-center mt-3 text-sm font-semibold text-gray-400';
+        if (tone === 'error') el.classList.add('text-red-500');
+        if (tone === 'success') el.classList.add('text-tsgreen');
+    }
+
+    // Additionally, show a modern toast for improved UX
+    if (tone === 'error' || tone === 'success' || tone === 'info') {
+        showToast(text, tone);
+    }
 }
 
 function showToast(message, type = 'success') {
@@ -390,10 +397,10 @@ async function fetchStatus() {
         if (targetContainer) {
             if (data.rules_synced) {
                 badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen";
-                badgeRules.innerText = "Synced";
+                badgeRules.textContent = "Synced";
             } else {
                 badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow";
-                badgeRules.innerText = "Out of Sync";
+                badgeRules.textContent = "Out of Sync";
             }
         } else {
              badgeRules.className = "hidden";
@@ -414,7 +421,7 @@ async function fetchStatus() {
         const errEl = document.getElementById('txt-error');
         if (data.last_error) {
             errEl.classList.remove('hidden');
-            errEl.querySelector('span').innerText = data.last_error;
+            errEl.querySelector('span').textContent = data.last_error;
         } else {
             errEl.classList.add('hidden');
         }

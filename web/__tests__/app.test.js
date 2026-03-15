@@ -8,6 +8,8 @@ const script = fs.readFileSync(path.resolve(__dirname, '../js/app.js'), 'utf8');
 
 function setupDOM() {
     document.documentElement.innerHTML = html.toString();
+    // Mark as Jest environment for app.js conditional logic
+    window._isJest = true;
     // Mock QRCode globally (loaded via CDN in real app)
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
@@ -58,15 +60,15 @@ describe('UI Routing and Initialization', () => {
 
     test('fetchStatus updates DOM elements', async () => {
         await window.fetchStatus();
-        expect(document.getElementById('txt-wg-status').innerText).toBe('Connected');
-        expect(document.getElementById('txt-pubkey').innerText).toBe('testpubkey123');
-        expect(document.getElementById('txt-target').innerText).toBe('lightning_lnd_1 (10.21.21.6)');
-        expect(String(document.getElementById('txt-forwarding').querySelector('span').innerText)).toBe('9735');
-        expect(document.getElementById('badge-rules').innerText).toBe('Synced');
+        expect(document.getElementById('txt-wg-status').textContent).toBe('Connected');
+        expect(document.getElementById('txt-pubkey').textContent).toBe('testpubkey123');
+        expect(document.getElementById('txt-target').textContent).toBe('lightning_lnd_1 (10.21.21.6)');
+        expect(String(document.getElementById('txt-forwarding').querySelector('span').textContent)).toBe('9735');
+        expect(document.getElementById('badge-rules').textContent).toBe('Synced');
         expect(document.getElementById('btn-reconcile').classList.contains('hidden')).toBe(false);
-        expect(document.getElementById('txt-reconcile').innerText).not.toBe('Never');
+        expect(document.getElementById('txt-reconcile').textContent).not.toBe('Never');
         expect(document.getElementById('txt-error').classList.contains('hidden')).toBe(false);
-        expect(document.getElementById('txt-error').querySelector('span').innerText).toBe('Connection timeout');
+        expect(document.getElementById('txt-error').querySelector('span').textContent).toBe('Connection timeout');
     });
 
     test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {
