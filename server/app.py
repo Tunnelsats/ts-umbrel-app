@@ -26,7 +26,7 @@ RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
-LND_TUNNELSATS_CONF_PATH = "/lightning-data/lnd/tunnelsats.conf"
+LND_TUNNELSATS_CONF_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
 
 ALLOWED_NETWORKS = (
