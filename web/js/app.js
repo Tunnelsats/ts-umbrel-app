@@ -325,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (val && val !== 'Not found') copyToClipboard(val, 'Public Key');
     });
     attachListener('btn-copy-ip', 'click', () => {
-        const val = document.getElementById('renew-ip-suffix').innerText;
+        const val = document.getElementById('renew-ip-suffix').textContent;
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
 });
