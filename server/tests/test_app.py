@@ -573,11 +573,68 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
-
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
+
+    @patch('app.docker_api')
+    @patch('app.docker_api_post')
+    def test_restart_container_by_pattern_restarts_all_matches_general(self, mock_post, mock_docker_api, client):
+        mock_docker_api.return_value = [
+            {"Id": "id1", "Names": ["/some_service_1"]},
+            {"Id": "id2", "Names": ["/some_service_2"]},
+            {"Id": "id3", "Names": ["/other_container"]}
+        ]
+        mock_post.return_value = True
+        
+        from app import restart_container_by_pattern
+        result = restart_container_by_pattern(r"(^|[_-])some_service([_-]|$)")
+        
+        assert result is True
+        assert mock_post.call_count == 2
+        mock_post.assert_any_call("/containers/id1/restart")
+        mock_post.assert_any_call("/containers/id2/restart")
+
+    @patch('app.container_id_by_match')
+    @patch('app.docker_api_post')
+    @patch('app.time.sleep')
+    @patch('app.app.logger')
+    def test_restart_container_by_pattern_sequential_lnd_sequence(self, mock_logger, mock_sleep, mock_post, mock_id, client):
+        # Mock IDs for middleware and daemon
+        def side_effect(pattern):
+            if pattern == r"^lightning[_-]app[_-]\d+$":
+                return "middleware_id_long_identifier"
+            if pattern == r"^lightning[_-]lnd[_-]\d+$":
+                return "daemon_id_long_identifier"
+            return ""
+        mock_id.side_effect = side_effect
+        mock_post.return_value = True
+
+        from app import restart_container_by_pattern, LND_RESTART_DELAY
+        result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)")
+
+        assert result is True
+        # Assert calls in order
+        assert mock_post.call_count == 2
+        mock_post.assert_any_call("/containers/middleware_id_long_identifier/restart")
+        mock_post.assert_any_call("/containers/daemon_id_long_identifier/restart")
+        
+        # Verify middleware was restarted FIRST
+        first_call = mock_post.call_args_list[0]
+        assert first_call.args[0] == "/containers/middleware_id_long_identifier/restart"
+        
+        # Verify sleep was called between them
+        mock_sleep.assert_called_once_with(LND_RESTART_DELAY)
+        
+        # Verify daemon was restarted LAST
+        second_call = mock_post.call_args_list[1]
+        assert second_call.args[0] == "/containers/daemon_id_long_identifier/restart"
+
+        # Verify verbose logging with truncated IDs (12 chars strictly)
+        # middleware_id_long_identifier -> middleware_i
+        # daemon_id_long_identifier -> daemon_id_lo
+        mock_logger.info.assert_any_call("Found LND middleware container (ID: middleware_i). Restarting...")
+        mock_logger.info.assert_any_call("Found LND daemon container (ID: daemon_id_lo). Restarting...")
 
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:

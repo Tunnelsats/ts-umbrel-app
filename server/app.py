@@ -4,6 +4,7 @@ import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
+import time
 from ipaddress import ip_address, ip_network
 
 import requests
@@ -12,9 +13,27 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
+# Ensure verbose logging for container restarts is visible and unbuffered
+import logging
+import sys
+
 app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# Ensure verbose logging for container restarts is visible and unbuffered
+class TunnelsatsFormatter(logging.Formatter):
+    def format(self, record):
+        utc_dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return f"{utc_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} [{record.levelname}] {record.getMessage()}"
+
+handler = logging.StreamHandler(sys.stderr)
+handler.setFormatter(TunnelsatsFormatter())
+app.logger.handlers = [handler]
+app.logger.setLevel(logging.INFO)
+
+# Also ensure stdout is unbuffered for subprocess logs
+os.environ["PYTHONUNBUFFERED"] = "1"
 
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 DATA_DIR = "/data"
@@ -28,6 +47,7 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
+LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -270,7 +290,7 @@ def upsert_config_lines(path, replacements):
         lines = updated_lines
 
     if changed:
-        file_mode = None
+        file_mode = 0o600
         file_uid = 1000
         file_gid = 1000
         if os.path.exists(path):
@@ -286,13 +306,27 @@ def upsert_config_lines(path, replacements):
         try:
             with open(tmp_path, "w", encoding="utf-8") as conf_fp:
                 conf_fp.writelines(lines)
-            if file_mode is not None:
+            try:
                 os.chmod(tmp_path, file_mode)
+            except OSError:
+                pass
             try:
                 os.chown(tmp_path, file_uid, file_gid)
             except OSError:
                 pass
             os.replace(tmp_path, path)
+            
+            # Post-write verification
+            try:
+                with open(path, "r", encoding="utf-8") as verify_fp:
+                    v_content = verify_fp.read()
+                    for prefix, replacement_line in replacements:
+                        if replacement_line not in v_content:
+                            app.logger.error(f"Post-write verification failed: {replacement_line} missing in {path}")
+                            return False, False
+            except (IOError, OSError):
+                app.logger.error(f"Post-write verification failed: Could not read {path}")
+                return False, False
         except (IOError, OSError) as exc:
             app.logger.warning(f"Error writing {path} for configure: {exc}")
             try:
@@ -367,7 +401,7 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
         updated_lines = lines[: section_start + 1] + updated_section + lines[section_end:]
 
     if changed:
-        file_mode = None
+        file_mode = 0o600
         file_uid = 1000
         file_gid = 1000
         if os.path.exists(path):
@@ -383,13 +417,26 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
         try:
             with open(tmp_path, "w", encoding="utf-8") as conf_fp:
                 conf_fp.writelines(updated_lines)
-            if file_mode is not None:
+            try:
                 os.chmod(tmp_path, file_mode)
+            except OSError:
+                pass
             try:
                 os.chown(tmp_path, file_uid, file_gid)
             except OSError:
                 pass
             os.replace(tmp_path, path)
+            
+            # Post-write verification
+            try:
+                with open(path, "r", encoding="utf-8") as verify_fp:
+                    v_content = verify_fp.read()
+                    if replacement_line not in v_content:
+                        app.logger.error(f"Post-write verification failed: {replacement_line} missing in {path}")
+                        return False, False
+            except (IOError, OSError):
+                app.logger.error(f"Post-write verification failed: Could not read {path}")
+                return False, False
         except (IOError, OSError) as exc:
             app.logger.warning(f"Error writing {path} for configure: {exc}")
             try:
@@ -617,25 +664,74 @@ def container_ip_by_match(pattern):
     return ""
 
 
-def container_id_by_match(pattern):
+def container_ids_by_match(pattern):
     containers = docker_api("/containers/json?all=0")
     if not containers:
-        return ""
+        return []
 
+    ids = []
     for item in containers:
         names = item.get("Names", [])
         for name in names:
             clean = name.lstrip("/")
             if re.search(pattern, clean):
-                return item.get("Id", "")
-    return ""
+                ids.append(item.get("Id", ""))
+                break
+    return ids
+
+
+def container_id_by_match(pattern):
+    ids = container_ids_by_match(pattern)
+    return ids[0] if ids else ""
 
 
 def restart_container_by_pattern(pattern):
-    container_id = container_id_by_match(pattern)
-    if not container_id:
+    # Specialized LND event chain to accommodate umbrelOS Node.js middleware
+    if "lnd" in pattern.lower():
+        app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
+        
+        # 1. Restart middleware (strictly lightning_app_1, excluding proxy)
+        middleware_id = container_id_by_match(r"^lightning[_-]app[_-]\d+$")
+        if middleware_id:
+            app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
+            res = docker_api_post(f"/containers/{middleware_id}/restart")
+            app.logger.info(f"LND middleware restart {'successful' if res else 'failed'}.")
+        else:
+            app.logger.error("Failed to locate LND middleware container.")
+            return False
+        
+        # 2. Wait for middleware to ingest lnd.conf and generate umbrel-lnd.conf
+        app.logger.info(f"Waiting {LND_RESTART_DELAY} seconds for middleware configuration generation...")
+        time.sleep(LND_RESTART_DELAY)
+        
+        # 3. Restart LND daemon
+        daemon_id = container_id_by_match(r"^lightning[_-]lnd[_-]\d+$")
+        if daemon_id:
+            app.logger.info(f"Found LND daemon container (ID: {daemon_id[:12]}). Restarting...")
+            res = docker_api_post(f"/containers/{daemon_id}/restart")
+            app.logger.info(f"LND daemon restart {'successful' if res else 'failed'}.")
+            return res
+        else:
+            app.logger.error("Failed to locate LND daemon container.")
+            return False
+
+    # General restart logic for other patterns (e.g. CLN)
+    container_ids = container_ids_by_match(pattern)
+    if not container_ids:
+        app.logger.warning(f"No containers found matching pattern: {pattern}")
         return False
-    return docker_api_post(f"/containers/{container_id}/restart")
+    
+    success = True
+    for cid in container_ids:
+        app.logger.info(f"Restarting container matching '{pattern}' (ID: {cid[:12]})...")
+        res = docker_api_post(f"/containers/{cid}/restart")
+        if res:
+            app.logger.info(f"Restart successful for container {cid[:12]}")
+        else:
+            app.logger.error(f"Restart failed for container {cid[:12]}")
+            success = False
+            
+    return success
 
 
 def read_dataplane_state():
