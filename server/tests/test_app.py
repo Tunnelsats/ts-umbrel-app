@@ -573,6 +573,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
@@ -611,7 +612,7 @@ class TestDataplaneAndRegressionFixes:
         mock_post.return_value = True
 
         from app import restart_container_by_pattern, LND_RESTART_DELAY
-        result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)")
+        result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True)
 
         assert result is True
         # Assert calls in order
@@ -631,10 +632,26 @@ class TestDataplaneAndRegressionFixes:
         assert second_call.args[0] == "/containers/daemon_id_long_identifier/restart"
 
         # Verify verbose logging with truncated IDs (12 chars strictly)
-        # middleware_id_long_identifier -> middleware_i
-        # daemon_id_long_identifier -> daemon_id_lo
+        # middleware_id_long_identifier -> middleware_i (12 chars: m-i-d-d-l-e-w-a-r-e-_-i)
+        # daemon_id_long_identifier -> daemon_id_lo (12 chars: d-a-e-m-o-n-_-i-d-_-l-o)
         mock_logger.info.assert_any_call("Found LND middleware container (ID: middleware_i). Restarting...")
         mock_logger.info.assert_any_call("Found LND daemon container (ID: daemon_id_lo). Restarting...")
+
+    @patch('app.container_id_by_match')
+    @patch('app.docker_api_post')
+    @patch('app.app.logger')
+    def test_restart_container_by_pattern_sequential_middleware_failure(self, mock_logger, mock_post, mock_id, client):
+        # Mocking ID for middleware
+        mock_id.return_value = "middleware_id"
+        mock_post.return_value = False # Simulate failure
+
+        from app import restart_container_by_pattern
+        result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True)
+
+        assert result is False
+        mock_logger.error.assert_called_with("LND middleware restart failed. Aborting sequential restart.")
+        # Ensure it didn't proceed to sleep or daemon restart (mock_post only called once)
+        assert mock_post.call_count == 1
 
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -684,7 +701,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert os.path.exists(lnd_path)
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
@@ -803,7 +820,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
 
     def test_configure_node_lnd_returns_500_when_restart_fails(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -850,7 +867,7 @@ class TestDataplaneAndRegressionFixes:
             payload = json.loads(res.data)
             assert payload['success'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)')
+            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
 
             with open(meta_path, 'r') as f:
                 updated_meta = json.load(f)
@@ -977,7 +994,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             # Should have called restart for both LND and CLN
             assert mock_restart.call_count == 2
-            mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)')
+            mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
 
     @patch('app.read_dataplane_state')

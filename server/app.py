@@ -685,9 +685,9 @@ def container_id_by_match(pattern):
     return ids[0] if ids else ""
 
 
-def restart_container_by_pattern(pattern):
+def restart_container_by_pattern(pattern, is_lnd=False):
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
-    if "lnd" in pattern.lower():
+    if is_lnd:
         app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
         
         # 1. Restart middleware (strictly lightning_app_1, excluding proxy)
@@ -695,7 +695,10 @@ def restart_container_by_pattern(pattern):
         if middleware_id:
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
-            app.logger.info(f"LND middleware restart {'successful' if res else 'failed'}.")
+            if not res:
+                app.logger.error("LND middleware restart failed. Aborting sequential restart.")
+                return False
+            app.logger.info("LND middleware restart successful.")
         else:
             app.logger.error("Failed to locate LND middleware container.")
             return False
@@ -1209,7 +1212,7 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)"):
+        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
             _set_restart_pending(meta_path, meta, lnd_pending_key, True)
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
@@ -1271,7 +1274,7 @@ def restore_node():
 
     errors = []
     if lnd_processed:
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)"):
+        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
             errors.append("Failed to restart LND container.")
     if cln_processed:
         if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
