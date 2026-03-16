@@ -44,6 +44,14 @@ def test_default_cln_config_path_matches_compose_mount_contract():
     # docker-compose mounts .../lightningd/bitcoin at /lightning-data/cln.
     # The default CLN config path must stay aligned with that runtime contract.
     assert app_module.CLN_CONFIG_PATH == '/lightning-data/cln/config'
+ 
+ 
+def test_default_lnd_config_path_matches_compose_mount_contract():
+    # docker-compose mounts .../lightning/data/lnd at /lightning-data/lnd.
+    # The default LND config path must stay aligned with that runtime contract.
+    assert app_module.LND_CONFIG_PATH == '/lightning-data/lnd/lnd.conf'
+
+
 
 # --- Phase 1: Claim Tests ---
 
@@ -554,7 +562,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nfoo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -583,7 +591,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('foo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -610,7 +618,7 @@ class TestDataplaneAndRegressionFixes:
                 json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -729,7 +737,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -752,7 +760,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nfoo=bar\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=False):
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -777,7 +785,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                         res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
@@ -838,7 +846,7 @@ class TestDataplaneAndRegressionFixes:
                     '# bind-addr=already-commented\n'
                 )
 
-            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+            with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/restore-node')
@@ -874,7 +882,7 @@ class TestDataplaneAndRegressionFixes:
             with open(cln_path, 'w') as f:
                 f.write('foo=bar\n')
 
-            with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+            with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
                         res = client.post('/api/local/restore-node')
@@ -901,7 +909,7 @@ class TestDataplaneAndRegressionFixes:
                 f.write('announce-addr=de2.tunnelsats.com:35825\n')
 
             with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_TUNNELSATS_CONF_PATH', lnd_path):
+                with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.CLN_CONFIG_PATH', cln_path):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
                             res = client.post('/api/local/restore-node')
@@ -914,3 +922,44 @@ class TestDataplaneAndRegressionFixes:
             assert mock_restart.call_count == 2
             mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)')
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
+
+    @patch('app.read_dataplane_state')
+    @patch('app.docker_api')
+    @patch('app.subprocess.run')
+    def test_local_status_includes_vpn_internal_ip(self, mock_run, mock_docker_api, mock_read_dataplane, client):
+        # Mocking the output of 'ip -4 addr show dev tunnelsatsv2'
+        mock_output = """
+1875: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/none 
+    inet 10.9.0.100/32 scope global tunnelsatsv2
+       valid_lft forever preferred_lft forever
+"""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = mock_output
+        mock_run.return_value = mock_result
+
+        # Mock dependencies called by local_status
+        mock_docker_api.return_value = []
+        mock_read_dataplane.return_value = {
+            "dataplane_mode": "container",
+            "target_container": "lnd",
+            "target_ip": "172.18.0.2",
+            "target_impl": "lnd",
+            "docker_network": "umbrel_main_network",
+            "forwarding_port": 35825,
+            "rules_synced": True,
+            "last_reconcile_at": "2026-03-15T12:00:00Z",
+            "last_error": None
+        }
+
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['vpn_internal_ip'] == '10.9.0.100'
+
+        # Verify subprocess was called correctly
+        mock_run.assert_called_with(
+            ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"],
+            capture_output=True, text=True, timeout=2
+        )

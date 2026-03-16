@@ -26,7 +26,7 @@ RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
-LND_TUNNELSATS_CONF_PATH = "/lightning-data/lnd/tunnelsats.conf"
+LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
 
 ALLOWED_NETWORKS = (
@@ -890,10 +890,25 @@ def local_status():
     lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
     cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
 
+    # Dynamic Internal IP Recovery
+    vpn_internal_ip = ""
+    try:
+        # Source of Truth: the live interface state. 
+        # check=False in subprocess.run is more robust than check_output if "ip" is missing.
+        res = subprocess.run(["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"], 
+                             capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout):
+                vpn_internal_ip = match.group(1)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        # Handle cases where "ip" is missing or dev doesn't exist gracefully
+        pass
+
     return jsonify(
         {
             "wg_status": wg_status,
             "wg_pubkey": wg_pubkey,
+            "vpn_internal_ip": vpn_internal_ip,
             "configs_found": configs,
             "version": read_app_version(),
             "lnd_ip": lnd_ip,
@@ -1091,7 +1106,7 @@ def configure_node():
 
     if node_type == "lnd":
         lnd_processed, lnd_changed = upsert_config_line_in_section(
-            LND_TUNNELSATS_CONF_PATH,
+            LND_CONFIG_PATH,
             "[Application Options]",
             "externalhosts=",
             f"externalhosts={dns}:{port}",
@@ -1143,7 +1158,7 @@ def configure_node():
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
     lnd_processed, lnd_changed = comment_out_config_lines(
-        LND_TUNNELSATS_CONF_PATH,
+        LND_CONFIG_PATH,
         (
             "externalhosts=",
             "tor.skip-proxy-for-clearnet-targets=",
