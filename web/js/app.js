@@ -465,8 +465,8 @@ async function fetchStatus() {
         const boxNodeEl = document.getElementById('box-node');
         if (boxNodeEl) {
             let nodeText = "None";
-            if (data.target_container === "lightning_lnd_1" || data.target_impl === "lnd") nodeText = "LND";
-            else if (data.target_container && data.target_impl === "cln") nodeText = "Core-Lightning";
+            if (data.target_impl === "lnd") nodeText = "LND";
+            else if (data.target_impl === "cln") nodeText = "Core-Lightning";
             else if (data.lnd_detected) nodeText = "LND (Unconfigured)";
             else if (data.cln_detected) nodeText = "Core-Lightning (Unconfigured)";
             
