@@ -1340,12 +1340,9 @@ def restore_node():
             LND_CONFIG_PATH,
             (
                 "externalhosts=",
-                "[Application Options]",
                 "tor.skip-proxy-for-clearnet-targets=",
             ),
         )
-        if lnd_processed:
-            if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
                 errors.append("Failed to restart LND container.")
 
     if container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
