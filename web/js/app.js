@@ -454,6 +454,38 @@ async function fetchStatus() {
             pubkeyEl.replaceChildren(document.createTextNode(pk));
         }
 
+        const boxPubkeyEl = document.getElementById('box-pubkey');
+        if (boxPubkeyEl) {
+            boxPubkeyEl.replaceChildren(document.createTextNode(pk));
+        }
+
+        const boxNodeEl = document.getElementById('box-node');
+        if (boxNodeEl) {
+            let nodeText = "None";
+            if (data.target_container === "lightning_lnd_1" || data.target_impl === "lnd") nodeText = "LND";
+            else if (data.target_container && data.target_impl === "cln") nodeText = "Core-Lightning";
+            else if (data.lnd_detected) nodeText = "LND (Unconfigured)";
+            else if (data.cln_detected) nodeText = "Core-Lightning (Unconfigured)";
+            
+            boxNodeEl.replaceChildren(document.createTextNode(nodeText));
+        }
+
+        const boxServerEl = document.getElementById('box-server');
+        if (boxServerEl) {
+            boxServerEl.replaceChildren(document.createTextNode(data.server_domain || "Not setup"));
+        }
+
+        const boxPortEl = document.getElementById('box-port');
+        if (boxPortEl) {
+            boxPortEl.replaceChildren(document.createTextNode(data.vpn_port || "Not setup"));
+        }
+
+        const boxExpirationEl = document.getElementById('box-expiration');
+        if (boxExpirationEl) {
+            let expText = data.expires_at ? data.expires_at.split('T')[0] : "Not setup";
+            boxExpirationEl.replaceChildren(document.createTextNode(expText));
+        }
+
         // Update Renew IP Suffix
         if (data.vpn_internal_ip) {
             const parts = data.vpn_internal_ip.split('.');

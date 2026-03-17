@@ -34,6 +34,11 @@ describe('UI Routing and Initialization', () => {
                     cln_routing_active: false,
                     wg_status: 'Connected',
                     wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: 'lnd',
+                    target_container: 'lightning_lnd_1',
                     configs_found: [],
                     version: 'v3.0.0'
                 }),
@@ -63,6 +68,11 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('badge-routing').textContent).toBe('Secured');
         expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('btn-dash-enable-routing').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('box-pubkey').textContent).toBe('testpubkey123');
+        expect(document.getElementById('box-node').textContent).toBe('LND');
+        expect(document.getElementById('box-server').textContent).toBe('au1.tunnelsats.com');
+        expect(document.getElementById('box-port').textContent).toBe('39486');
+        expect(document.getElementById('box-expiration').textContent).toBe('2027-03-10');
     });
 
     test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {

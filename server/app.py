@@ -1031,6 +1031,20 @@ def local_status():
         # Handle cases where "ip" is missing or dev doesn't exist gracefully
         pass
 
+    server_domain = ""
+    expires_at = ""
+    vpn_port = ""
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+                server_domain = meta.get("serverDomain", "")
+                expires_at = meta.get("expiresAt", "")
+                vpn_port = meta.get("vpnPort", "")
+        except Exception:
+            pass
+
     return jsonify(
         {
             "wg_status": wg_status,
@@ -1045,6 +1059,9 @@ def local_status():
             "cln_detected": cln_detected,
             "lnd_routing_active": lnd_routing_active,
             "cln_routing_active": cln_routing_active,
+            "server_domain": server_domain,
+            "expires_at": expires_at,
+            "vpn_port": vpn_port,
             "dataplane_mode": dataplane["dataplane_mode"],
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
