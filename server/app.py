@@ -997,9 +997,13 @@ def local_status():
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
-                    if line.lstrip().startswith("announce-addr="):
-                        cln_routing_active = True
+        try:
+            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("externalhosts="):
+                        lnd_routing_active = True
                         break
+        except Exception:
             pass
 
     cln_routing_active = False
@@ -1007,7 +1011,7 @@ def local_status():
         try:
             with open(CLN_CONFIG_PATH, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.lstrip().startswith("announce-addr=") or line.lstrip().startswith("bind-addr="):
+                    if line.lstrip().startswith("announce-addr="):
                         cln_routing_active = True
                         break
         except Exception:
@@ -1339,6 +1343,8 @@ def restore_node():
                 "tor.skip-proxy-for-clearnet-targets=",
             ),
         )
+        if lnd_processed:
+            if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
                 errors.append("Failed to restart LND container.")
 
     if container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):

@@ -947,10 +947,11 @@ class TestDataplaneAndRegressionFixes:
 
     def test_restore_node_reports_processed_without_changes(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
-                f.write('[Application Options]\nfoo=bar\n')
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
             with open(lnd_path, 'w') as f:
-                f.write('foo=bar\n')
+                f.write('[Application Options]\nfoo=bar\n')
 
             with open(cln_path, 'w') as f:
                 f.write('foo=bar\n')
@@ -958,7 +959,8 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/restore-node')
+                        with patch('app.container_ids_by_match', return_value=['mock']): 
+                            res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)
