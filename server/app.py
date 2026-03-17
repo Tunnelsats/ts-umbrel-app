@@ -997,13 +997,9 @@ def local_status():
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
-        try:
-            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.lstrip().startswith("externalhosts="):
-                        lnd_routing_active = True
+                    if line.lstrip().startswith("announce-addr="):
+                        cln_routing_active = True
                         break
-        except Exception:
             pass
 
     cln_routing_active = False
