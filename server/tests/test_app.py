@@ -948,8 +948,7 @@ class TestDataplaneAndRegressionFixes:
     def test_restore_node_reports_processed_without_changes(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
-            cln_path = os.path.join(tmp_dir, 'config')
-
+                f.write('[Application Options]\nfoo=bar\n')
             with open(lnd_path, 'w') as f:
                 f.write('foo=bar\n')
 
