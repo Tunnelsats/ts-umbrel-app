@@ -42,7 +42,15 @@ async function mockFetch(url) {
                 version: 'v3.1.0-modern',
                 target_container: 'lightning_lnd_1',
                 target_ip: '10.0.0.2',
-                rules_synced: true,
+                target_impl: 'lnd',
+                vpn_active: true,
+                lnd_detected: true,
+                cln_detected: false,
+                lnd_routing_active: true,
+                cln_routing_active: false,
+                server_domain: 'au1.tunnelsats.com',
+                vpn_port: '39486',
+                expires_at: '2027-03-10T12:00:00Z',
                 forwarding_port: '35825',
                 last_reconcile_at: new Date().toISOString(),
                 last_error: null
@@ -449,11 +457,6 @@ async function fetchStatus() {
             document.getElementById('txt-wg-status').textContent = "Disconnected";
         }
         const pk = data.wg_pubkey || "Not available";
-        const pubkeyEl = document.getElementById('txt-pubkey');
-        if (pubkeyEl) {
-            pubkeyEl.replaceChildren(document.createTextNode(pk));
-        }
-
         const boxPubkeyEl = document.getElementById('box-pubkey');
         if (boxPubkeyEl) {
             boxPubkeyEl.replaceChildren(document.createTextNode(pk));

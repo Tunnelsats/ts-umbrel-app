@@ -63,7 +63,6 @@ describe('UI Routing and Initialization', () => {
     test('fetchStatus updates DOM elements', async () => {
         await window.fetchStatus();
         expect(document.getElementById('txt-wg-status').textContent).toBe('Connected');
-        expect(document.getElementById('txt-pubkey').textContent).toBe('testpubkey123');
         expect(document.getElementById('txt-routing-status').textContent).toBe('Routing: Secured via Tunnelsats');
         expect(document.getElementById('badge-routing').textContent).toBe('Secured');
         expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(false);
