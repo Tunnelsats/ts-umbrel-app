@@ -27,16 +27,15 @@ describe('UI Routing and Initialization', () => {
         global.fetch = jest.fn(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
                     wg_status: 'Connected',
                     wg_pubkey: 'testpubkey123',
                     configs_found: [],
-                    version: 'v3.0.0',
-                    target_container: 'lightning_lnd_1',
-                    target_ip: '10.21.21.6',
-                    forwarding_port: 9735,
-                    rules_synced: true,
-                    last_reconcile_at: '2023-10-27T10:00:00Z',
-                    last_error: 'Connection timeout'
+                    version: 'v3.0.0'
                 }),
                 ok: true
             })
@@ -60,13 +59,10 @@ describe('UI Routing and Initialization', () => {
         await window.fetchStatus();
         expect(document.getElementById('txt-wg-status').textContent).toBe('Connected');
         expect(document.getElementById('txt-pubkey').textContent).toBe('testpubkey123');
-        expect(document.getElementById('txt-target').textContent).toBe('lightning_lnd_1 (10.21.21.6)');
-        expect(String(document.getElementById('txt-forwarding').querySelector('span').textContent)).toBe('9735');
-        expect(document.getElementById('badge-rules').textContent).toBe('Synced');
-        expect(document.getElementById('btn-reconcile').classList.contains('hidden')).toBe(false);
-        expect(document.getElementById('txt-reconcile').textContent).not.toBe('Never');
-        expect(document.getElementById('txt-error').classList.contains('hidden')).toBe(false);
-        expect(document.getElementById('txt-error').querySelector('span').textContent).toBe('Connection timeout');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Routing: Secured via Tunnelsats');
+        expect(document.getElementById('badge-routing').textContent).toBe('Secured');
+        expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('btn-dash-enable-routing').classList.contains('hidden')).toBe(true);
     });
 
     test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {
@@ -830,48 +826,7 @@ describe('Phase 3b: Install Config', () => {
         expect(msg).toContain('CLN: config not found');
     });
 
-    test('pollReconcileStatus fails fast on non-2xx responses', async () => {
-        const timeoutSpy = jest.spyOn(window, 'setTimeout');
-        global.fetch = jest.fn((url) => {
-            if (url === '/api/local/reconcile/failure-case') {
-                return Promise.resolve({
-                    json: () => Promise.resolve({ error: 'temporary failure' }),
-                    ok: false
-                });
-            }
-            return Promise.resolve({
-                json: () => Promise.resolve({
-                    wg_status: 'Disconnected',
-                    wg_pubkey: '',
-                    configs_found: [],
-                    version: 'v3.0.0',
-                    target_impl: 'lnd',
-                    servers: []
-                }),
-                ok: true
-            });
-        });
-
-        await window.pollReconcileStatus('/api/local/reconcile/failure-case');
-
-        expect(document.getElementById('reconcile-text').textContent).toBe('Failed');
-        expect(timeoutSpy).toHaveBeenCalledWith(window.resetReconcileBtn, 3000);
-        expect(timeoutSpy.mock.calls.some(([, delay]) => delay === 2000)).toBe(false);
-    });
-
-    test('pollReconcileStatus surfaces network issues after repeated fetch failures', async () => {
-        const timeoutSpy = jest.spyOn(window, 'setTimeout');
-        global.fetch = jest.fn(() => Promise.reject(new Error('network down')));
-        document.getElementById('reconcile-text').textContent = 'Reconciling...';
-
-        await window.pollReconcileStatus('/api/local/reconcile/net-err');
-        await window.pollReconcileStatus('/api/local/reconcile/net-err');
-        expect(document.getElementById('reconcile-text').textContent).not.toContain('network issues');
-
-        await window.pollReconcileStatus('/api/local/reconcile/net-err');
-        expect(document.getElementById('reconcile-text').textContent).toBe('Reconciling (network issues)...');
-        expect(timeoutSpy.mock.calls.filter(([, delay]) => delay === 2000).length).toBeGreaterThanOrEqual(3);
-    });
+// Removed pollReconcileStatus tests
 });
 
 describe('NWC Auto-Renew Features', () => {

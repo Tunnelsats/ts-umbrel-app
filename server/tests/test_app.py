@@ -564,7 +564,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -667,7 +667,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -694,7 +694,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -722,7 +722,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -758,7 +758,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 200
             with open(cln_path, 'r') as f:
@@ -788,7 +788,7 @@ class TestDataplaneAndRegressionFixes:
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.os.replace', side_effect=OSError('replace failed')):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                            res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                            with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 500
             payload = json.loads(res.data)
@@ -813,7 +813,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -836,7 +836,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=False):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 500
             payload = json.loads(res.data)
@@ -861,7 +861,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -887,7 +887,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=False):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 500
             payload = json.loads(res.data)
@@ -923,7 +923,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        res = client.post('/api/local/restore-node')
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -951,7 +951,7 @@ class TestDataplaneAndRegressionFixes:
             cln_path = os.path.join(tmp_dir, 'config')
 
             with open(lnd_path, 'w') as f:
-                f.write('[Application Options]\nfoo=bar\n')
+                f.write('foo=bar\n')
 
             with open(cln_path, 'w') as f:
                 f.write('foo=bar\n')
@@ -959,7 +959,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.LND_CONFIG_PATH', lnd_path):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        res = client.post('/api/local/restore-node')
+                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -986,7 +986,7 @@ class TestDataplaneAndRegressionFixes:
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.CLN_CONFIG_PATH', cln_path):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                            res = client.post('/api/local/restore-node')
+                            with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/restore-node')
 
             assert res.status_code == 200
             payload = json.loads(res.data)

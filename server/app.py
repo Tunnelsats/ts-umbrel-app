@@ -967,6 +967,7 @@ def renew_subscription():
 
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
+    app.logger.info("Action Request: Fetching local status")
     wg_status = "Disconnected"
     wg_pubkey = ""
     try:
@@ -988,6 +989,33 @@ def local_status():
     dataplane = read_dataplane_state()
     lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
     cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
+
+    # Granular state detection
+    vpn_active = (wg_status == "Connected")
+    lnd_detected = bool(container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"))
+    cln_detected = bool(container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
+
+    lnd_routing_active = False
+    if os.path.exists(LND_CONFIG_PATH):
+        try:
+            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("externalhosts="):
+                        lnd_routing_active = True
+                        break
+        except Exception:
+            pass
+
+    cln_routing_active = False
+    if os.path.exists(CLN_CONFIG_PATH):
+        try:
+            with open(CLN_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("announce-addr=") or line.lstrip().startswith("bind-addr="):
+                        cln_routing_active = True
+                        break
+        except Exception:
+            pass
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""
@@ -1012,6 +1040,11 @@ def local_status():
             "version": read_app_version(),
             "lnd_ip": lnd_ip,
             "cln_ip": cln_ip,
+            "vpn_active": vpn_active,
+            "lnd_detected": lnd_detected,
+            "cln_detected": cln_detected,
+            "lnd_routing_active": lnd_routing_active,
+            "cln_routing_active": cln_routing_active,
             "dataplane_mode": dataplane["dataplane_mode"],
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
@@ -1175,6 +1208,7 @@ def get_metadata():
 
 @app.route("/api/local/configure-node", methods=["POST"])
 def configure_node():
+    app.logger.info("Action Request: Configuring Node")
     payload = request.get_json(silent=True) or {}
     node_type = str(payload.get("nodeType", "")).strip().lower()
 
@@ -1204,6 +1238,18 @@ def configure_node():
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
+        if not container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"):
+            app.logger.warning("LND container not found. Skipping configuration.")
+            return jsonify({
+                "success": True, 
+                "lnd": False, 
+                "cln": False, 
+                "lnd_changed": False, 
+                "port": port, 
+                "dns": dns,
+                "message": "LND container not found, skipping."
+            })
+
         lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_CONFIG_PATH,
             "[Application Options]",
@@ -1229,6 +1275,18 @@ def configure_node():
         )
 
     # CLN target
+    if not container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+        app.logger.warning("CLN container not found. Skipping configuration.")
+        return jsonify({
+            "success": True, 
+            "lnd": False, 
+            "cln": False, 
+            "cln_changed": False, 
+            "port": port, 
+            "dns": dns,
+            "message": "CLN container not found, skipping."
+        })
+
     cln_steps = (
         ("bind-addr=", "bind-addr=0.0.0.0:9736"),
         ("announce-addr=", f"announce-addr={dns}:{port}"),
@@ -1256,29 +1314,35 @@ def configure_node():
 
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
-    lnd_processed, lnd_changed = comment_out_config_lines(
-        LND_CONFIG_PATH,
-        (
-            "externalhosts=",
-            "tor.skip-proxy-for-clearnet-targets=",
-        ),
-    )
-    cln_processed, cln_changed = comment_out_config_lines(
-        CLN_CONFIG_PATH,
-        (
-            "bind-addr=",
-            "announce-addr=",
-            "always-use-proxy=",
-        ),
-    )
-
+    app.logger.info("Action Request: Restoring networking to default")
+    lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
-    if lnd_processed:
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
-            errors.append("Failed to restart LND container.")
-    if cln_processed:
-        if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
-            errors.append("Failed to restart CLN container.")
+
+    if container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"):
+        lnd_processed, lnd_changed = comment_out_config_lines(
+            LND_CONFIG_PATH,
+            (
+                "externalhosts=",
+                "[Application Options]",
+                "tor.skip-proxy-for-clearnet-targets=",
+            ),
+        )
+        if lnd_processed:
+            if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
+                errors.append("Failed to restart LND container.")
+
+    if container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+        cln_processed, cln_changed = comment_out_config_lines(
+            CLN_CONFIG_PATH,
+            (
+                "bind-addr=",
+                "announce-addr=",
+                "always-use-proxy=",
+            ),
+        )
+        if cln_processed:
+            if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+                errors.append("Failed to restart CLN container.")
 
     if errors:
         return jsonify({"success": False, "error": " ".join(errors)}), 500
