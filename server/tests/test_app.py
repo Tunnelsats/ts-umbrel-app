@@ -677,7 +677,8 @@ class TestDataplaneAndRegressionFixes:
         # Ensure it didn't proceed to sleep or daemon restart (mock_post only called once)
         assert mock_post.call_count == 1
 
-    def test_configure_node_lnd_creates_application_options_section_when_missing(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -691,7 +692,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -707,7 +708,8 @@ class TestDataplaneAndRegressionFixes:
             assert host_idx != -1
             assert section_idx < host_idx
 
-    def test_configure_node_lnd_creates_config_file_when_missing(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_creates_config_file_when_missing(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -718,7 +720,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -732,7 +734,8 @@ class TestDataplaneAndRegressionFixes:
             assert '[Application Options]\n' in lnd_content
             assert 'externalhosts=de2.tunnelsats.com:35825\n' in lnd_content
 
-    def test_configure_node_cln_injects_expected_lines_from_metadata(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_injects_expected_lines_from_metadata(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -746,7 +749,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -763,7 +766,8 @@ class TestDataplaneAndRegressionFixes:
             assert 'announce-addr=de2.tunnelsats.com:35825' in cln_content
             assert 'always-use-proxy=false' in cln_content
 
-    def test_configure_node_cln_dedupes_commented_and_active_lines(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_dedupes_commented_and_active_lines(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -782,7 +786,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 200
             with open(cln_path, 'r') as f:
@@ -793,7 +797,8 @@ class TestDataplaneAndRegressionFixes:
             assert cln_content.count('bind-addr=0.0.0.0:9736\n') == 1
             assert 'old.tunnelsats.com' not in cln_content
 
-    def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -812,7 +817,7 @@ class TestDataplaneAndRegressionFixes:
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.os.replace', side_effect=OSError('replace failed')):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                            with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                            res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
 
             assert res.status_code == 500
             payload = json.loads(res.data)
@@ -823,7 +828,8 @@ class TestDataplaneAndRegressionFixes:
             with open(cln_path, 'r') as f:
                 assert f.read() == original_content
 
-    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -837,7 +843,7 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.LND_CONFIG_PATH', lnd_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        with patch('app.container_ids_by_match', return_value=['mock']): res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
 
             assert res.status_code == 200
             payload = json.loads(res.data)
