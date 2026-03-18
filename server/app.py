@@ -890,7 +890,62 @@ def create_subscription():
 
 @app.route("/api/subscription/<paymentHash>", methods=["GET"])
 def check_subscription(paymentHash):
-    return proxy_request("GET", f"subscription/{paymentHash}")
+    # Proxy the check request to the core API
+    url = f"{TUNNELSATS_API_URL}/subscription/{paymentHash}"
+    try:
+        resp = requests.get(url, headers={"Content-Type": "application/json"}, timeout=10)
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                # If the subscription is paid, ensure our local metadata is in sync.
+                if data.get("status") == "paid":
+                    sub_data = data.get("subscription")
+                    if isinstance(sub_data, dict) and sub_data.get("expiresAt"):
+                        _update_local_metadata(sub_data, payment_hash=paymentHash)
+            except (ValueError, KeyError):
+                pass
+
+        excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
+        filtered_headers = [
+            (name, value) for (name, value) in resp.headers.items() if name.lower() not in excluded_headers
+        ]
+        return (resp.content, resp.status_code, filtered_headers)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+def _update_local_metadata(subscription_data, payment_hash=None):
+    """
+    Update tunnelsats-meta.json with latest subscription data (e.g. after renewal).
+    Only updates fields that are present in subscription_data.
+    """
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    meta = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read metadata for sync: {exc}")
+            return False
+
+    changed = False
+    if subscription_data.get("expiresAt") and meta.get("expiresAt") != subscription_data["expiresAt"]:
+        meta["expiresAt"] = subscription_data["expiresAt"]
+        changed = True
+
+    if payment_hash and meta.get("paymentHash") != payment_hash:
+        meta["paymentHash"] = payment_hash
+        changed = True
+
+    if changed:
+        try:
+            _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            return True
+        except (IOError, OSError) as exc:
+            app.logger.error(f"Failed to write synchronized metadata: {exc}")
+    
+    return False
 
 
 @app.route("/api/subscription/claim", methods=["POST"])

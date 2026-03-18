@@ -1073,3 +1073,40 @@ class TestDataplaneAndRegressionFixes:
             ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"],
             capture_output=True, text=True, timeout=2
         )
+
+    @patch('app.requests.get')
+    def test_check_subscription_updates_metadata_on_paid(self, mock_get, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = json.dumps({
+            "status": "paid",
+            "subscription": {
+                "expiresAt": "2027-04-10T20:55:39.663Z"
+            }
+        }).encode('utf-8')
+        mock_resp.json.return_value = {
+            "status": "paid",
+            "subscription": {
+                "expiresAt": "2027-04-10T20:55:39.663Z"
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            initial_meta = {
+                "expiresAt": "2027-03-10T20:55:39.663Z",
+                "serverId": "fi1"
+            }
+            with open(meta_path, 'w') as f:
+                json.dump(initial_meta, f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                res = client.get('/api/subscription/some-hash')
+
+            assert res.status_code == 200
+            # Verify the file was updated
+            with open(meta_path, 'r') as f:
+                updated_meta = json.load(f)
+                assert updated_meta['expiresAt'] == "2027-04-10T20:55:39.663Z"
