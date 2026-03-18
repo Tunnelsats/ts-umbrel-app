@@ -352,6 +352,10 @@ function switchTab(tabId) {
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
 
+    if (tabId === 'dashboard') {
+        fetchStatus();
+    }
+
     // Reset polling and invoice UI when navigating away
     if (pollInterval) {
         clearInterval(pollInterval);
@@ -794,6 +798,9 @@ async function pollPayment() {
                 const p = document.createElement('p');
                 p.className = 'text-sm text-gray-300 text-center mb-4';
                 p.textContent = 'Your VPN subscription has been extended successfully. No restarts required.';
+
+                // Trigger UI refresh to show new expiry date
+                fetchStatus();
 
                 const button = document.createElement('button');
                 button.className = 'mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition shadow-lg';

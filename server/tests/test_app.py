@@ -1076,6 +1076,7 @@ class TestDataplaneAndRegressionFixes:
 
     @patch('app.requests.get')
     def test_check_subscription_updates_metadata_on_paid(self, mock_get, client):
+        # Case 1: Standard subscription object (e.g. for claim/new buy)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "application/json"}
@@ -1095,18 +1096,32 @@ class TestDataplaneAndRegressionFixes:
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
-            initial_meta = {
-                "expiresAt": "2027-03-10T20:55:39.663Z",
-                "serverId": "fi1"
-            }
-            with open(meta_path, 'w') as f:
-                json.dump(initial_meta, f)
+            initial_meta = { "expiresAt": "2027-03-10T20:55:39.663Z" }
+            with open(meta_path, 'w') as f: json.dump(initial_meta, f)
 
             with patch('app.DATA_DIR', tmp_dir):
-                res = client.get('/api/subscription/some-hash')
+                client.get('/api/subscription/hash1')
+                with open(meta_path, 'r') as f:
+                    assert json.load(f)['expiresAt'] == "2027-04-10T20:55:39.663Z"
 
-            assert res.status_code == 200
-            # Verify the file was updated
-            with open(meta_path, 'r') as f:
-                updated_meta = json.load(f)
-                assert updated_meta['expiresAt'] == "2027-04-10T20:55:39.663Z"
+        # Case 2: Renewal format (flat structure with newExpiry)
+        mock_resp.content = json.dumps({
+            "status": "paid",
+            "oldExpiry": "2027-04-10T20:55:39.663Z",
+            "newExpiry": "2027-05-10T20:55:39.663Z"
+        }).encode('utf-8')
+        mock_resp.json.return_value = {
+            "status": "paid",
+            "oldExpiry": "2027-04-10T20:55:39.663Z",
+            "newExpiry": "2027-05-10T20:55:39.663Z"
+        }
+        
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            initial_meta = { "expiresAt": "2027-04-10T20:55:39.663Z" }
+            with open(meta_path, 'w') as f: json.dump(initial_meta, f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                client.get('/api/subscription/hash2')
+                with open(meta_path, 'r') as f:
+                    assert json.load(f)['expiresAt'] == "2027-05-10T20:55:39.663Z"

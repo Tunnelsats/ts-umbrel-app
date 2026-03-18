@@ -899,9 +899,15 @@ def check_subscription(paymentHash):
                 data = resp.json()
                 # If the subscription is paid, ensure our local metadata is in sync.
                 if data.get("status") == "paid":
+                    # Support both standard 'subscription' object and top-level renewal fields
+                    new_expiry = data.get("newExpiry")
                     sub_data = data.get("subscription")
-                    if isinstance(sub_data, dict) and sub_data.get("expiresAt"):
+                    
+                    if isinstance(sub_data, dict):
                         _update_local_metadata(sub_data, payment_hash=paymentHash)
+                    elif new_expiry:
+                        # Direct renewal response format
+                        _update_local_metadata(data, payment_hash=paymentHash)
             except (ValueError, KeyError):
                 pass
 
@@ -930,8 +936,11 @@ def _update_local_metadata(subscription_data, payment_hash=None):
             return False
 
     changed = False
-    if subscription_data.get("expiresAt") and meta.get("expiresAt") != subscription_data["expiresAt"]:
-        meta["expiresAt"] = subscription_data["expiresAt"]
+    # Support both 'expiresAt' (standard) and 'newExpiry' (renewal specific)
+    new_expiry = subscription_data.get("expiresAt") or subscription_data.get("newExpiry")
+    
+    if new_expiry and meta.get("expiresAt") != new_expiry:
+        meta["expiresAt"] = new_expiry
         changed = True
 
     if payment_hash and meta.get("paymentHash") != payment_hash:
