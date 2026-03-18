@@ -1042,7 +1042,8 @@ def local_status():
                 server_domain = meta.get("serverDomain", "")
                 expires_at = meta.get("expiresAt", "")
                 vpn_port = meta.get("vpnPort", "")
-        except Exception:
+        except (IOError, OSError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
             pass
 
     return jsonify(
@@ -1258,14 +1259,14 @@ def configure_node():
         if not container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"):
             app.logger.warning("LND container not found. Skipping configuration.")
             return jsonify({
-                "success": True, 
+                "success": False, 
+                "error": "LND container not found, skipping.",
                 "lnd": False, 
                 "cln": False, 
                 "lnd_changed": False, 
                 "port": port, 
-                "dns": dns,
-                "message": "LND container not found, skipping."
-            })
+                "dns": dns
+            }), 200
 
         lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_CONFIG_PATH,
@@ -1295,14 +1296,14 @@ def configure_node():
     if not container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
         app.logger.warning("CLN container not found. Skipping configuration.")
         return jsonify({
-            "success": True, 
+            "success": False, 
+            "error": "CLN container not found, skipping.",
             "lnd": False, 
             "cln": False, 
             "cln_changed": False, 
             "port": port, 
-            "dns": dns,
-            "message": "CLN container not found, skipping."
-        })
+            "dns": dns
+        }), 200
 
     cln_steps = (
         ("bind-addr=", "bind-addr=0.0.0.0:9736"),
