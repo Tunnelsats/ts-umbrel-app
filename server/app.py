@@ -939,8 +939,8 @@ def check_subscription(paymentHash):
                     elif new_expiry:
                         # Direct renewal response format
                         _update_local_metadata(data, payment_hash=paymentHash)
-            except (ValueError, KeyError):
-                pass
+            except (ValueError, KeyError) as exc:
+                app.logger.warning(f"Failed to parse subscription data or update metadata: {exc}")
 
         excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
         filtered_headers = [
@@ -1128,8 +1128,8 @@ def local_status():
                     if line.lstrip().startswith("externalhosts="):
                         lnd_routing_active = True
                         break
-        except Exception:
-            pass
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Could not read LND config at {LND_CONFIG_PATH}: {exc}")
 
     cln_routing_active = False
     if os.path.exists(CLN_CONFIG_PATH):
@@ -1139,8 +1139,8 @@ def local_status():
                     if line.lstrip().startswith("announce-addr="):
                         cln_routing_active = True
                         break
-        except Exception:
-            pass
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Could not read CLN config at {CLN_CONFIG_PATH}: {exc}")
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""

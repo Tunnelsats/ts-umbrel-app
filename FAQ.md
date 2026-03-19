@@ -45,38 +45,38 @@ When TunnelSats detects CLN, it handles two distinct ports:
 
 TunnelSats handles this mapping automatically—you do not need to manually change your CLN `bind-addr`.
 
-### 6. How do I safely uninstall the Tunnelsats App on Umbrel?
+### 6. How do I safely uninstall the TunnelSats App on Umbrel?
 
 To prevent network routing issues with your Lightning node, you must perform a **two-step uninstall process**. 
 
-Because of how Umbrel isolates applications, simply clicking "Uninstall" in the Umbrel App Store immediately kills the Tunnelsats background processes. If this happens while your node is still actively routing through the VPN, your Lightning node (LND/CLN) will be left trying to broadcast a VPN IP address that no longer exists, resulting in lost connections and gossip failures.
+Because of how Umbrel isolates applications, simply clicking "Uninstall" in the Umbrel App Store immediately kills the TunnelSats background processes. If this happens while your node is still actively routing through the VPN, your Lightning node (LND/CLN) will be left trying to broadcast a VPN IP address that no longer exists, resulting in lost connections and gossip failures.
 
-Please follow these exact steps to safely remove Tunnelsats:
+Please follow these exact steps to safely remove TunnelSats:
 
-#### Step 1: Disconnect within the Tunnelsats App
+#### Step 1: Disconnect within the TunnelSats App
 First, we must safely detach the VPN from your Lightning node and return it to its default Tor/Clearnet state.
-1. Open the **Tunnelsats App** from your Umbrel dashboard.
+1. Open the **TunnelSats App** from your Umbrel dashboard.
 2. Locate the **Node Routing Status** section.
 3. Click the **Disable Routing (Uninstall)** button.
 4. Wait for the UI to confirm that your node has been successfully restored to its default routing state.
 
 #### Step 2: Uninstall via the Umbrel App Store
-Once Tunnelsats is disconnected from your node, you can safely remove the app itself.
+Once TunnelSats is disconnected from your node, you can safely remove the app itself.
 1. Go to the **Umbrel App Store**.
-2. Navigate to your installed apps and locate Tunnelsats.
+2. Navigate to your installed apps and locate TunnelSats.
 3. Click **Uninstall**.
 
 > **Will I lose my subscription?**
-> No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel safely preserves your Tunnelsats app data folder (including your active WireGuard subscription profile). If you reinstall the app in the future, your subscription will still be there.
+> No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel safely preserves your TunnelSats app data folder (including your active WireGuard subscription profile). If you reinstall the app in the future, your subscription will still be there.
 
 ---
 
 ### Troubleshooting: I uninstalled via the App Store first, and now my node is offline!
 
-If you skipped Step 1, your LND or CLN configuration file still contains the Tunnelsats `externalhosts` or `announce-addr` directives, but the VPN tunnel is dead. Your traffic is effectively being sent into a black hole.
+If you skipped Step 1, your LND or CLN configuration file still contains the TunnelSats `externalhosts` or `announce-addr` directives, but the VPN tunnel is dead. Your traffic is effectively being sent into a black hole.
 
 **How to fix it:**
-1. **The Easy Way:** Go back to the Umbrel App Store and **Reinstall** the Tunnelsats app. Open it, ensure the VPN connects, and then follow the safe two-step process above.
-2. **The Manual Way (Advanced):** Connect to your Umbrel via SSH and manually remove the orphaned Tunnelsats lines from your node's configuration files:
+1. **The Easy Way:** Go back to the Umbrel App Store and **Reinstall** the TunnelSats app. Open it, ensure the VPN connects, and then follow the safe two-step process above.
+2. **The Manual Way (Advanced):** Connect to your Umbrel via SSH and manually remove the orphaned TunnelSats lines from your node's configuration files:
    * **For LND:** Edit `~/umbrel/app-data/lightning/data/lnd/lnd.conf` and delete or comment out the `externalhosts=` line. Then restart LND.
    * **For CLN:** Edit `~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config` and delete or comment out the `announce-addr=` line. Then restart CLN.
