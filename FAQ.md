@@ -66,7 +66,8 @@ Once Tunnelsats is disconnected from your node, you can safely remove the app it
 2. Navigate to your installed apps and locate Tunnelsats.
 3. Click **Uninstall**.
 
-> **Will I lose my subscription?** > No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel safely preserves your Tunnelsats app data folder (including your active WireGuard subscription profile). If you reinstall the app in the future, your subscription will still be there.
+> **Will I lose my subscription?**
+> No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel safely preserves your Tunnelsats app data folder (including your active WireGuard subscription profile). If you reinstall the app in the future, your subscription will still be there.
 
 ---
 

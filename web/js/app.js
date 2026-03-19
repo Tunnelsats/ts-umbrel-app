@@ -423,7 +423,7 @@ async function fetchStatus() {
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (vpnActive && routingActive) {
+        if (vpnActive && hasNode && routingActive) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
