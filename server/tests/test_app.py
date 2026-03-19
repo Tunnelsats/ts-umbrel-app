@@ -550,7 +550,8 @@ class TestDataplaneAndRegressionFixes:
         assert payload['complete'] is True
         assert payload['success'] is False
 
-    def test_configure_node_lnd_injects_externalhosts_from_metadata(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_injects_externalhosts_from_metadata(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -573,10 +574,33 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
+
+    @patch('app.container_ids_by_match', return_value=[])
+    def test_configure_node_returns_error_when_container_not_found(self, mock_ids, client):
+        """Verifies P1 feedback: configure_node should return success=False when container is missing."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                # Test LND
+                res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                assert res.status_code == 200
+                payload = json.loads(res.data)
+                assert payload['success'] is False
+                assert 'LND container not found' in payload['error']
+
+                # Test CLN
+                res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                assert res.status_code == 200
+                payload = json.loads(res.data)
+                assert payload['success'] is False
+                assert 'CLN container not found' in payload['error']
 
     @patch('app.docker_api')
     @patch('app.docker_api_post')
@@ -653,7 +677,8 @@ class TestDataplaneAndRegressionFixes:
         # Ensure it didn't proceed to sleep or daemon restart (mock_post only called once)
         assert mock_post.call_count == 1
 
-    def test_configure_node_lnd_creates_application_options_section_when_missing(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -683,7 +708,8 @@ class TestDataplaneAndRegressionFixes:
             assert host_idx != -1
             assert section_idx < host_idx
 
-    def test_configure_node_lnd_creates_config_file_when_missing(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_creates_config_file_when_missing(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -701,14 +727,15 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert os.path.exists(lnd_path)
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert '[Application Options]\n' in lnd_content
             assert 'externalhosts=de2.tunnelsats.com:35825\n' in lnd_content
 
-    def test_configure_node_cln_injects_expected_lines_from_metadata(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_injects_expected_lines_from_metadata(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -739,7 +766,8 @@ class TestDataplaneAndRegressionFixes:
             assert 'announce-addr=de2.tunnelsats.com:35825' in cln_content
             assert 'always-use-proxy=false' in cln_content
 
-    def test_configure_node_cln_dedupes_commented_and_active_lines(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_dedupes_commented_and_active_lines(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -769,7 +797,8 @@ class TestDataplaneAndRegressionFixes:
             assert cln_content.count('bind-addr=0.0.0.0:9736\n') == 1
             assert 'old.tunnelsats.com' not in cln_content
 
-    def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -799,7 +828,8 @@ class TestDataplaneAndRegressionFixes:
             with open(cln_path, 'r') as f:
                 assert f.read() == original_content
 
-    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -820,9 +850,10 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
-    def test_configure_node_lnd_returns_500_when_restart_fails(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_returns_500_when_restart_fails(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -847,7 +878,8 @@ class TestDataplaneAndRegressionFixes:
                 updated_meta = json.load(f)
             assert updated_meta['lndRestartPending'] is True
 
-    def test_configure_node_lnd_retries_restart_when_pending_flag_set(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_lnd_retries_restart_when_pending_flag_set(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -867,13 +899,14 @@ class TestDataplaneAndRegressionFixes:
             payload = json.loads(res.data)
             assert payload['success'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
             with open(meta_path, 'r') as f:
                 updated_meta = json.load(f)
             assert 'lndRestartPending' not in updated_meta
 
-    def test_configure_node_cln_returns_500_when_restart_fails(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_configure_node_cln_returns_500_when_restart_fails(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -898,9 +931,10 @@ class TestDataplaneAndRegressionFixes:
                 updated_meta = json.load(f)
             assert updated_meta['clnRestartPending'] is True
 
-    def test_restore_node_comments_expected_lines(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_restore_node_comments_expected_lines(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
             cln_path = os.path.join(tmp_dir, 'config')
 
             with open(lnd_path, 'w') as f:
@@ -945,9 +979,10 @@ class TestDataplaneAndRegressionFixes:
             assert '# always-use-proxy=false\n' in cln_content
             assert '# bind-addr=already-commented\n' in cln_content
 
-    def test_restore_node_reports_processed_without_changes(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_restore_node_reports_processed_without_changes(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
             cln_path = os.path.join(tmp_dir, 'config')
 
             with open(lnd_path, 'w') as f:
@@ -968,11 +1003,42 @@ class TestDataplaneAndRegressionFixes:
             assert payload['lnd_changed'] is False
             assert payload['cln_changed'] is False
 
+    @patch('app.container_ids_by_match', return_value=[])
+    def test_restore_node_still_comments_configs_when_containers_are_not_running(self, mock_ids, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(lnd_path, 'w') as f:
+                f.write('externalhosts=de2.tunnelsats.com:35825\n')
+
+            with open(cln_path, 'w') as f:
+                f.write('announce-addr=de2.tunnelsats.com:35825\n')
+
+            with patch('app.LND_CONFIG_PATH', lnd_path):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
+                        res = client.post('/api/local/restore-node')
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['lnd'] is True
+            assert payload['cln'] is True
+            assert payload['lnd_changed'] is True
+            assert payload['cln_changed'] is True
+            mock_restart.assert_not_called()
+
+            with open(lnd_path, 'r') as f:
+                assert '# externalhosts=de2.tunnelsats.com:35825\n' in f.read()
+            with open(cln_path, 'r') as f:
+                assert '# announce-addr=de2.tunnelsats.com:35825\n' in f.read()
+
     def test_restore_node_route_declared_once(self):
         rules = [rule for rule in app_module.app.url_map.iter_rules() if rule.rule == '/api/local/restore-node']
         assert len(rules) == 1
 
-    def test_restore_node_forces_restarts(self, client):
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_restore_node_forces_restarts(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
             cln_path = os.path.join(tmp_dir, 'config')
@@ -994,7 +1060,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             # Should have called restart for both LND and CLN
             assert mock_restart.call_count == 2
-            mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_any_call(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
 
     @patch('app.read_dataplane_state')

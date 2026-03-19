@@ -120,7 +120,7 @@
     </style>
 </head>
 
-<body class="min-h-screen flex flex-col items-center justify-center py-6 md:py-10 px-4 md:px-8">
+<body class="min-h-screen flex flex-col items-center justify-start py-6 md:py-10 px-4 md:px-8">
     <!-- Mobile Sticky Header -->
     <header class="md:hidden w-full max-w-6xl glass-panel rounded-xl border border-white/10 p-4 mb-4 flex justify-between items-center z-50">
         <div class="flex items-center space-x-3">
@@ -257,7 +257,7 @@
             <section id="view-dashboard" class="space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-white mb-4">VPN Status</h2>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="grid grid-cols-1 gap-4">
                         <div
                             class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 hover:shadow-[0_0_30px_-5px_rgba(34,197,94,0.3)] transition-all duration-300 group relative overflow-hidden">
                             <div
@@ -278,62 +278,77 @@
                             <div id="txt-wg-status" class="text-2xl font-mono text-gray-500 font-bold tracking-tight">
                                 <span class="skeleton w-32 h-8"></span></div>
                         </div>
-                        <div
-                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsyellow/50 hover:shadow-[0_0_30px_-5px_rgba(250,204,21,0.2)] transition-all duration-300 group relative overflow-hidden">
-                            <div
-                                class="absolute top-0 right-0 w-24 h-24 bg-tsyellow/5 rounded-bl-[100px] pointer-events-none">
-                            </div>
-                            <div class="flex items-center space-x-3 mb-2">
-                                <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow transition-colors"
-                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z">
-                                    </path>
+                    </div>
+                </div>
+
+                <!-- Node Routing Status Section -->
+                <div class="mt-6">
+                    <h2 class="text-xl font-bold text-white mb-4">Node Routing Status</h2>
+                    <div class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-blue-500/50 hover:shadow-[0_0_30px_-5px_rgba(59,130,246,0.3)] transition-all duration-300 group relative overflow-hidden">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center space-x-3">
+                                <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                                 </svg>
-                                <p class="text-sm font-semibold text-gray-400">Active Pubkey</p>
+                                <p class="text-sm font-semibold text-gray-400">Current Routing</p>
                             </div>
-                            <div id="txt-pubkey" class="text-sm font-mono truncate text-gray-300">
-                                <span class="skeleton w-full"></span></div>
+                            <span id="badge-routing" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Checking...</span>
+                        </div>
+                        <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
+                            <span class="skeleton w-48 h-6"></span>
+                        </div>
+                        <div id="routing-actions" class="mt-6 flex space-x-3 hidden">
+                            <button id="btn-dash-enable-routing" class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable Routing</button>
+                            <button id="btn-dash-disable-routing" class="flex-1 bg-gray-800 hover:bg-red-500/20 hover:text-red-500 border border-gray-700 hover:border-red-500/50 text-gray-300 font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Disable Routing</button>
                         </div>
                     </div>
                 </div>
 
-                <!-- Dataplane Status Section -->
+                <!-- Node & Tunnelsats Details Section -->
                 <div class="mt-6">
-                    <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-xl font-bold text-white">Dataplane Status</h2>
-                        <button id="btn-reconcile" class="hidden bg-gray-800 hover:bg-gray-700 text-tsyellow border border-tsyellow/30 px-4 py-2 rounded-lg text-sm font-bold transition-all items-center space-x-2">
-                            <svg id="reconcile-spinner" class="animate-spin hidden h-4 w-4 text-tsyellow" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                            <span id="reconcile-text">Reconcile Now</span>
-                        </button>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] group relative overflow-hidden">
-                            <div class="flex items-center justify-between mb-2">
-                                <div class="flex items-center space-x-3">
-                                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
-                                    </svg>
-                                    <p class="text-sm font-semibold text-gray-400">Target Container</p>
-                                </div>
-                                <span id="badge-rules" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Unsynced</span>
+                    <h2 class="text-xl font-bold text-white mb-4">Node &amp; Tunnelsats Details</h2>
+                    <div class="bg-gray-900/80 p-6 flex flex-col space-y-4 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 hover:shadow-[0_0_30px_-5px_rgba(34,197,94,0.3)] transition-all duration-300 relative overflow-hidden">
+                        
+                        <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
+                            <svg class="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                            <div class="flex-1 overflow-hidden">
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Active Wireguard Pubkey</p>
+                                <p id="box-pubkey" class="text-sm font-mono text-gray-300 truncate w-full"><span class="skeleton w-32"></span></p>
                             </div>
-                            <div id="txt-target" class="text-sm font-mono text-gray-300">
-                                <span class="skeleton w-48"></span></div>
-                            <p id="txt-forwarding" class="text-xs text-gray-500 mt-2">Forwarding Port: <span class="text-gray-400 font-mono">--</span></p>
                         </div>
 
-                        <div class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] group relative overflow-hidden">
-                            <div class="flex items-center space-x-3 mb-2">
-                                <svg class="w-5 h-5 text-gray-400 group-hover:text-purple-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                </svg>
-                                <p class="text-sm font-semibold text-gray-400">Last Reconcile</p>
+                        <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
+                            <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            <div class="flex-1 overflow-hidden">
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Target Node</p>
+                                <p id="box-node" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-16"></span></p>
                             </div>
-                            <div id="txt-reconcile" class="text-sm font-mono text-gray-300 truncate">
-                                <span class="skeleton w-32"></span></div>
-                            <p id="txt-error" class="text-xs text-red-500 mt-2 hidden">Error: <span class="font-mono text-[10px] break-all"></span></p>
                         </div>
+
+                        <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
+                            <svg class="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.906 14.142 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path></svg>
+                            <div class="flex-1 overflow-hidden">
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">VPN Server</p>
+                                <p id="box-server" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-32"></span></p>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
+                            <svg class="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg>
+                            <div class="flex-1 overflow-hidden">
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">VPN External Port</p>
+                                <p id="box-port" class="text-sm font-mono text-gray-300 truncate w-full"><span class="skeleton w-16"></span></p>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center space-x-4">
+                            <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                            <div class="flex-1 overflow-hidden">
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Expiration Date</p>
+                                <p id="box-expiration" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-24"></span></p>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
 

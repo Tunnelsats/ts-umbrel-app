@@ -48,6 +48,9 @@ APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
+LND_CONTAINER_PATTERN = r"^lightning[_-]lnd[_-]\d+$"
+LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
+CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -646,8 +649,9 @@ def docker_api_post(path):
         return False
 
 
-def container_ip_by_match(pattern):
-    containers = docker_api("/containers/json?all=0")
+def container_ip_by_match(pattern, containers=None):
+    if containers is None:
+        containers = docker_api("/containers/json?all=0")
     if not containers:
         return ""
 
@@ -664,8 +668,9 @@ def container_ip_by_match(pattern):
     return ""
 
 
-def container_ids_by_match(pattern):
-    containers = docker_api("/containers/json?all=0")
+def container_ids_by_match(pattern, containers=None):
+    if containers is None:
+        containers = docker_api("/containers/json?all=0")
     if not containers:
         return []
 
@@ -691,7 +696,7 @@ def restart_container_by_pattern(pattern, is_lnd=False):
         app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
         
         # 1. Restart middleware (strictly lightning_app_1, excluding proxy)
-        middleware_id = container_id_by_match(r"^lightning[_-]app[_-]\d+$")
+        middleware_id = container_id_by_match(LND_MIDDLEWARE_PATTERN)
         if middleware_id:
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
@@ -708,7 +713,7 @@ def restart_container_by_pattern(pattern, is_lnd=False):
         time.sleep(LND_RESTART_DELAY)
         
         # 3. Restart LND daemon
-        daemon_id = container_id_by_match(r"^lightning[_-]lnd[_-]\d+$")
+        daemon_id = container_id_by_match(LND_CONTAINER_PATTERN)
         if daemon_id:
             app.logger.info(f"Found LND daemon container (ID: {daemon_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{daemon_id}/restart")
@@ -967,6 +972,7 @@ def renew_subscription():
 
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
+    app.logger.debug("Action Request: Fetching local status")
     wg_status = "Disconnected"
     wg_pubkey = ""
     try:
@@ -986,8 +992,36 @@ def local_status():
                 configs.append(fname)
 
     dataplane = read_dataplane_state()
-    lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
-    cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
+    containers = docker_api("/containers/json?all=0") or []
+    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
+    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
+
+    # Granular state detection
+    vpn_active = (wg_status == "Connected")
+    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
+    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
+
+    lnd_routing_active = False
+    if os.path.exists(LND_CONFIG_PATH):
+        try:
+            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("externalhosts="):
+                        lnd_routing_active = True
+                        break
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to read LND config for routing detection: {exc}")
+
+    cln_routing_active = False
+    if os.path.exists(CLN_CONFIG_PATH):
+        try:
+            with open(CLN_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("announce-addr="):
+                        cln_routing_active = True
+                        break
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to read CLN config for routing detection: {exc}")
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""
@@ -1003,6 +1037,21 @@ def local_status():
         # Handle cases where "ip" is missing or dev doesn't exist gracefully
         pass
 
+    server_domain = ""
+    expires_at = ""
+    vpn_port = ""
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+                server_domain = meta.get("serverDomain", "")
+                expires_at = meta.get("expiresAt", "")
+                vpn_port = meta.get("vpnPort", "")
+        except (IOError, OSError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
+            pass
+
     return jsonify(
         {
             "wg_status": wg_status,
@@ -1012,6 +1061,14 @@ def local_status():
             "version": read_app_version(),
             "lnd_ip": lnd_ip,
             "cln_ip": cln_ip,
+            "vpn_active": vpn_active,
+            "lnd_detected": lnd_detected,
+            "cln_detected": cln_detected,
+            "lnd_routing_active": lnd_routing_active,
+            "cln_routing_active": cln_routing_active,
+            "server_domain": server_domain,
+            "expires_at": expires_at,
+            "vpn_port": vpn_port,
             "dataplane_mode": dataplane["dataplane_mode"],
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
@@ -1175,6 +1232,7 @@ def get_metadata():
 
 @app.route("/api/local/configure-node", methods=["POST"])
 def configure_node():
+    app.logger.info("Action Request: Configuring Node")
     payload = request.get_json(silent=True) or {}
     node_type = str(payload.get("nodeType", "")).strip().lower()
 
@@ -1204,6 +1262,18 @@ def configure_node():
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
+        if not container_ids_by_match(LND_CONTAINER_PATTERN):
+            app.logger.warning("LND container not found. Skipping configuration.")
+            return jsonify({
+                "success": False, 
+                "error": "LND container not found, skipping.",
+                "lnd": False, 
+                "cln": False, 
+                "lnd_changed": False, 
+                "port": port, 
+                "dns": dns
+            }), 200
+
         lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_CONFIG_PATH,
             "[Application Options]",
@@ -1212,7 +1282,7 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
+        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
             _set_restart_pending(meta_path, meta, lnd_pending_key, True)
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
@@ -1229,6 +1299,18 @@ def configure_node():
         )
 
     # CLN target
+    if not container_ids_by_match(CLN_CONTAINER_PATTERN):
+        app.logger.warning("CLN container not found. Skipping configuration.")
+        return jsonify({
+            "success": False, 
+            "error": "CLN container not found, skipping.",
+            "lnd": False, 
+            "cln": False, 
+            "cln_changed": False, 
+            "port": port, 
+            "dns": dns
+        }), 200
+
     cln_steps = (
         ("bind-addr=", "bind-addr=0.0.0.0:9736"),
         ("announce-addr=", f"announce-addr={dns}:{port}"),
@@ -1238,7 +1320,7 @@ def configure_node():
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
-    if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+    if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
         _set_restart_pending(meta_path, meta, cln_pending_key, True)
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
@@ -1256,6 +1338,12 @@ def configure_node():
 
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
+    app.logger.info("Action Request: Restoring networking to default")
+    lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
+    errors = []
+    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
+    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
+
     lnd_processed, lnd_changed = comment_out_config_lines(
         LND_CONFIG_PATH,
         (
@@ -1263,6 +1351,12 @@ def restore_node():
             "tor.skip-proxy-for-clearnet-targets=",
         ),
     )
+    if lnd_processed and lnd_detected:
+        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
+            errors.append("Failed to restart LND container.")
+    elif lnd_processed and not lnd_detected:
+        app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
+
     cln_processed, cln_changed = comment_out_config_lines(
         CLN_CONFIG_PATH,
         (
@@ -1271,14 +1365,11 @@ def restore_node():
             "always-use-proxy=",
         ),
     )
-
-    errors = []
-    if lnd_processed:
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
-            errors.append("Failed to restart LND container.")
-    if cln_processed:
-        if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+    if cln_processed and cln_detected:
+        if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
             errors.append("Failed to restart CLN container.")
+    elif cln_processed and not cln_detected:
+        app.logger.info("CLN config restored, but no running CLN container detected. Skipping restart.")
 
     if errors:
         return jsonify({"success": False, "error": " ".join(errors)}), 500

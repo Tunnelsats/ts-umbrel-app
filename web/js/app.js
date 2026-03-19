@@ -42,7 +42,15 @@ async function mockFetch(url) {
                 version: 'v3.1.0-modern',
                 target_container: 'lightning_lnd_1',
                 target_ip: '10.0.0.2',
-                rules_synced: true,
+                target_impl: 'lnd',
+                vpn_active: true,
+                lnd_detected: true,
+                cln_detected: false,
+                lnd_routing_active: true,
+                cln_routing_active: false,
+                server_domain: 'au1.tunnelsats.com',
+                vpn_port: '39486',
+                expires_at: '2027-03-10T12:00:00Z',
                 forwarding_port: '35825',
                 last_reconcile_at: new Date().toISOString(),
                 last_error: null
@@ -306,13 +314,14 @@ document.addEventListener("DOMContentLoaded", () => {
     attachListener('nav-renew', 'click', () => switchTab('renew'));
     attachListener('nav-import', 'click', () => switchTab('import'));
     attachListener('nav-uninstall', 'click', () => switchTab('uninstall'));
-    attachListener('btn-reconcile', 'click', () => reconcileTunnel());
     attachListener('buy-server-btn', 'click', () => toggleDropdown('buy-server'));
     attachListener('buy-duration-btn', 'click', () => toggleDropdown('buy-duration'));
     attachListener('renew-duration-btn', 'click', () => toggleDropdown('renew-duration'));
     attachListener('btn-create-buy', 'click', () => createSub('buy'));
     attachListener('btn-create-renew', 'click', () => createSub('renew'));
     attachListener('btn-copy-invoice-buy', 'click', () => copyInvoice('buy'));
+    attachListener('btn-dash-enable-routing', 'click', () => switchTab('import'));
+    attachListener('btn-dash-disable-routing', 'click', () => switchTab('uninstall'));
     attachListener('btn-copy-invoice-renew', 'click', () => copyInvoice('renew'));
     attachListener('btn-claim-install', 'click', () => claimSubscription('import'));
     attachListener('btn-import-config', 'click', () => importConfig());
@@ -399,9 +408,18 @@ async function fetchStatus() {
         const res = await fetch('/api/local/status');
         const data = await res.json();
 
+        const vpnActive = data.vpn_active === true;
+        const lndDetected = data.lnd_detected === true;
+        const clnDetected = data.cln_detected === true;
+        const lndRouting = data.lnd_routing_active === true;
+        const clnRouting = data.cln_routing_active === true;
+        
+        const hasNode = lndDetected || clnDetected;
+        const routingActive = lndRouting || clnRouting;
+
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (data.wg_status === 'Connected' && data.target_container && data.rules_synced) {
+        if (vpnActive && hasNode && routingActive) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
@@ -412,7 +430,8 @@ async function fetchStatus() {
                 statusIcon.classList.remove('text-tsyellow', 'text-red-500');
             }
             document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsgreen font-bold";
-        } else if (data.wg_status === 'Connected') {
+            document.getElementById('txt-wg-status').textContent = "Connected";
+        } else if (vpnActive) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-yellow-900/50 text-tsyellow border border-yellow-700";
             badge.textContent = "Connected";
             const pingDot = document.getElementById('ping-tunnel');
@@ -423,6 +442,7 @@ async function fetchStatus() {
                 statusIcon.classList.remove('animate-pulse', 'text-tsgreen', 'text-red-500');
             }
             document.getElementById('txt-wg-status').className = "text-2xl font-mono text-tsyellow font-bold";
+            document.getElementById('txt-wg-status').textContent = "Connected";
         } else {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-red-900/50 text-red-500 border border-red-700";
             badge.textContent = "Tunnel Down";
@@ -434,18 +454,39 @@ async function fetchStatus() {
                 statusIcon.classList.remove('animate-pulse', 'text-tsgreen', 'text-tsyellow');
             }
             document.getElementById('txt-wg-status').className = "text-2xl font-mono text-red-500 font-bold";
+            document.getElementById('txt-wg-status').textContent = "Disconnected";
+        }
+        const pk = data.wg_pubkey || "Not available";
+        const boxPubkeyEl = document.getElementById('box-pubkey');
+        if (boxPubkeyEl) {
+            boxPubkeyEl.replaceChildren(document.createTextNode(pk));
         }
 
-        // Update Dashboard Text
-        const statusEl = document.getElementById('txt-wg-status');
-        if (statusEl) {
-            statusEl.replaceChildren(document.createTextNode(data.wg_status));
+        const boxNodeEl = document.getElementById('box-node');
+        if (boxNodeEl) {
+            let nodeText = "None";
+            if (data.target_impl === "lnd") nodeText = "LND";
+            else if (data.target_impl === "cln") nodeText = "Core-Lightning";
+            else if (data.lnd_detected) nodeText = "LND (Unconfigured)";
+            else if (data.cln_detected) nodeText = "Core-Lightning (Unconfigured)";
+            
+            boxNodeEl.replaceChildren(document.createTextNode(nodeText));
         }
-        
-        const pk = data.wg_pubkey || "Not available";
-        const pubkeyEl = document.getElementById('txt-pubkey');
-        if (pubkeyEl) {
-            pubkeyEl.replaceChildren(document.createTextNode(pk));
+
+        const boxServerEl = document.getElementById('box-server');
+        if (boxServerEl) {
+            boxServerEl.replaceChildren(document.createTextNode(data.server_domain || "Not setup"));
+        }
+
+        const boxPortEl = document.getElementById('box-port');
+        if (boxPortEl) {
+            boxPortEl.replaceChildren(document.createTextNode(data.vpn_port || "Not setup"));
+        }
+
+        const boxExpirationEl = document.getElementById('box-expiration');
+        if (boxExpirationEl) {
+            let expText = data.expires_at ? data.expires_at.split('T')[0] : "Not setup";
+            boxExpirationEl.replaceChildren(document.createTextNode(expText));
         }
 
         // Update Renew IP Suffix
@@ -466,57 +507,39 @@ async function fetchStatus() {
             configsEl.replaceChildren(document.createTextNode(confs));
         }
 
-        // --- PR A: Update Dataplane UI ---
-        const targetContainer = data.target_container;
-        const targetIp = data.target_ip;
-        const targetEl = document.getElementById('txt-target');
-        if (targetEl) {
-            targetEl.replaceChildren(document.createTextNode(targetContainer ? `${targetContainer} (${targetIp})` : "Not Configured"));
-        }
-
-        const fwdPort = data.forwarding_port;
-        const fwdEl = document.getElementById('txt-forwarding');
-        const fwdSpan = fwdEl ? fwdEl.querySelector('span') : null;
-        if (fwdSpan) {
-            fwdSpan.textContent = fwdPort || '--';
-            fwdSpan.className = fwdPort ? "text-white font-mono" : "text-gray-400 font-mono";
-        }
-
-        const badgeRules = document.getElementById('badge-rules');
-        if (targetContainer) {
-            if (data.rules_synced) {
-                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen";
-                badgeRules.textContent = "Synced";
-            } else {
-                badgeRules.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow";
-                badgeRules.textContent = "Out of Sync";
-            }
-        } else {
-             badgeRules.className = "hidden";
-        }
-
-        const btnRecon = document.getElementById('btn-reconcile');
-        if (targetContainer) {
-            btnRecon.classList.remove('hidden');
-            btnRecon.classList.add('flex');
-        } else {
-             btnRecon.classList.add('hidden');
-             btnRecon.classList.remove('flex');
-        }
-
-        const lastRec = data.last_reconcile_at;
-        document.getElementById('txt-reconcile').textContent = lastRec ? new Date(lastRec).toLocaleString() : "Never";
-
-        const errEl = document.getElementById('txt-error');
-        if (data.last_error) {
-            errEl.classList.remove('hidden');
-            errEl.querySelector('span').textContent = data.last_error;
-        } else {
-            errEl.classList.add('hidden');
-        }
-
         if (data.version) {
             document.getElementById('app-version').textContent = data.version;
+        }
+
+        // Node Routing explicit UI states
+        const badgeRouting = document.getElementById('badge-routing');
+        const txtRoutingStatus = document.getElementById('txt-routing-status');
+        const routingActions = document.getElementById('routing-actions');
+        const btnDashEnable = document.getElementById('btn-dash-enable-routing');
+        const btnDashDisable = document.getElementById('btn-dash-disable-routing');
+
+        if (routingActions) routingActions.classList.remove('hidden');
+        if (btnDashEnable) btnDashEnable.classList.add('hidden');
+        if (btnDashDisable) btnDashDisable.classList.add('hidden');
+
+        if (!hasNode) {
+            // State 1
+            if (badgeRouting) { badgeRouting.textContent = "Not Found"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 bg-gray-900/50 text-gray-500"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
+        } else if (!vpnActive) {
+            // State 2
+            if (badgeRouting) { badgeRouting.textContent = "Offline"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-red-700 bg-red-900/50 text-red-500"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "VPN Disconnected";
+        } else if (!routingActive) {
+            // State 3
+            if (badgeRouting) { badgeRouting.textContent = "Unsecured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "Routing: Default (Tor/Clearnet)";
+            if (btnDashEnable) btnDashEnable.classList.remove('hidden');
+        } else {
+            // State 4
+            if (badgeRouting) { badgeRouting.textContent = "Secured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "Routing: Secured via Tunnelsats";
+            if (btnDashDisable) btnDashDisable.classList.remove('hidden');
         }
 
         // Update Dashboard Banner
@@ -524,7 +547,7 @@ async function fetchStatus() {
         const bannerText = document.getElementById('dashboard-banner-text');
         const bannerDots = document.getElementById('dashboard-banner-dots');
 
-        if (data.wg_status === 'Connected') {
+        if (vpnActive) {
             bannerTitle.textContent = "Network Layer Active";
             bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
             bannerDots.classList.remove('hidden');
@@ -851,91 +874,7 @@ async function claimSubscription(mode) {
     }
 }
 
-// 5. Dataplane Reconcile Logic
-let reconcilePollCount = 0;
-let reconcileNetworkErrorCount = 0;
-const MAX_RECONCILE_POLLS = 30; // Max 1 minute polling (30 * 2000ms)
-
-async function reconcileTunnel() {
-    const btn = document.getElementById('btn-reconcile');
-    const spinner = document.getElementById('reconcile-spinner');
-    const text = document.getElementById('reconcile-text');
-
-    btn.disabled = true;
-    spinner.classList.remove('hidden');
-    text.textContent = "Triggering...";
-
-    try {
-        const res = await fetch('/api/local/reconcile', { method: 'POST' });
-        const data = await res.json();
-
-        if (res.status === 202 && data.request_id) {
-            text.textContent = "Reconciling...";
-            reconcilePollCount = 0;
-            reconcileNetworkErrorCount = 0;
-            pollReconcileStatus(data.status_url);
-        } else {
-            text.textContent = "Error Triggering";
-            setTimeout(resetReconcileBtn, 3000);
-        }
-    } catch (e) {
-        text.textContent = "Network Error";
-        setTimeout(resetReconcileBtn, 3000);
-    }
-}
-
-async function pollReconcileStatus(url) {
-    if (reconcilePollCount >= MAX_RECONCILE_POLLS) {
-        document.getElementById('reconcile-text').textContent = "Timeout waiting for Dataplane";
-        setTimeout(resetReconcileBtn, 4000);
-        fetchStatus();
-        return;
-    }
-    reconcilePollCount++;
-
-    try {
-        const res = await fetch(url);
-        if (!res.ok) {
-            document.getElementById('reconcile-text').textContent = "Failed";
-            setTimeout(resetReconcileBtn, 3000);
-            fetchStatus();
-            return;
-        }
-        reconcileNetworkErrorCount = 0;
-        const data = await res.json();
-
-        if (data.complete) {
-            if (data.success) {
-                document.getElementById('reconcile-text').textContent = "Success!";
-                setTimeout(resetReconcileBtn, 3000);
-            } else {
-                document.getElementById('reconcile-text').textContent = "Failed";
-                setTimeout(resetReconcileBtn, 3000);
-            }
-            fetchStatus(); // Refresh cards
-        } else {
-            // Still polling
-            setTimeout(() => pollReconcileStatus(url), 2000);
-        }
-    } catch (e) {
-        reconcileNetworkErrorCount++;
-        if (reconcileNetworkErrorCount >= 3) {
-            document.getElementById('reconcile-text').textContent = "Reconciling (network issues)...";
-        }
-        setTimeout(() => pollReconcileStatus(url), 2000);
-    }
-}
-
-function resetReconcileBtn() {
-    const btn = document.getElementById('btn-reconcile');
-    const spinner = document.getElementById('reconcile-spinner');
-    const text = document.getElementById('reconcile-text');
-    
-    btn.disabled = false;
-    spinner.classList.add('hidden');
-    text.textContent = "Reconcile Now";
-}
-
+// Removed Dataplane Reconcile Logic
 async function confirmRestartModal(nodeType) {
     return new Promise((resolve) => {
         const existingModal = document.getElementById('restart-confirmation-modal');
