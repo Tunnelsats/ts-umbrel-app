@@ -649,8 +649,9 @@ def docker_api_post(path):
         return False
 
 
-def container_ip_by_match(pattern):
-    containers = docker_api("/containers/json?all=0")
+def container_ip_by_match(pattern, containers=None):
+    if containers is None:
+        containers = docker_api("/containers/json?all=0")
     if not containers:
         return ""
 
@@ -667,8 +668,9 @@ def container_ip_by_match(pattern):
     return ""
 
 
-def container_ids_by_match(pattern):
-    containers = docker_api("/containers/json?all=0")
+def container_ids_by_match(pattern, containers=None):
+    if containers is None:
+        containers = docker_api("/containers/json?all=0")
     if not containers:
         return []
 
@@ -970,7 +972,7 @@ def renew_subscription():
 
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
-    app.logger.info("Action Request: Fetching local status")
+    app.logger.debug("Action Request: Fetching local status")
     wg_status = "Disconnected"
     wg_pubkey = ""
     try:
@@ -990,13 +992,14 @@ def local_status():
                 configs.append(fname)
 
     dataplane = read_dataplane_state()
-    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN)
-    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN)
+    containers = docker_api("/containers/json?all=0") or []
+    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
+    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
 
     # Granular state detection
     vpn_active = (wg_status == "Connected")
-    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
-    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
+    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
+    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
@@ -1006,8 +1009,8 @@ def local_status():
                     if line.lstrip().startswith("externalhosts="):
                         lnd_routing_active = True
                         break
-        except Exception:
-            pass
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to read LND config for routing detection: {exc}")
 
     cln_routing_active = False
     if os.path.exists(CLN_CONFIG_PATH):
@@ -1017,8 +1020,8 @@ def local_status():
                     if line.lstrip().startswith("announce-addr="):
                         cln_routing_active = True
                         break
-        except Exception:
-            pass
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to read CLN config for routing detection: {exc}")
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""
