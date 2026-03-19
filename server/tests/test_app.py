@@ -590,14 +590,14 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 # Test LND
                 res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
-                assert res.status_code == 200
+                assert res.status_code == 422
                 payload = json.loads(res.data)
                 assert payload['success'] is False
                 assert 'LND container not found' in payload['error']
 
                 # Test CLN
                 res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
-                assert res.status_code == 200
+                assert res.status_code == 422
                 payload = json.loads(res.data)
                 assert payload['success'] is False
                 assert 'CLN container not found' in payload['error']
@@ -1155,3 +1155,18 @@ class TestDataplaneAndRegressionFixes:
                 client.get('/api/subscription/hash2')
                 with open(meta_path, 'r') as f:
                     assert json.load(f)['expiresAt'] == "2027-05-10T20:55:39.663Z"
+
+
+class TestMetadataSync:
+    def test_update_local_metadata_skips_when_file_missing(self, client, data_dir):
+        """Verifies that _update_local_metadata does not create a sparse file when it's missing."""
+        from app import _update_local_metadata
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        assert not os.path.exists(meta_path)
+        
+        # Call with some data
+        sync_data = {"expiresAt": "2026-05-01T12:00:00Z"}
+        result = _update_local_metadata(sync_data, payment_hash="hash123")
+        
+        assert result is False
+        assert not os.path.exists(meta_path), "Should not create a sparse metadata file"

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
+from typing import Dict, Any, List, Optional, Tuple, Iterable
 
 import requests
 import yaml
@@ -68,8 +69,9 @@ def client_is_allowed(remote_addr):
         return False
     try:
         remote_ip = ip_address(remote_addr)
-        if getattr(remote_ip, "ipv4_mapped", None):
-            remote_ip = remote_ip.ipv4_mapped
+        ipv4_mapped = getattr(remote_ip, "ipv4_mapped", None)
+        if ipv4_mapped:
+            remote_ip = ipv4_mapped
     except ValueError:
         return False
     return any(remote_ip in subnet for subnet in ALLOWED_NETWORKS)
@@ -187,8 +189,8 @@ def comment_out_config_lines(path, prefixes):
     return True, changed
 
 
-def upsert_config_line(path, prefix, replacement_line):
-    lines = []
+def upsert_config_line(path: str, prefix: str, replacement_line: str) -> Tuple[bool, bool]:
+    lines: List[str] = []
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as conf_fp:
@@ -203,8 +205,10 @@ def upsert_config_line(path, prefix, replacement_line):
     normalized_line = f"{replacement_line}\n"
 
     for line in lines:
-        stripped = line.lstrip()
-        candidate = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+        line_str = str(line)
+        stripped = line_str.lstrip()
+        # Explicitly slicing the string; using a more robust check for static analysis.
+        candidate = stripped.removeprefix("#").lstrip()
         if candidate.startswith(prefix):
             if not found:
                 if line != normalized_line:
@@ -256,7 +260,7 @@ def upsert_config_line(path, prefix, replacement_line):
     return True, changed
 
 
-def upsert_config_lines(path, replacements):
+def upsert_config_lines(path: str, replacements: Iterable[Tuple[str, str]]) -> Tuple[bool, bool]:
     lines = []
     if os.path.exists(path):
         try:
@@ -273,8 +277,9 @@ def upsert_config_lines(path, replacements):
         normalized_line = f"{replacement_line}\n"
 
         for line in lines:
-            stripped = line.lstrip()
-            candidate = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            line_str = str(line)
+            stripped: str = line_str.lstrip()
+            candidate: str = stripped[1:].lstrip() if stripped.startswith("#") else stripped
             if candidate.startswith(prefix):
                 if not found:
                     if line != normalized_line:
@@ -342,8 +347,8 @@ def upsert_config_lines(path, replacements):
     return True, changed
 
 
-def upsert_config_line_in_section(path, section_header, prefix, replacement_line):
-    lines = []
+def upsert_config_line_in_section(path: str, section_header: str, prefix: str, replacement_line: str) -> Tuple[bool, bool]:
+    lines: List[str] = []
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as conf_fp:
@@ -382,10 +387,11 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
         updated_lines = lines
     else:
         found = False
-        updated_section = []
+        updated_section: List[str] = []
         for line in lines[section_start + 1 : section_end]:
-            stripped = line.lstrip()
-            candidate = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            line_str = str(line)
+            stripped: str = line_str.lstrip()
+            candidate: str = stripped[1:].lstrip() if stripped.startswith("#") else stripped
             if candidate.startswith(prefix):
                 if not found:
                     if line != normalized_line:
@@ -395,13 +401,16 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
                 else:
                     changed = True
                 continue
-            updated_section.append(line)
+            updated_section.append(str(line))
 
         if not found:
             updated_section.append(normalized_line)
             changed = True
-
-        updated_lines = lines[: section_start + 1] + updated_section + lines[section_end:]
+        
+        # Explicit slicing with list cast for clarity
+        head: List[str] = list(lines[: section_start + 1])
+        tail: List[str] = list(lines[section_end:])
+        updated_lines: List[str] = head + updated_section + tail
 
     if changed:
         file_mode = 0o600
@@ -453,7 +462,7 @@ def upsert_config_line_in_section(path, section_header, prefix, replacement_line
 
 
 def _parse_config_comments(config_text):
-    meta = {}
+    meta: Dict[str, Any] = {}
     for line in config_text.split("\n"):
         line = line.strip()
         if match := re.match(r"^#\s*Port Forwarding:\s*(\d+)", line):
@@ -545,7 +554,7 @@ def _ensure_peer_persistent_keepalive(config_text, keepalive=25):
     if not lines:
         return config_text
 
-    updated_lines = []
+    updated_lines: List[str] = []
     in_peer = False
     peer_has_keepalive = False
 
@@ -656,15 +665,25 @@ def container_ip_by_match(pattern, containers=None):
         return ""
 
     for item in containers:
-        names = item.get("Names", [])
+        if not isinstance(item, dict):
+            continue
+        names = item.get("Names")
+        if not isinstance(names, list):
+            continue
         for name in names:
-            clean = name.lstrip("/")
+            name_str = str(name)
+            clean = name_str.lstrip("/")
             if re.search(pattern, clean):
-                networks = item.get("NetworkSettings", {}).get("Networks", {})
-                for network_data in networks.values():
-                    ip_addr = network_data.get("IPAddress")
-                    if ip_addr:
-                        return ip_addr
+                network_settings = item.get("NetworkSettings")
+                if isinstance(network_settings, dict):
+                    networks = network_settings.get("Networks")
+                    if isinstance(networks, dict):
+                        for network_data in networks.values():
+                            ip: str = ""
+                            if isinstance(network_data, dict):
+                                ip = str(network_data.get("IPAddress", ""))
+                            if ip:
+                                return ip
     return ""
 
 
@@ -765,9 +784,16 @@ def read_dataplane_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as state_fp:
             data = json.load(state_fp)
-        defaults.update({k: v for k, v in data.items() if k in defaults})
-        if isinstance(data.get("docker_network"), dict):
-            defaults["docker_network"].update(data["docker_network"])
+            if isinstance(data, dict):
+                # Type-safe update of defaults
+                for k, v in data.items():
+                    if k in defaults and isinstance(k, str):
+                        defaults[k] = v  # type: ignore (dynamic dict update)
+                
+                docker_net = data.get("docker_network")
+                target_net = defaults.get("docker_network")
+                if isinstance(docker_net, dict) and isinstance(target_net, dict):
+                    target_net.update(docker_net)
     except Exception:
         pass
 
@@ -931,14 +957,16 @@ def _update_local_metadata(subscription_data, payment_hash=None):
     Only updates fields that are present in subscription_data.
     """
     meta_path = os.path.join(DATA_DIR, META_FILE)
-    meta = {}
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fp:
-                meta = json.load(fp)
-        except (IOError, json.JSONDecodeError) as exc:
-            app.logger.warning(f"Failed to read metadata for sync: {exc}")
-            return False
+    if not os.path.exists(meta_path):
+        app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
+        return False
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fp:
+            meta = json.load(fp)
+    except (IOError, json.JSONDecodeError) as exc:
+        app.logger.warning(f"Failed to read metadata for sync: {exc}")
+        return False
 
     changed = False
     # Support both 'expiresAt' (standard) and 'newExpiry' (renewal specific)
@@ -1363,7 +1391,7 @@ def configure_node():
                 "lnd_changed": False, 
                 "port": port, 
                 "dns": dns
-            }), 200
+            }), 422
 
         lnd_processed, lnd_changed = upsert_config_line_in_section(
             LND_CONFIG_PATH,
@@ -1400,7 +1428,7 @@ def configure_node():
             "cln_changed": False, 
             "port": port, 
             "dns": dns
-        }), 200
+        }), 422
 
     cln_steps = (
         ("bind-addr=", "bind-addr=0.0.0.0:9736"),
