@@ -74,6 +74,34 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('box-expiration').textContent).toBe('2027-03-10');
     });
 
+    test('fetchStatus does not show Protected when no node is detected', async () => {
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: false,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: '',
+                    configs_found: [],
+                    version: 'v3.0.0'
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).toBe('Connected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('No Nodes Detected');
+    });
+
     test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {
         window.activePaymentHash = 'test-hash-123';
         window.purchaseMode = 'buy';

@@ -48,6 +48,9 @@ APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
+LND_CONTAINER_PATTERN = r"^lightning[_-]lnd[_-]\d+$"
+LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
+CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -691,7 +694,7 @@ def restart_container_by_pattern(pattern, is_lnd=False):
         app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
         
         # 1. Restart middleware (strictly lightning_app_1, excluding proxy)
-        middleware_id = container_id_by_match(r"^lightning[_-]app[_-]\d+$")
+        middleware_id = container_id_by_match(LND_MIDDLEWARE_PATTERN)
         if middleware_id:
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
@@ -708,7 +711,7 @@ def restart_container_by_pattern(pattern, is_lnd=False):
         time.sleep(LND_RESTART_DELAY)
         
         # 3. Restart LND daemon
-        daemon_id = container_id_by_match(r"^lightning[_-]lnd[_-]\d+$")
+        daemon_id = container_id_by_match(LND_CONTAINER_PATTERN)
         if daemon_id:
             app.logger.info(f"Found LND daemon container (ID: {daemon_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{daemon_id}/restart")
@@ -987,13 +990,13 @@ def local_status():
                 configs.append(fname)
 
     dataplane = read_dataplane_state()
-    lnd_ip = container_ip_by_match(r"(^|[_-])lnd([_-]|$)")
-    cln_ip = container_ip_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)")
+    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN)
+    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN)
 
     # Granular state detection
     vpn_active = (wg_status == "Connected")
-    lnd_detected = bool(container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"))
-    cln_detected = bool(container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
+    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
+    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
@@ -1256,7 +1259,7 @@ def configure_node():
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
-        if not container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"):
+        if not container_ids_by_match(LND_CONTAINER_PATTERN):
             app.logger.warning("LND container not found. Skipping configuration.")
             return jsonify({
                 "success": False, 
@@ -1276,7 +1279,7 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
+        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
             _set_restart_pending(meta_path, meta, lnd_pending_key, True)
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
@@ -1293,7 +1296,7 @@ def configure_node():
         )
 
     # CLN target
-    if not container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+    if not container_ids_by_match(CLN_CONTAINER_PATTERN):
         app.logger.warning("CLN container not found. Skipping configuration.")
         return jsonify({
             "success": False, 
@@ -1314,7 +1317,7 @@ def configure_node():
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
-    if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
+    if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
         _set_restart_pending(meta_path, meta, cln_pending_key, True)
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
@@ -1335,31 +1338,35 @@ def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
+    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
+    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
 
-    if container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"):
-        lnd_processed, lnd_changed = comment_out_config_lines(
-            LND_CONFIG_PATH,
-            (
-                "externalhosts=",
-                "tor.skip-proxy-for-clearnet-targets=",
-            ),
-        )
-        if lnd_processed:
-            if not restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True):
-                errors.append("Failed to restart LND container.")
+    lnd_processed, lnd_changed = comment_out_config_lines(
+        LND_CONFIG_PATH,
+        (
+            "externalhosts=",
+            "tor.skip-proxy-for-clearnet-targets=",
+        ),
+    )
+    if lnd_processed and lnd_detected:
+        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
+            errors.append("Failed to restart LND container.")
+    elif lnd_processed and not lnd_detected:
+        app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
 
-    if container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
-        cln_processed, cln_changed = comment_out_config_lines(
-            CLN_CONFIG_PATH,
-            (
-                "bind-addr=",
-                "announce-addr=",
-                "always-use-proxy=",
-            ),
-        )
-        if cln_processed:
-            if not restart_container_by_pattern(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"):
-                errors.append("Failed to restart CLN container.")
+    cln_processed, cln_changed = comment_out_config_lines(
+        CLN_CONFIG_PATH,
+        (
+            "bind-addr=",
+            "announce-addr=",
+            "always-use-proxy=",
+        ),
+    )
+    if cln_processed and cln_detected:
+        if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
+            errors.append("Failed to restart CLN container.")
+    elif cln_processed and not cln_detected:
+        app.logger.info("CLN config restored, but no running CLN container detected. Skipping restart.")
 
     if errors:
         return jsonify({"success": False, "error": " ".join(errors)}), 500

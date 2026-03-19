@@ -574,7 +574,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
@@ -727,7 +727,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert os.path.exists(lnd_path)
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
@@ -850,7 +850,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_returns_500_when_restart_fails(self, mock_ids, client):
@@ -899,7 +899,7 @@ class TestDataplaneAndRegressionFixes:
             payload = json.loads(res.data)
             assert payload['success'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
 
             with open(meta_path, 'r') as f:
                 updated_meta = json.load(f)
@@ -1003,6 +1003,36 @@ class TestDataplaneAndRegressionFixes:
             assert payload['lnd_changed'] is False
             assert payload['cln_changed'] is False
 
+    @patch('app.container_ids_by_match', return_value=[])
+    def test_restore_node_still_comments_configs_when_containers_are_not_running(self, mock_ids, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            cln_path = os.path.join(tmp_dir, 'config')
+
+            with open(lnd_path, 'w') as f:
+                f.write('externalhosts=de2.tunnelsats.com:35825\n')
+
+            with open(cln_path, 'w') as f:
+                f.write('announce-addr=de2.tunnelsats.com:35825\n')
+
+            with patch('app.LND_CONFIG_PATH', lnd_path):
+                with patch('app.CLN_CONFIG_PATH', cln_path):
+                    with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
+                        res = client.post('/api/local/restore-node')
+
+            assert res.status_code == 200
+            payload = json.loads(res.data)
+            assert payload['lnd'] is True
+            assert payload['cln'] is True
+            assert payload['lnd_changed'] is True
+            assert payload['cln_changed'] is True
+            mock_restart.assert_not_called()
+
+            with open(lnd_path, 'r') as f:
+                assert '# externalhosts=de2.tunnelsats.com:35825\n' in f.read()
+            with open(cln_path, 'r') as f:
+                assert '# announce-addr=de2.tunnelsats.com:35825\n' in f.read()
+
     def test_restore_node_route_declared_once(self):
         rules = [rule for rule in app_module.app.url_map.iter_rules() if rule.rule == '/api/local/restore-node']
         assert len(rules) == 1
@@ -1030,7 +1060,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             # Should have called restart for both LND and CLN
             assert mock_restart.call_count == 2
-            mock_restart.assert_any_call(r'(^|[_-])lnd([_-]|$)', is_lnd=True)
+            mock_restart.assert_any_call(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
             mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
 
     @patch('app.read_dataplane_state')
