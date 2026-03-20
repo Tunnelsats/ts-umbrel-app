@@ -929,7 +929,9 @@ def check_subscription(paymentHash):
             try:
                 data = resp.json()
                 # If the subscription is paid, ensure our local metadata is in sync.
-                if data.get("status") == "paid":
+                if not isinstance(data, dict):
+                    app.logger.warning("Unexpected subscription response shape: expected JSON object.")
+                elif data.get("status") == "paid":
                     # Support both standard 'subscription' object and top-level renewal fields
                     new_expiry = data.get("newExpiry")
                     sub_data = data.get("subscription")
@@ -939,8 +941,10 @@ def check_subscription(paymentHash):
                     elif new_expiry:
                         # Direct renewal response format
                         _update_local_metadata(data, payment_hash=paymentHash)
-            except (ValueError, KeyError) as exc:
+            except ValueError as exc:
                 app.logger.warning(f"Failed to parse subscription data or update metadata: {exc}")
+            except Exception as exc:
+                app.logger.warning(f"Metadata sync failed after subscription check: {exc}")
 
         excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
         filtered_headers = [
@@ -961,11 +965,19 @@ def _update_local_metadata(subscription_data, payment_hash=None):
         app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
         return False
 
+    if not isinstance(subscription_data, dict):
+        app.logger.warning("Metadata sync skipped: subscription payload is not a JSON object.")
+        return False
+
     try:
         with open(meta_path, "r", encoding="utf-8") as fp:
             meta = json.load(fp)
     except (IOError, json.JSONDecodeError) as exc:
         app.logger.warning(f"Failed to read metadata for sync: {exc}")
+        return False
+
+    if not isinstance(meta, dict):
+        app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
         return False
 
     changed = False
@@ -1114,33 +1126,6 @@ def local_status():
                         break
         except (IOError, OSError) as exc:
             app.logger.warning(f"Failed to read CLN config for routing detection: {exc}")
-
-    # Granular state detection
-    vpn_active = (wg_status == "Connected")
-    lnd_detected = bool(container_ids_by_match(r"^lightning[_-]lnd[_-]\d+$"))
-    cln_detected = bool(container_ids_by_match(r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
-
-    lnd_routing_active = False
-    if os.path.exists(LND_CONFIG_PATH):
-        try:
-            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.lstrip().startswith("externalhosts="):
-                        lnd_routing_active = True
-                        break
-        except (IOError, OSError) as exc:
-            app.logger.warning(f"Could not read LND config at {LND_CONFIG_PATH}: {exc}")
-
-    cln_routing_active = False
-    if os.path.exists(CLN_CONFIG_PATH):
-        try:
-            with open(CLN_CONFIG_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.lstrip().startswith("announce-addr="):
-                        cln_routing_active = True
-                        break
-        except (IOError, OSError) as exc:
-            app.logger.warning(f"Could not read CLN config at {CLN_CONFIG_PATH}: {exc}")
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""

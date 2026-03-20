@@ -1103,6 +1103,7 @@ class TestDataplaneAndRegressionFixes:
             ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"],
             capture_output=True, text=True, timeout=2
         )
+        assert mock_docker_api.call_count == 1
 
     @patch('app.requests.get')
     def test_check_subscription_updates_metadata_on_paid(self, mock_get, client):
@@ -1156,6 +1157,52 @@ class TestDataplaneAndRegressionFixes:
                 with open(meta_path, 'r') as f:
                     assert json.load(f)['expiresAt'] == "2027-05-10T20:55:39.663Z"
 
+    @patch('app.requests.get')
+    @patch('app._update_local_metadata')
+    def test_check_subscription_handles_non_object_response(self, mock_update_metadata, mock_get, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = b"[]"
+        mock_resp.json.return_value = []
+        mock_get.return_value = mock_resp
+
+        res = client.get('/api/subscription/hash-edge')
+
+        assert res.status_code == 200
+        assert res.data == b"[]"
+        mock_update_metadata.assert_not_called()
+
+    @patch('app.requests.get')
+    def test_check_subscription_ignores_invalid_metadata_shape(self, mock_get, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = json.dumps({
+            "status": "paid",
+            "subscription": {
+                "expiresAt": "2027-04-10T20:55:39.663Z"
+            }
+        }).encode('utf-8')
+        mock_resp.json.return_value = {
+            "status": "paid",
+            "subscription": {
+                "expiresAt": "2027-04-10T20:55:39.663Z"
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            with open(meta_path, 'w') as f:
+                json.dump([], f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                res = client.get('/api/subscription/hash-invalid-meta')
+                assert res.status_code == 200
+                with open(meta_path, 'r') as f:
+                    assert json.load(f) == []
+
 
 class TestMetadataSync:
     def test_update_local_metadata_skips_when_file_missing(self, client, data_dir):
@@ -1170,3 +1217,15 @@ class TestMetadataSync:
         
         assert result is False
         assert not os.path.exists(meta_path), "Should not create a sparse metadata file"
+
+    def test_update_local_metadata_skips_when_metadata_not_object(self, client, data_dir):
+        from app import _update_local_metadata
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump([], f)
+
+        result = _update_local_metadata({"expiresAt": "2026-05-01T12:00:00Z"}, payment_hash="hash123")
+
+        assert result is False
+        with open(meta_path, 'r') as f:
+            assert json.load(f) == []
