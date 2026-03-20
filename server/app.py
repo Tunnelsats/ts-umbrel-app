@@ -958,7 +958,7 @@ def check_subscription(paymentHash):
         return jsonify({"error": str(exc)}), 500
 
 
-def _update_local_metadata(subscription_data, payment_hash=None):
+def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Optional[str] = None) -> bool:
     """
     Update tunnelsats-meta.json with latest subscription data (e.g. after renewal).
     Only updates fields that are present in subscription_data.
@@ -985,7 +985,8 @@ def _update_local_metadata(subscription_data, payment_hash=None):
 
     changed = False
     # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
-    new_expiry = subscription_data.get("newExpiry") if subscription_data.get("newExpiry") is not None else subscription_data.get("expiresAt")
+    _new_expiry = subscription_data.get("newExpiry")
+    new_expiry = _new_expiry if _new_expiry is not None else subscription_data.get("expiresAt")
     
     if new_expiry and meta.get("expiresAt") != new_expiry:
         meta["expiresAt"] = new_expiry
