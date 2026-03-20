@@ -937,10 +937,14 @@ def check_subscription(paymentHash):
                     sub_data = data.get("subscription")
                     
                     if isinstance(sub_data, dict):
-                        _update_local_metadata(sub_data, payment_hash=paymentHash)
+                        sync_payload = dict(sub_data)
+                        # Renewal APIs may include top-level newExpiry even when subscription exists.
+                        if new_expiry:
+                            sync_payload["newExpiry"] = new_expiry
+                        _update_local_metadata(sync_payload, payment_hash=paymentHash)
                     elif new_expiry:
                         # Direct renewal response format
-                        _update_local_metadata(data, payment_hash=paymentHash)
+                        _update_local_metadata({"newExpiry": new_expiry}, payment_hash=paymentHash)
             except ValueError as exc:
                 app.logger.warning(f"Failed to parse subscription data or update metadata: {exc}")
             except Exception as exc:
@@ -981,8 +985,8 @@ def _update_local_metadata(subscription_data, payment_hash=None):
         return False
 
     changed = False
-    # Support both 'expiresAt' (standard) and 'newExpiry' (renewal specific)
-    new_expiry = subscription_data.get("expiresAt") or subscription_data.get("newExpiry")
+    # Prefer renewal-specific newExpiry when both fields are present.
+    new_expiry = subscription_data.get("newExpiry") or subscription_data.get("expiresAt")
     
     if new_expiry and meta.get("expiresAt") != new_expiry:
         meta["expiresAt"] = new_expiry

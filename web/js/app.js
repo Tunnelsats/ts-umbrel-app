@@ -352,14 +352,14 @@ function switchTab(tabId) {
     btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
     btn.classList.remove('text-gray-400', 'border-transparent');
 
-    if (tabId === 'dashboard') {
-        fetchStatus();
-    }
-
     // Reset polling and invoice UI when navigating away
     if (pollInterval) {
         clearInterval(pollInterval);
         pollInterval = null;
+    }
+
+    if (tabId === 'dashboard') {
+        fetchStatus();
     }
     ['buy', 'renew'].forEach(mode => {
         const box = document.getElementById(`invoice-box-${mode}`);

@@ -1158,6 +1158,34 @@ class TestDataplaneAndRegressionFixes:
                     assert json.load(f)['expiresAt'] == "2027-05-10T20:55:39.663Z"
 
     @patch('app.requests.get')
+    def test_check_subscription_preserves_new_expiry_when_subscription_exists(self, mock_get, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = json.dumps({
+            "status": "paid",
+            "subscription": {},
+            "newExpiry": "2027-06-10T20:55:39.663Z"
+        }).encode('utf-8')
+        mock_resp.json.return_value = {
+            "status": "paid",
+            "subscription": {},
+            "newExpiry": "2027-06-10T20:55:39.663Z"
+        }
+        mock_get.return_value = mock_resp
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, 'tunnelsats-meta.json')
+            with open(meta_path, 'w') as f:
+                json.dump({"expiresAt": "2027-05-10T20:55:39.663Z"}, f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                res = client.get('/api/subscription/hash3')
+                assert res.status_code == 200
+                with open(meta_path, 'r') as f:
+                    assert json.load(f)['expiresAt'] == "2027-06-10T20:55:39.663Z"
+
+    @patch('app.requests.get')
     @patch('app._update_local_metadata')
     def test_check_subscription_handles_non_object_response(self, mock_update_metadata, mock_get, client):
         mock_resp = MagicMock()
@@ -1229,3 +1257,19 @@ class TestMetadataSync:
         assert result is False
         with open(meta_path, 'r') as f:
             assert json.load(f) == []
+
+    def test_update_local_metadata_prefers_new_expiry_over_expires_at(self, client, data_dir):
+        from app import _update_local_metadata
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump({"expiresAt": "2027-01-01T00:00:00Z"}, f)
+
+        result = _update_local_metadata(
+            {"expiresAt": "2027-01-01T00:00:00Z", "newExpiry": "2027-02-01T00:00:00Z"},
+            payment_hash="hash123"
+        )
+
+        assert result is True
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["expiresAt"] == "2027-02-01T00:00:00Z"

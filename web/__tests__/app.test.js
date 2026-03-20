@@ -947,6 +947,18 @@ describe('Subscription Renewal Fixes', () => {
         expect(fetchStatusSpy).toHaveBeenCalled();
     });
 
+    test('switchTab("dashboard") clears polling before fetchStatus', () => {
+        const clearSpy = jest.spyOn(window, 'clearInterval').mockImplementation(() => {});
+        const fetchStatusSpy = jest.spyOn(window, 'fetchStatus').mockImplementation(() => Promise.resolve());
+        window.pollInterval = 12345;
+
+        window.switchTab('dashboard');
+
+        expect(clearSpy).toHaveBeenCalledWith(12345);
+        expect(window.pollInterval).toBeNull();
+        expect(clearSpy.mock.invocationCallOrder[0]).toBeLessThan(fetchStatusSpy.mock.invocationCallOrder[0]);
+    });
+
     test('pollPayment for renew triggers fetchStatus on success', async () => {
         const fetchStatusSpy = jest.spyOn(window, 'fetchStatus');
         window.activePaymentHash = 'renew-hash-123';
