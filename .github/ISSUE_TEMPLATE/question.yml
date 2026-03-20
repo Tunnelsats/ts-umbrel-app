@@ -1,0 +1,17 @@
+name: General Question
+description: Have a question or need configuration help? Look here.
+title: "[QUESTION] <Short description>"
+labels: ["question"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please verify that your question has not already been answered in our [FAQ Section](https://tunnelsats.com/faq) and inside the in-app FAQ tab before opening a new issue.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question/Support Request
+      description: Describe what you need help with. Include any relevant info such as Lightning implementation or app version if applicable.
+    validations:
+      required: true
