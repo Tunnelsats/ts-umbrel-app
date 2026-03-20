@@ -207,7 +207,6 @@ def upsert_config_line(path: str, prefix: str, replacement_line: str) -> Tuple[b
     for line in lines:
         line_str = str(line)
         stripped = line_str.lstrip()
-        # Explicitly slicing the string; using a more robust check for static analysis.
         candidate = stripped.removeprefix("#").lstrip()
         if candidate.startswith(prefix):
             if not found:
@@ -279,7 +278,7 @@ def upsert_config_lines(path: str, replacements: Iterable[Tuple[str, str]]) -> T
         for line in lines:
             line_str = str(line)
             stripped: str = line_str.lstrip()
-            candidate: str = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            candidate: str = stripped.removeprefix("#").lstrip()
             if candidate.startswith(prefix):
                 if not found:
                     if line != normalized_line:
@@ -391,7 +390,7 @@ def upsert_config_line_in_section(path: str, section_header: str, prefix: str, r
         for line in lines[section_start + 1 : section_end]:
             line_str = str(line)
             stripped: str = line_str.lstrip()
-            candidate: str = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+            candidate: str = stripped.removeprefix("#").lstrip()
             if candidate.startswith(prefix):
                 if not found:
                     if line != normalized_line:
@@ -787,7 +786,7 @@ def read_dataplane_state():
             if isinstance(data, dict):
                 # Type-safe update of defaults
                 for k, v in data.items():
-                    if k in defaults and isinstance(k, str):
+                    if k in defaults:
                         defaults[k] = v  # type: ignore (dynamic dict update)
                 
                 docker_net = data.get("docker_network")
@@ -948,7 +947,7 @@ def check_subscription(paymentHash):
             except ValueError as exc:
                 app.logger.warning(f"Failed to parse subscription data or update metadata: {exc}")
             except Exception as exc:
-                app.logger.warning(f"Metadata sync failed after subscription check: {exc}")
+                app.logger.error(f"Metadata sync failed after subscription check: {exc}")
 
         excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
         filtered_headers = [
