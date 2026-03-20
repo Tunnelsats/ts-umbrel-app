@@ -338,6 +338,19 @@ document.addEventListener("DOMContentLoaded", () => {
         const val = document.getElementById('renew-ip-suffix').textContent;
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
+
+    // Global Scroll Handler for data-scroll-to elements
+    document.addEventListener('click', (e) => {
+        const target = e.target.closest('[data-scroll-to]');
+        if (target) {
+            e.preventDefault();
+            const id = target.getAttribute('data-scroll-to');
+            const el = document.getElementById(id);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+    });
 });
 
 // UI Routing
