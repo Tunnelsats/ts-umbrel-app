@@ -137,7 +137,7 @@
     <div class="flex flex-col-reverse md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl h-[calc(100svh-120px)] md:h-[85vh] spotlight relative overflow-hidden">
 
         <!-- Sidebar Configuration -->
-        <nav id="sidebar-nav" class="hidden md:block flex-1 overflow-y-auto scrollbar-hide px-4 py-6 space-y-2">
+        <aside id="sidebar" class="w-full md:w-64 bg-gray-950/80 border-t md:border-t-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
             <!-- Sidebar Header (Desktop Only) -->
             <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
                 <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
@@ -704,7 +704,7 @@
                             <h3 class="text-white font-bold mb-2 text-md">2. Are manual configuration files picked up automatically?</h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p><strong class="text-white">Yes!</strong> The TunnelSats background daemon polls the <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">data/</code> directory every 30 seconds.</p>
-                                <p>If you drop a new <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">.conf</code> file via SSH, the daemon will automatically detect it during its next periodic reconcile cycle. It uses a seamless hot-reload mechanism (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-gray-400 font-mono text-[10px]">wg syncconf</code>) to apply the new cryptographic keys and endpoints mid-flight, meaning **your Lightning node container does not need to be restarted** and your routing won't even drop.</p>
+                                <p>If you drop a new <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">.conf</code> file via SSH, the daemon will automatically detect it during its next periodic reconcile cycle. It uses a seamless hot-reload mechanism (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-gray-400 font-mono text-[10px]">wg syncconf</code>) to apply the new cryptographic keys and endpoints mid-flight, meaning <strong>your Lightning node container does not need to be restarted</strong> and your routing won't even drop.</p>
                                 <div class="bg-blue-900/10 border border-blue-500/30 border-l-2 border-l-blue-500 p-3 rounded text-blue-300 mt-2 shadow-sm">
                                     <span class="font-bold flex items-center gap-1.5 mb-1.5 text-blue-400"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg> Note</span>
                                     You no longer need to press a "Reconcile" button in the dashboard, just drop the file and wait up to 30 seconds.

@@ -314,7 +314,6 @@ document.addEventListener("DOMContentLoaded", () => {
     attachListener('nav-renew', 'click', () => switchTab('renew'));
     attachListener('nav-import', 'click', () => switchTab('import'));
     attachListener('nav-uninstall', 'click', () => switchTab('uninstall'));
-    attachListener('nav-faq', 'click', () => switchTab('faq'));
     attachListener('btn-footer-faq', 'click', (e) => { e.preventDefault(); switchTab('faq'); });
     attachListener('buy-server-btn', 'click', () => toggleDropdown('buy-server'));
     attachListener('buy-duration-btn', 'click', () => toggleDropdown('buy-duration'));
@@ -351,8 +350,10 @@ function switchTab(tabId) {
 
     document.getElementById(`view-${tabId}`).classList.remove('hidden');
     const btn = document.getElementById(`nav-${tabId}`);
-    btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
-    btn.classList.remove('text-gray-400', 'border-transparent');
+    if (btn) {
+        btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
+        btn.classList.remove('text-gray-400', 'border-transparent');
+    }
 
     // Reset polling and invoice UI when navigating away
     if (pollInterval) {
