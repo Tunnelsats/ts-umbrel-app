@@ -343,10 +343,10 @@ document.addEventListener("DOMContentLoaded", () => {
     document.addEventListener('click', (e) => {
         const target = e.target.closest('[data-scroll-to]');
         if (target) {
-            e.preventDefault();
             const id = target.getAttribute('data-scroll-to');
             const el = document.getElementById(id);
             if (el) {
+                e.preventDefault();
                 el.scrollIntoView({ behavior: 'smooth' });
             }
         }
