@@ -284,8 +284,24 @@ function renderDurations() {
     });
 }
 
-// Initialization
-document.addEventListener("DOMContentLoaded", () => {
+// Initialization (idempotent to avoid duplicate listener registration)
+let isAppInitialized = false;
+function handleScrollToClick(e) {
+    const target = e.target.closest('[data-scroll-to]');
+    if (!target) return;
+
+    const id = target.getAttribute('data-scroll-to');
+    const el = document.getElementById(id);
+    if (el) {
+        e.preventDefault();
+        el.scrollIntoView({ behavior: 'smooth' });
+    }
+}
+
+function initApp() {
+    if (isAppInitialized) return;
+    isAppInitialized = true;
+
     setNodeType('lnd', false);
     fetchStatus();
     fetchServers();
@@ -314,6 +330,7 @@ document.addEventListener("DOMContentLoaded", () => {
     attachListener('nav-renew', 'click', () => switchTab('renew'));
     attachListener('nav-import', 'click', () => switchTab('import'));
     attachListener('nav-uninstall', 'click', () => switchTab('uninstall'));
+    attachListener('btn-footer-faq', 'click', () => switchTab('faq'));
     attachListener('buy-server-btn', 'click', () => toggleDropdown('buy-server'));
     attachListener('buy-duration-btn', 'click', () => toggleDropdown('buy-duration'));
     attachListener('renew-duration-btn', 'click', () => toggleDropdown('renew-duration'));
@@ -337,7 +354,19 @@ document.addEventListener("DOMContentLoaded", () => {
         const val = document.getElementById('renew-ip-suffix').textContent;
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
-});
+
+    // Global scroll handler: remove any prior instance before registering.
+    if (window.__tsScrollToHandler) {
+        document.removeEventListener('click', window.__tsScrollToHandler);
+    }
+    window.__tsScrollToHandler = handleScrollToClick;
+    document.addEventListener('click', window.__tsScrollToHandler);
+}
+
+document.addEventListener("DOMContentLoaded", initApp);
+if (document.readyState !== 'loading') {
+    initApp();
+}
 
 // UI Routing
 function switchTab(tabId) {
@@ -346,11 +375,24 @@ function switchTab(tabId) {
         el.classList.remove('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
         el.classList.add('text-gray-400', 'border-transparent');
     });
+    const footerFaqBtn = document.getElementById('btn-footer-faq');
+    if (footerFaqBtn) {
+        footerFaqBtn.classList.remove('text-blue-400');
+        footerFaqBtn.classList.add('text-gray-500');
+    }
 
     document.getElementById(`view-${tabId}`).classList.remove('hidden');
+    const mainEl = document.querySelector('main');
+    if (mainEl) mainEl.scrollTop = 0;
     const btn = document.getElementById(`nav-${tabId}`);
-    btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
-    btn.classList.remove('text-gray-400', 'border-transparent');
+    if (btn) {
+        btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
+        btn.classList.remove('text-gray-400', 'border-transparent');
+    }
+    if (footerFaqBtn && tabId === 'faq') {
+        footerFaqBtn.classList.remove('text-gray-500');
+        footerFaqBtn.classList.add('text-blue-400');
+    }
 
     // Reset polling and invoice UI when navigating away
     if (pollInterval) {

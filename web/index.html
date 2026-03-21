@@ -48,11 +48,9 @@
             content: "";
             position: absolute;
             inset: 0;
-            background: radial-gradient(
-                600px at var(--mouse-x, 0px) var(--mouse-y, 0px),
-                rgba(255, 255, 255, 0.08) 0%,
-                transparent 100%
-            );
+            background: radial-gradient(600px at var(--mouse-x, 0px) var(--mouse-y, 0px),
+                    rgba(255, 255, 255, 0.08) 0%,
+                    transparent 100%);
             z-index: 10;
             pointer-events: none;
             opacity: 0;
@@ -94,7 +92,8 @@
         .skeleton {
             display: inline-block;
             height: 1em;
-            background-color: #374151; /* gray-700 */
+            background-color: #374151;
+            /* gray-700 */
             border-radius: 0.25rem;
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
             vertical-align: middle;
@@ -109,142 +108,57 @@
             mask-image: linear-gradient(to bottom, black 97%, transparent 100%);
         }
 
+        .app-shell-height {
+            height: calc(100vh - 120px);
+            height: calc(100svh - 120px);
+        }
+
+        @media (min-width: 768px) {
+            .app-shell-height {
+                height: 85vh;
+            }
+        }
+
         .invoice-input {
             word-break: break-all;
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: .5; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: .5;
+            }
         }
     </style>
 </head>
 
 <body class="min-h-screen flex flex-col items-center justify-start py-6 md:py-10 px-4 md:px-8">
     <!-- Mobile Sticky Header -->
-    <header class="md:hidden w-full max-w-6xl glass-panel rounded-xl border border-white/10 p-4 mb-4 flex justify-between items-center z-50">
+    <header
+        class="md:hidden w-full max-w-6xl glass-panel rounded-xl border border-white/10 p-4 mb-4 flex justify-between items-center z-50">
         <div class="flex items-center space-x-3">
             <img src="img/brand/logo.svg" alt="Logo" class="h-8 w-8">
             <h1 class="text-lg font-bold text-white tracking-wider">Tunnel<span class="text-tsyellow">Sats</span></h1>
         </div>
         <button id="btn-mobile-menu" class="text-gray-400 hover:text-white p-2">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16">
+                </path>
             </svg>
         </button>
     </header>
 
-    <div class="flex flex-col md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl min-h-[75vh] spotlight relative overflow-hidden">
-
-        <!-- Sidebar Configuration -->
-        <aside id="sidebar" class="w-full md:w-64 bg-gray-950/80 border-b md:border-b-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
-            <!-- Sidebar Header (Desktop Only) -->
-            <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
-                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
-                <div class="flex flex-col">
-                    <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
-                            class="text-tsyellow">Sats</span></h1>
-                    <span id="app-version"
-                        class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.0.0</span>
-                </div>
-            </div>
-
-            <!-- Navigation -->
-            <nav id="sidebar-nav" class="hidden md:block flex-1 px-4 py-6 space-y-2">
-                <button id="nav-dashboard"
-                    class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
-                    <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
-                        stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
-                        </path>
-                    </svg>
-                    <span>Dashboard</span>
-                </button>
-                <button id="nav-buy"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                    </svg>
-                    <span>Purchase New</span>
-                </button>
-                <button id="nav-renew"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                        </path>
-                    </svg>
-                    <span>Renew Target</span>
-                </button>
-                <button id="nav-import"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
-                    </svg>
-                    <span>Install / Import</span>
-                </button>
-                <button id="nav-uninstall"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
-                        </path>
-                    </svg>
-                    <span>Uninstall</span>
-                </button>
-            </nav>
-
-            <!-- Status Badge Area (Moved from Header) -->
-            <div class="p-6 border-t border-gray-800 bg-gray-900/40">
-                <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2">VPN Status</p>
-                <div id="statusBadge"
-                    class="w-full text-center px-4 py-2 rounded-lg font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400 shadow-inner truncate">
-                    Checking...
-                </div>
-            </div>
-
-            <!-- Footer Links -->
-            <div class="px-6 py-4 flex flex-col space-y-2 border-t border-gray-800">
-                <a href="https://tunnelsats.com" target="_blank"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
-                        </path>
-                    </svg>
-                    <span>Homepage</span>
-                </a>
-                <a href="https://tunnelsats.com/status" target="_blank"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
-                        </path>
-                    </svg>
-                    <span>Server Status</span>
-                </a>
-                <a href="https://tunnelsats.com/faq" target="_blank"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-blue-400 transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
-                        </path>
-                    </svg>
-                    <span>Help & FAQ</span>
-                </a>
-            </div>
-        </aside>
+    <div
+        class="app-shell-height flex flex-col md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl spotlight relative overflow-hidden">
 
         <!-- Main Content Area -->
         <main
-            class="flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
+            class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
             <!-- Dynamic Background Glows -->
             <div
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
@@ -271,12 +185,15 @@
                                             d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1">
                                         </path>
                                     </svg>
-                                    <div id="ping-tunnel" class="hidden w-2 h-2 bg-tsgreen rounded-full animate-ping absolute -top-1 -right-1"></div>
+                                    <div id="ping-tunnel"
+                                        class="hidden w-2 h-2 bg-tsgreen rounded-full animate-ping absolute -top-1 -right-1">
+                                    </div>
                                 </div>
                                 <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
                             </div>
                             <div id="txt-wg-status" class="text-2xl font-mono text-gray-500 font-bold tracking-tight">
-                                <span class="skeleton w-32 h-8"></span></div>
+                                <span class="skeleton w-32 h-8"></span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -284,22 +201,30 @@
                 <!-- Node Routing Status Section -->
                 <div class="mt-6">
                     <h2 class="text-xl font-bold text-white mb-4">Node Routing Status</h2>
-                    <div class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-blue-500/50 hover:shadow-[0_0_30px_-5px_rgba(59,130,246,0.3)] transition-all duration-300 group relative overflow-hidden">
+                    <div
+                        class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-blue-500/50 hover:shadow-[0_0_30px_-5px_rgba(59,130,246,0.3)] transition-all duration-300 group relative overflow-hidden">
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center space-x-3">
-                                <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 transition-colors"
+                                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                                 </svg>
                                 <p class="text-sm font-semibold text-gray-400">Current Routing</p>
                             </div>
-                            <span id="badge-routing" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Checking...</span>
+                            <span id="badge-routing"
+                                class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Checking...</span>
                         </div>
                         <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
                             <span class="skeleton w-48 h-6"></span>
                         </div>
                         <div id="routing-actions" class="mt-6 flex space-x-3 hidden">
-                            <button id="btn-dash-enable-routing" class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable Routing</button>
-                            <button id="btn-dash-disable-routing" class="flex-1 bg-gray-800 hover:bg-red-500/20 hover:text-red-500 border border-gray-700 hover:border-red-500/50 text-gray-300 font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Disable Routing</button>
+                            <button id="btn-dash-enable-routing"
+                                class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable
+                                Routing</button>
+                            <button id="btn-dash-disable-routing"
+                                class="flex-1 bg-gray-800 hover:bg-red-500/20 hover:text-red-500 border border-gray-700 hover:border-red-500/50 text-gray-300 font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Disable
+                                Routing</button>
                         </div>
                     </div>
                 </div>
@@ -307,45 +232,74 @@
                 <!-- Node & Tunnelsats Details Section -->
                 <div class="mt-6">
                     <h2 class="text-xl font-bold text-white mb-4">Node &amp; Tunnelsats Details</h2>
-                    <div class="bg-gray-900/80 p-6 flex flex-col space-y-4 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 hover:shadow-[0_0_30px_-5px_rgba(34,197,94,0.3)] transition-all duration-300 relative overflow-hidden">
-                        
+                    <div
+                        class="bg-gray-900/80 p-6 flex flex-col space-y-4 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 hover:shadow-[0_0_30px_-5px_rgba(34,197,94,0.3)] transition-all duration-300 relative overflow-hidden">
+
                         <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
-                            <svg class="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                            <svg class="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z">
+                                </path>
+                            </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Active Wireguard Pubkey</p>
-                                <p id="box-pubkey" class="text-sm font-mono text-gray-300 truncate w-full"><span class="skeleton w-32"></span></p>
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Active Wireguard
+                                    Pubkey</p>
+                                <p id="box-pubkey" class="text-sm font-mono text-gray-300 truncate w-full"><span
+                                        class="skeleton w-32"></span></p>
                             </div>
                         </div>
 
                         <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
-                            <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                            </svg>
                             <div class="flex-1 overflow-hidden">
                                 <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Target Node</p>
-                                <p id="box-node" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-16"></span></p>
+                                <p id="box-node" class="text-sm font-semibold text-gray-300 truncate w-full"><span
+                                        class="skeleton w-16"></span></p>
                             </div>
                         </div>
 
                         <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
-                            <svg class="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.906 14.142 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path></svg>
+                            <svg class="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.906 14.142 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0">
+                                </path>
+                            </svg>
                             <div class="flex-1 overflow-hidden">
                                 <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">VPN Server</p>
-                                <p id="box-server" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-32"></span></p>
+                                <p id="box-server" class="text-sm font-semibold text-gray-300 truncate w-full"><span
+                                        class="skeleton w-32"></span></p>
                             </div>
                         </div>
 
                         <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
-                            <svg class="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg>
+                            <svg class="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                <path d="M12 22v-5" />
+                                <path d="M9 8V2" />
+                                <path d="M15 8V2" />
+                                <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+                            </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">VPN External Port</p>
-                                <p id="box-port" class="text-sm font-mono text-gray-300 truncate w-full"><span class="skeleton w-16"></span></p>
+                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">VPN External Port
+                                </p>
+                                <p id="box-port" class="text-sm font-mono text-gray-300 truncate w-full"><span
+                                        class="skeleton w-16"></span></p>
                             </div>
                         </div>
 
                         <div class="flex items-center space-x-4">
-                            <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                            <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                </path>
+                            </svg>
                             <div class="flex-1 overflow-hidden">
                                 <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Expiration Date</p>
-                                <p id="box-expiration" class="text-sm font-semibold text-gray-300 truncate w-full"><span class="skeleton w-24"></span></p>
+                                <p id="box-expiration" class="text-sm font-semibold text-gray-300 truncate w-full"><span
+                                        class="skeleton w-24"></span></p>
                             </div>
                         </div>
 
@@ -355,7 +309,8 @@
                 <div class="bg-gray-800/60 p-4 rounded-lg border border-gray-700 mt-6 relative z-20">
                     <p class="text-sm text-gray-400 mb-2">Detected Configurations on Disk</p>
                     <div id="txt-configs" class="text-sm font-mono text-gray-300">
-                        <span class="skeleton w-full"></span></div>
+                        <span class="skeleton w-full"></span>
+                    </div>
                 </div>
 
                 <!-- Subtle Slick Backdrop for the dashboard results -->
@@ -371,7 +326,8 @@
                             <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping [animation-delay:0.6s]"></div>
                         </div>
                         <p id="dashboard-banner-title"
-                            class="text-base font-bold text-gray-300 tracking-widest uppercase">Checking Connection...</p>
+                            class="text-base font-bold text-gray-300 tracking-widest uppercase">Checking Connection...
+                        </p>
                         <p id="dashboard-banner-text" class="text-sm text-gray-400 text-center max-w-md">
                             Initializing network status check. Please wait while we verify your tunnel state.</p>
                         <div id="dashboard-banner-extra" class="hidden"></div>
@@ -457,8 +413,12 @@
                                     class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis invoice-input" />
                                 <button id="btn-copy-invoice-buy" title="Copy Invoice"
                                     class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
-                                    <svg id="copy-icon-buy" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    <svg id="copy-icon-buy"
+                                        class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors"
+                                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z">
+                                        </path>
                                     </svg>
                                 </button>
                             </div>
@@ -472,7 +432,8 @@
             <section id="view-renew" class="hidden space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Renew Existing Target</h2>
-                    <p class="text-sm text-gray-400 mb-6">Extend the subscription time for your installed or previously used WireGuard target.</p>
+                    <p class="text-sm text-gray-400 mb-6">Extend the subscription time for your installed or previously
+                        used WireGuard target.</p>
 
                     <div id="renew-form" class="space-y-4">
                         <div class="flex flex-col space-y-4">
@@ -482,44 +443,73 @@
                                     class="w-full bg-gray-900/50 border border-gray-800 text-gray-400 rounded-xl p-4 cursor-not-allowed shadow-inner font-mono text-sm opacity-70">
                             </div>
                             <div>
-                                <label class="block text-sm font-semibold text-gray-300 mb-2">Node Wireguard Public Key</label>
+                                <label class="block text-sm font-semibold text-gray-300 mb-2">Node Wireguard Public
+                                    Key</label>
                                 <div class="relative group">
                                     <input id="renew-pubkey" type="text" readonly value="Not found"
                                         class="w-full bg-gray-900/50 border border-gray-800 text-gray-400 rounded-xl p-4 pr-12 cursor-not-allowed shadow-inner font-mono text-sm opacity-70">
-                                    <button id="btn-copy-pubkey" title="Copy Public Key" class="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-tsgreen transition-colors">
-                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
+                                    <button id="btn-copy-pubkey" title="Copy Public Key"
+                                        class="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-tsgreen transition-colors">
+                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3">
+                                            </path>
+                                        </svg>
                                     </button>
                                 </div>
                             </div>
                         </div>
 
                         <!-- 🚀 NWC Auto-Renew Promo Card -->
-                        <div class="bg-gradient-to-br from-tsgreen/20 to-blue-600/10 border border-tsgreen/30 rounded-2xl p-6 shadow-lg shadow-tsgreen/5 relative overflow-hidden group">
-                           <div class="absolute -right-8 -top-8 w-24 h-24 bg-tsgreen/10 rounded-full blur-2xl group-hover:bg-tsgreen/20 transition-all duration-700"></div>
-                           <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div
+                            class="bg-gradient-to-br from-tsgreen/20 to-blue-600/10 border border-tsgreen/30 rounded-2xl p-6 shadow-lg shadow-tsgreen/5 relative overflow-hidden group">
+                            <div
+                                class="absolute -right-8 -top-8 w-24 h-24 bg-tsgreen/10 rounded-full blur-2xl group-hover:bg-tsgreen/20 transition-all duration-700">
+                            </div>
+                            <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
                                 <div class="space-y-1">
                                     <h3 class="text-white font-bold flex items-center gap-2">
                                         <span class="text-xl">🚀</span> Never Let Your VPN Expire!
                                     </h3>
                                     <p class="text-xs text-gray-300 leading-relaxed max-w-md">
-                                        Link your subscription in the <a href="https://tunnelsats.com/dashboard?section=link" target="_blank" class="text-tsgreen font-semibold hover:underline">Tunnelsats Dashboard</a> to activate <span class="text-white font-semibold">Auto-Renew via NWC</span>. It's automated and hassle-free.
+                                        Link your subscription in the <a
+                                            href="https://tunnelsats.com/dashboard?section=link" target="_blank"
+                                            rel="noopener noreferrer"
+                                            class="text-tsgreen font-semibold hover:underline">Tunnelsats Dashboard</a>
+                                        to activate <span class="text-white font-semibold">Auto-Renew via NWC</span>.
+                                        It's automated and hassle-free.
                                     </p>
-                                    <a href="https://tunnelsats.com/faq#how-do-automatic-nwc-renewals-work" target="_blank" class="text-xs text-tsgreen hover:underline flex items-center gap-1 mt-2">
+                                    <a href="https://tunnelsats.com/faq#how-do-automatic-nwc-renewals-work"
+                                        target="_blank" rel="noopener noreferrer"
+                                        class="text-xs text-tsgreen hover:underline flex items-center gap-1 mt-2">
                                         <span>How does it work?</span>
-                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
+                                            </path>
+                                        </svg>
                                     </a>
                                 </div>
-                                
-                                <div class="bg-black/40 backdrop-blur-sm border border-white/5 rounded-xl p-3 min-w-[140px]">
-                                    <label class="block text-[10px] uppercase tracking-wider text-gray-400 mb-1">Assigned IP Suffix</label>
+
+                                <div
+                                    class="bg-black/40 backdrop-blur-sm border border-white/5 rounded-xl p-3 min-w-[140px]">
+                                    <label
+                                        class="block text-[10px] uppercase tracking-wider text-gray-400 mb-1">Assigned
+                                        IP Suffix</label>
                                     <div class="flex items-center justify-between">
-                                        <span id="renew-ip-suffix" class="text-tsgreen font-mono font-bold text-lg select-all">.---</span>
-                                        <button id="btn-copy-ip" title="Copy Suffix" class="text-gray-500 hover:text-tsgreen transition-colors ml-2">
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
+                                        <span id="renew-ip-suffix"
+                                            class="text-tsgreen font-mono font-bold text-lg select-all">.---</span>
+                                        <button id="btn-copy-ip" title="Copy Suffix"
+                                            class="text-gray-500 hover:text-tsgreen transition-colors ml-2">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3">
+                                                </path>
+                                            </svg>
                                         </button>
                                     </div>
                                 </div>
-                           </div>
+                            </div>
                         </div>
 
                         <div class="relative group" id="renew-duration-dropdown-container">
@@ -572,8 +562,12 @@
                                     class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis invoice-input" />
                                 <button id="btn-copy-invoice-renew" title="Copy Invoice"
                                     class="flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group">
-                                    <svg id="copy-icon-renew" class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    <svg id="copy-icon-renew"
+                                        class="w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors"
+                                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z">
+                                        </path>
                                     </svg>
                                 </button>
                             </div>
@@ -601,7 +595,8 @@
 
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Configure Lightning Node</h2>
-                    <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats forwarding host.</p>
+                    <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats
+                        forwarding host.</p>
 
                     <div class="grid grid-cols-2 gap-3 mb-4">
                         <button id="node-type-lnd" type="button"
@@ -651,7 +646,8 @@
 
                     <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
                         <h3 class="text-white font-bold mb-2">Restore Node Config</h3>
-                        <p class="text-sm text-gray-300 mb-4">Revert TunnelSats node configuration changes before uninstalling.</p>
+                        <p class="text-sm text-gray-300 mb-4">Revert TunnelSats node configuration changes before
+                            uninstalling.</p>
                         <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
                             Restore Node Networking
@@ -660,7 +656,468 @@
                     </div>
                 </div>
             </section>
+
+            <!-- 6. Help & FAQ View -->
+            <section id="view-faq" class="hidden space-y-6">
+                <div id="faq-top">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-xl font-bold text-white">Frequently Asked Questions</h2>
+                        <a href="https://tunnelsats.com/faq" target="_blank" rel="noopener noreferrer"
+                            class="text-xs text-tsgreen hover:text-green-400 flex items-center gap-1 transition-colors bg-gray-900 border border-gray-700 px-3 py-1.5 rounded-lg shadow hover:bg-gray-800">
+                            <span>Read more</span>
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
+                                </path>
+                            </svg>
+                        </a>
+                    </div>
+                    <!-- Table of Contents -->
+                    <div id="faq-toc" class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-5 mb-6">
+                        <h3
+                            class="text-sm font-bold text-tsgreen uppercase tracking-wider mb-4 border-b border-gray-700/50 pb-2">
+                            Table of Contents</h3>
+                        <ul class="space-y-3 text-sm">
+                            <li><a href="#faq-1"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-1"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 1. How do I manually add a WireGuard configuration?</a></li>
+                            <li><a href="#faq-2"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-2"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 2. Are manual configuration files picked up automatically?</a></li>
+                            <li><a href="#faq-3"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-3"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 3. How can I verify my connection from the command line?</a></li>
+                            <li><a href="#faq-4"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-4"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 4. Can I tunnel both LND and Core-Lightning (CLN) simultaneously?</a></li>
+                            <li><a href="#faq-5"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-5"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 5. Why does CLN use port 9736 internally?</a></li>
+                            <li><a href="#faq-6"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-6"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 6. How do I safely uninstall the TunnelSats App on Umbrel?</a></li>
+                            <li><a href="#faq-7"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-7"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> Troubleshooting: I uninstalled via the App Store first, and now my node is
+                                    offline!</a></li>
+                        </ul>
+                    </div>
+
+                    <div class="space-y-4">
+                        <!-- Q1 -->
+                        <div id="faq-1" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">1. How do I manually add a WireGuard
+                                configuration?</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>The TunnelSats app automatically watches the <code
+                                        class="bg-gray-900 px-1 py-0.5 rounded text-tsgreen font-mono text-xs border border-gray-800">/data/</code>
+                                    directory for configuration files. If you are using SSH or restoring a backup, place
+                                    your <code
+                                        class="bg-gray-900 px-1 py-0.5 rounded text-tsgreen font-mono text-xs border border-gray-800">.conf</code>
+                                    file into this folder:</p>
+                                <p
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
+                                    ~/umbrel/app-data/tunnelsats/data/</p>
+                                <div
+                                    class="bg-blue-900/10 border border-blue-500/30 border-l-2 border-l-blue-500 p-3 rounded text-blue-300 mt-2 shadow-sm">
+                                    <span class="font-bold flex items-center gap-1.5 mb-1.5 text-blue-400"><svg
+                                            class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg> Note</span>
+                                    Files placed in the parent directory <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-blue-300 font-mono text-xs">~/umbrel/app-data/tunnelsats/</code>
+                                    will be ignored.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Q2 -->
+                        <div id="faq-2" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">2. Are manual configuration files picked up
+                                automatically?</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p><strong class="text-white">Yes!</strong> The TunnelSats background daemon polls the
+                                    <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">data/</code>
+                                    directory every 30 seconds.</p>
+                                <p>If you drop a new <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">.conf</code>
+                                    file via SSH, the daemon will automatically detect it during its next periodic
+                                    reconcile cycle. It uses a seamless hot-reload mechanism (<code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-gray-400 font-mono text-[10px]">wg syncconf</code>)
+                                    to apply the new cryptographic keys and endpoints mid-flight, meaning <strong>your
+                                        Lightning node container does not need to be restarted</strong> and your routing
+                                    won't even drop.</p>
+                                <div
+                                    class="bg-blue-900/10 border border-blue-500/30 border-l-2 border-l-blue-500 p-3 rounded text-blue-300 mt-2 shadow-sm">
+                                    <span class="font-bold flex items-center gap-1.5 mb-1.5 text-blue-400"><svg
+                                            class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg> Note</span>
+                                    You no longer need to press a "Reconcile" button in the dashboard, just drop the
+                                    file and wait up to 30 seconds.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Q3 -->
+                        <div id="faq-3" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">3. How can I verify my connection from the
+                                command line?</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>The dashboard uses our internal <strong>Dataplane API</strong>. You can query this
+                                    directly via SSH to debug your network state:</p>
+                                <div
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">curl -s http://umbrel.lan:9739/api/local/status | jq</div>
+                                <p>This returns a JSON payload containing the active WireGuard endpoint, internal
+                                    routing metrics, and any failure logs (<code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">last_error</code>).
+                                    To check the live WireGuard handshake:</p>
+                                <div
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">docker exec tunnelsats wg show</div>
+                            </div>
+                        </div>
+
+                        <!-- Q4 -->
+                        <div id="faq-4" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">4. Can I tunnel both LND and Core-Lightning
+                                (CLN) simultaneously?</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p><strong class="text-white">No.</strong> TunnelSats routes traffic for exactly <strong
+                                        class="text-tsyellow">one</strong> Lightning node at a time.</p>
+                                <ol class="list-decimal pl-5 space-y-2 marker:text-gray-500 font-semibold">
+                                    <li><strong class="text-white">Priority:</strong> <span class="font-normal">If both
+                                            are running, TunnelSats will prioritize LND.</span></li>
+                                    <li><strong class="text-white">Switching:</strong> <span class="font-normal">If you
+                                            stop LND and start CLN, the daemon will automatically detect the change and
+                                            reroute the tunnel to CLN.</span></li>
+                                    <li><strong class="text-white text-red-400">Warning:</strong> <span
+                                            class="font-normal">Starting a second node while one is already tunneled may
+                                            cause an IP conflict in Docker. Always stop one before starting the
+                                            other.</span></li>
+                                </ol>
+                            </div>
+                        </div>
+
+                        <!-- Q5 -->
+                        <div id="faq-5" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">5. Why does CLN use port 9736 internally?
+                            </h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>When TunnelSats detects CLN, it handles two distinct ports:</p>
+                                <ul class="list-disc pl-5 space-y-2 marker:text-blue-400">
+                                    <li><strong class="text-white">Internal (9736):</strong> This is the local bind port
+                                        required by the Umbrel architecture. It is used for local communication inside
+                                        the Docker network.</li>
+                                    <li><strong class="text-white">External (VPN Port):</strong> This is the port
+                                        assigned by your TunnelSats subscription (e.g., 39486). This port is gossiped to
+                                        the network so other nodes can reach you.</li>
+                                </ul>
+                                <p>TunnelSats handles this mapping automatically—you do not need to manually change your
+                                    CLN <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">bind-addr</code>.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Q6 -->
+                        <div id="faq-6" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base">6. How do I safely uninstall the TunnelSats
+                                App on Umbrel?</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>To prevent network routing issues with your Lightning node, you must perform a
+                                    <strong class="text-red-400">two-step uninstall process</strong>.</p>
+                                <p>Because of how Umbrel isolates applications, simply clicking "Uninstall" in the
+                                    Umbrel App Store immediately kills the TunnelSats background processes. If this
+                                    happens while your node is still actively routing through the VPN, your Lightning
+                                    node (LND/CLN) will be left trying to broadcast a VPN IP address that no longer
+                                    exists, resulting in lost connections and gossip failures.</p>
+                                <p>Please follow these exact steps to safely remove TunnelSats:</p>
+
+                                <div class="bg-gray-900/50 rounded-lg p-4 border border-gray-800 mt-4">
+                                    <h4 class="text-white font-semibold mb-2 flex items-center gap-2">
+                                        <span
+                                            class="bg-blue-500/20 text-blue-400 rounded-full w-5 h-5 flex items-center justify-center text-xs">1</span>
+                                        Disconnect within the TunnelSats App
+                                    </h4>
+                                    <p class="mb-2">First, we must safely detach the VPN from your Lightning node and
+                                        return it to its default Tor/Clearnet state.</p>
+                                    <ol class="list-decimal pl-5 space-y-1 text-xs">
+                                        <li>Open the <strong>TunnelSats App</strong> from your Umbrel dashboard.</li>
+                                        <li>Locate the <strong>Node Routing Status</strong> section.</li>
+                                        <li>Click the <strong>Disable Routing (Uninstall)</strong> button.</li>
+                                        <li>Wait for the UI to confirm that your node has been successfully restored to
+                                            its default routing state.</li>
+                                    </ol>
+                                </div>
+
+                                <div class="bg-gray-900/50 rounded-lg p-4 border border-gray-800">
+                                    <h4 class="text-white font-semibold mb-2 flex items-center gap-2">
+                                        <span
+                                            class="bg-red-500/20 text-red-500 rounded-full w-5 h-5 flex items-center justify-center text-xs">2</span>
+                                        Uninstall via the Umbrel App Store
+                                    </h4>
+                                    <p class="mb-2">Once TunnelSats is disconnected from your node, you can safely
+                                        remove the app itself.</p>
+                                    <ol class="list-decimal pl-5 space-y-1 text-xs">
+                                        <li>Go to the <strong>Umbrel App Store</strong>.</li>
+                                        <li>Navigate to your installed apps and locate TunnelSats.</li>
+                                        <li>Click <strong>Uninstall</strong>.</li>
+                                    </ol>
+                                </div>
+
+                                <div
+                                    class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
+                                    <strong class="text-gray-300 block not-italic mb-1 flex items-center gap-1.5"><svg
+                                            class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
+                                            viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                                            </path>
+                                        </svg> Will I lose my subscription?</strong>
+                                    No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel
+                                    safely preserves your TunnelSats app data folder (including your active WireGuard
+                                    subscription profile). If you reinstall the app in the future, your subscription
+                                    will still be there.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Troubleshooting -->
+                        <div id="faq-7" class="bg-red-900/10 border border-red-500/30 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2"><svg
+                                    class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z">
+                                    </path>
+                                </svg> Troubleshooting: I uninstalled via the App Store first, and now my node is
+                                offline!</h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>If you skipped Step 1, your LND or CLN configuration file still contains the
+                                    TunnelSats <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts</code>
+                                    or <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">announce-addr</code>
+                                    directives, but the VPN tunnel is dead. Your traffic is effectively being sent into
+                                    a black hole.</p>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">How to fix it:</h4>
+                                <ol class="list-decimal pl-5 space-y-3">
+                                    <li><strong class="text-tsgreen">The Easy Way:</strong> Go back to the Umbrel App
+                                        Store and <strong>Reinstall</strong> the TunnelSats app. Open it, ensure the VPN
+                                        connects, and then follow the safe two-step process above.</li>
+                                    <li>
+                                        <strong class="text-blue-400">The Manual Way (Advanced):</strong> Connect to
+                                        your Umbrel via SSH and manually remove the orphaned TunnelSats lines from your
+                                        node's configuration files:
+                                        <ul class="list-disc pl-5 mt-2 space-y-2 marker:text-gray-500">
+                                            <li><strong>For LND:</strong> Edit <code
+                                                    class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs break-all">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code>
+                                                and delete or comment out the <code
+                                                    class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts=</code>
+                                                line. Then restart LND.</li>
+                                            <li><strong>For CLN:</strong> Edit <code
+                                                    class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs break-all">~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config</code>
+                                                and delete or comment out the <code
+                                                    class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">announce-addr=</code>
+                                                line. Then restart CLN.</li>
+                                        </ul>
+                                    </li>
+                                </ol>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Issue Logging Section at the bottom -->
+                <div class="mt-8 pt-8 border-t border-gray-800">
+                    <div
+                        class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-2xl p-6 text-center shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative overflow-hidden group">
+                        <!-- glow effect -->
+                        <div
+                            class="absolute -top-10 -right-10 w-32 h-32 bg-tsgreen/10 rounded-full blur-3xl pointer-events-none group-hover:bg-tsgreen/20 transition-all duration-500">
+                        </div>
+                        <div class="relative z-10 flex flex-col items-center">
+                            <div
+                                class="bg-gray-950 p-3 rounded-full mb-4 inline-flex shadow-inner border border-gray-800">
+                                <svg class="w-8 h-8 text-tsgreen" fill="currentColor" viewBox="0 0 24 24">
+                                    <path fill-rule="evenodd"
+                                        d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+                                        clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-2">Still Need Help or Found a Bug?</h3>
+                            <p class="text-gray-400 text-sm max-w-md mb-6 leading-relaxed">
+                                Our development happens transparently on GitHub. If you've found a bug, have a formal
+                                feature request, or still have an unanswered question, let us know!
+                            </p>
+                            <a href="https://github.com/TunnelSats/ts-umbrel-app/issues/new/choose" target="_blank"
+                                rel="noopener noreferrer"
+                                class="inline-flex items-center space-x-2 bg-tsgreen hover:bg-green-500 text-gray-900 font-bold py-3 px-6 rounded-xl transition-all shadow-[0_0_15px_rgba(34,197,94,0.3)] hover:shadow-[0_0_25px_rgba(34,197,94,0.5)] transform hover:-translate-y-0.5">
+                                <span>Log an Issue</span>
+                                <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
+                                    </path>
+                                </svg>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Floating Back to Top Button -->
+                <div class="sticky bottom-16 mt-8 flex justify-end z-40">
+                    <a href="#faq-top" data-scroll-to="faq-top"
+                        class="bg-gray-900 border border-gray-700 hover:bg-gray-800 hover:border-tsgreen text-gray-400 hover:text-tsgreen rounded-full w-12 h-12 flex items-center justify-center shadow-[0_0_15px_rgba(0,0,0,0.5)] transition-all group"
+                        title="Back to Top">
+                        <svg class="w-5 h-5 group-hover:-translate-y-1 transition-transform" fill="none"
+                            stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7">
+                            </path>
+                        </svg>
+                    </a>
+                </div>
+            </section>
         </main>
+
+        <!-- Sidebar Configuration -->
+        <aside id="sidebar"
+            class="order-last md:order-first w-full md:w-64 bg-gray-950/80 border-t md:border-t-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
+            <!-- Sidebar Header (Desktop Only) -->
+            <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
+                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
+                <div class="flex flex-col">
+                    <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
+                            class="text-tsyellow">Sats</span></h1>
+                    <span id="app-version"
+                        class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.0.0</span>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <nav id="sidebar-nav" class="hidden md:block flex-1 overflow-y-auto scrollbar-hide px-4 py-6 space-y-2">
+                <button id="nav-dashboard"
+                    class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
+                    <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
+                        stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Dashboard</span>
+                </button>
+                <button id="nav-buy"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>Purchase New</span>
+                </button>
+                <button id="nav-renew"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                        </path>
+                    </svg>
+                    <span>Renew Target</span>
+                </button>
+                <button id="nav-import"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                    </svg>
+                    <span>Install / Import</span>
+                </button>
+                <button id="nav-uninstall"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
+                        </path>
+                    </svg>
+                    <span>Uninstall</span>
+                </button>
+            </nav>
+
+            <!-- Status Badge Area (Moved from Header) -->
+            <div class="p-6 border-t border-gray-800 bg-gray-900/40">
+                <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2">VPN Status</p>
+                <div id="statusBadge"
+                    class="w-full text-center px-4 py-2 rounded-lg font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400 shadow-inner truncate">
+                    Checking...
+                </div>
+            </div>
+
+            <!-- Footer Links -->
+            <div class="px-6 py-4 flex flex-col space-y-2 border-t border-gray-800">
+                <a href="https://tunnelsats.com" target="_blank" rel="noopener noreferrer"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Homepage</span>
+                </a>
+                <a href="https://tunnelsats.com/status" target="_blank" rel="noopener noreferrer"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                        </path>
+                    </svg>
+                    <span>Server Status</span>
+                </a>
+                <button id="btn-footer-faq" type="button"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-blue-400 transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                        </path>
+                    </svg>
+                    <span>Help & FAQ</span>
+                </button>
+            </div>
+        </aside>
     </div>
 
     <!-- Logic -->

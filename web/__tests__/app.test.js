@@ -16,6 +16,7 @@ function setupDOM() {
 }
 
 function evalScript() {
+    // In jsdom, document.readyState is already "complete", so app.js eagerly runs initApp().
     window.eval(script);
 }
 
@@ -58,6 +59,62 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('nav-buy').classList.contains('nav-active')).toBe(true);
         expect(document.getElementById('nav-dashboard').classList.contains('nav-active')).toBe(false);
+    });
+
+    test('footer FAQ link switches to FAQ view without requiring a nav button', () => {
+        const faqView = document.getElementById('view-faq');
+        const footerFaq = document.getElementById('btn-footer-faq');
+
+        expect(faqView.classList.contains('hidden')).toBe(true);
+
+        footerFaq.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+        expect(faqView.classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
+        expect(footerFaq.classList.contains('text-blue-400')).toBe(true);
+
+        window.switchTab('buy');
+        expect(footerFaq.classList.contains('text-blue-400')).toBe(false);
+        expect(footerFaq.classList.contains('text-gray-500')).toBe(true);
+    });
+
+    test('delegated data-scroll-to click prevents default and smooth-scrolls when target exists', () => {
+        const faq3 = document.getElementById('faq-3');
+        const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
+        faq3.scrollIntoView = jest.fn();
+
+        const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+        tocLink.dispatchEvent(clickEvent);
+
+        expect(clickEvent.defaultPrevented).toBe(true);
+        expect(faq3.scrollIntoView).toHaveBeenCalledTimes(1);
+        expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
+    });
+
+    test('delegated data-scroll-to click does not prevent default when target does not exist', () => {
+        const missingTargetLink = document.createElement('a');
+        missingTargetLink.setAttribute('href', '#missing-faq-item');
+        missingTargetLink.setAttribute('data-scroll-to', 'missing-faq-item');
+        document.body.appendChild(missingTargetLink);
+
+        try {
+            const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+            expect(() => missingTargetLink.dispatchEvent(clickEvent)).not.toThrow();
+            expect(clickEvent.defaultPrevented).toBe(false);
+        } finally {
+            missingTargetLink.remove();
+        }
+    });
+
+    test('all target=_blank links include noopener and noreferrer', () => {
+        const links = Array.from(document.querySelectorAll('a[target="_blank"]'));
+        expect(links.length).toBeGreaterThan(0);
+
+        links.forEach((link) => {
+            const rel = link.getAttribute('rel') || '';
+            expect(rel).toContain('noopener');
+            expect(rel).toContain('noreferrer');
+        });
     });
 
     test('fetchStatus updates DOM elements', async () => {
@@ -870,8 +927,6 @@ describe('NWC Auto-Renew Features', () => {
     beforeEach(() => {
         setupDOM();
         evalScript();
-        // Manually trigger initialization as JSDOM won't fire DOMContentLoaded for eval'd script
-        document.dispatchEvent(new Event('DOMContentLoaded'));
         // Mock clipboard API
         Object.defineProperty(navigator, 'clipboard', {
             value: {

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Help & FAQ
+    url: https://tunnelsats.com/faq
+    about: Read our frequently asked questions before submitting an issue.

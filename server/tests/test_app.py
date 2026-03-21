@@ -127,14 +127,14 @@ class TestClaimSavesConfig:
 
     @patch('app.requests.post', side_effect=_mock_claim_post)
     def test_claim_saves_metadata_json(self, mock_post, client, data_dir):
-        """A tunnelsats-meta.json must be created with fields from the response."""
+        """A metadata file must be created with fields from the response."""
         res = client.post('/api/subscription/claim',
                           json={"paymentHash": "test-hash-123", "referralCode": None},
                           content_type='application/json')
         assert res.status_code == 200
 
         meta_path = os.path.join(data_dir, app_module.META_FILE)
-        assert os.path.exists(meta_path), "tunnelsats-meta.json not created"
+        assert os.path.exists(meta_path), f"{app_module.META_FILE} not created"
 
         with open(meta_path) as f:
             meta = json.load(f)
