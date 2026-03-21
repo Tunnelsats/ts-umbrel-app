@@ -192,12 +192,33 @@ class TestClaimSavesConfig:
         assert len(new_confs) == 1
 
     @patch('app.requests.post')
-    def test_claim_returns_400_when_upstream_returns_success_false(self, mock_post, client, data_dir):
-        """If upstream returns 200 OK but success=false, proxy must fail loudly with 400."""
+    def test_claim_returns_400_when_upstream_returns_status_error(self, mock_post, client, data_dir):
+        """If upstream returns 200 OK but status=error, proxy must fail loudly with 400."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"status": "error", "message": "Subscription already claimed"}
         mock_resp.content = b'{"status": "error", "message": "Subscription already claimed"}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+        
+        assert res.status_code == 400
+        assert b"Invalid upstream payload" in res.data or b"Already claimed" in res.data or b"Subscription already claimed" in res.data
+
+        # Ensure no config was saved
+        confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(confs) == 0
+
+    @patch('app.requests.post')
+    def test_claim_returns_400_when_upstream_returns_success_false(self, mock_post, client, data_dir):
+        """If upstream returns 200 OK but success=False explicitly, proxy must fail loudly with 400."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"success": False, "status": "error", "message": "Subscription already claimed"}
+        mock_resp.content = b'{"success": false, "status": "error", "message": "Subscription already claimed"}'
         mock_resp.headers = {'Content-Type': 'application/json'}
         mock_post.return_value = mock_resp
 
@@ -1297,12 +1318,8 @@ class TestFullE2E_Workflow:
                     "message": "Claimed", 
                     "config": "[Interface]\nPrivateKey = secret123\nAddress = 10.0.0.1/32\n\n[Peer]\nPublicKey = pub123\nEndpoint = wg.example.com:51820\nAllowedIPs = 0.0.0.0/0\n"
                 }
-                mock_post_claim.headers = {'Content-Type': 'application/json'}
-                mock_post_claim.content = b'{"success": true}'
+                mock_post_claim.content = json.dumps(mock_post_claim.json.return_value).encode('utf-8')
                 return mock_post_claim
-            elif "restart" in url:
-                # Local restart bypass for docker api (if any)
-                pass 
             return mock_post_create
             
         mock_post.side_effect = mock_post_side_effect

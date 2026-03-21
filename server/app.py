@@ -1061,7 +1061,6 @@ def claim_subscription():
             peer_data = data.get("peer", {}) if isinstance(data.get("peer"), dict) else {}
             
             server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown")
-            server_id = server_id or "unknown"
 
             parsed = _parse_config_comments(full_config)
             payment_hash = payload.get("paymentHash", "")

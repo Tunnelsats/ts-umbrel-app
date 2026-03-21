@@ -898,8 +898,8 @@ async function claimSubscription(mode) {
             const button = document.createElement('button');
             button.className = 'mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition shadow-lg';
             button.textContent = 'Restart Apps & Tunnel';
-            button.onclick = () => {
-                restartTunnel();
+            button.onclick = async () => {
+                await restartTunnel();
                 document.getElementById('pending-install-section').classList.add('hidden');
                 activePaymentHash = null;
                 
