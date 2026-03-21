@@ -340,7 +340,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
             expect.objectContaining({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paymentHash: 'buy-hash-123', referralCode: null })
+                body: JSON.stringify({ paymentHash: 'buy-hash-123', wgPublicKey: '', wgPresharedKey: '', referralCode: null })
             })
         );
     });

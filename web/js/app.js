@@ -867,13 +867,20 @@ async function claimSubscription(mode) {
         const res = await fetch('/api/subscription/claim', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paymentHash: activePaymentHash, referralCode: null })
+            body: JSON.stringify({ paymentHash: activePaymentHash, wgPublicKey: "", wgPresharedKey: "", referralCode: null })
         });
 
         const invoiceBox = document.getElementById(`invoice-box-${mode}`);
         invoiceBox.innerHTML = '';
+        
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (e) {
+            console.warn("Failed to parse JSON response from claim");
+        }
 
-        if (res.ok) {
+        if (res.ok && data.success !== false && data.status !== "error") {
             const configMsg = "Node configuration will be available after dataplane setup.";
 
             const h3 = document.createElement('h3');
@@ -895,7 +902,15 @@ async function claimSubscription(mode) {
                 restartTunnel();
                 document.getElementById('pending-install-section').classList.add('hidden');
                 activePaymentHash = null;
-                switchTab('dashboard');
+                
+                // Do not navigate away. Keep the user on the Install screen so they can connect their node.
+                showToast("VPN restarted successfully! Now configure your Lightning Node below.", "success");
+                
+                // Smooth scroll to the Configure Node section
+                const configNodeInput = document.getElementById('node-type-selected');
+                if (configNodeInput && configNodeInput.parentElement) {
+                    configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
             };
 
             if (btnInstall) btnInstall.classList.add('hidden'); // Hide the install button now
@@ -907,7 +922,7 @@ async function claimSubscription(mode) {
 
             const p = document.createElement('p');
             p.className = 'text-sm text-gray-300 text-center';
-            p.textContent = 'Payment was successful, but config provisioning failed.';
+            p.textContent = data.error || data.message || 'Payment was successful, but config provisioning failed.';
 
             invoiceBox.append(h3, p);
             if (btnInstall) {

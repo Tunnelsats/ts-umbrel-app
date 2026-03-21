@@ -500,6 +500,21 @@ def _write_file_secure(path, content):
     os.replace(tmp_path, path)
 
 
+def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
+    """Saves the WG config and metadata to disk using atomic writes and automatic .bak rotation."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        backup_existing_wireguard_configs()
+        conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
+        meta_path = os.path.join(DATA_DIR, META_FILE)
+        _write_file_secure(conf_path, config_text)
+        _write_file_secure(meta_path, json.dumps(meta, indent=2))
+        return True
+    except (IOError, OSError) as exc:
+        app.logger.error(f"Failed to persist tunnelsats.conf and metadata: {exc}")
+        return False
+
+
 def _set_restart_pending(meta_path, meta, key, is_pending):
     has_key = key in meta
     current_pending = bool(meta.get(key))
@@ -1010,44 +1025,63 @@ def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Opti
 def claim_subscription():
     # If the claim was successful, intercept and persist WireGuard config + metadata.
     url = f"{TUNNELSATS_API_URL}/subscription/claim"
+    payload = request.json or {}
+    
+    # Hide sensitive logs
+    safe_payload = dict(payload)
+    if "wgPresharedKey" in safe_payload:
+        safe_payload["wgPresharedKey"] = "***"
+    
+    app.logger.info(f"Initiating claim upstream with payload: {safe_payload}")
+    
     try:
-        resp = requests.post(url, json=request.json, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        app.logger.info(f"Upstream claim responded with HTTP {resp.status_code}, len: {len(resp.content)}")
+        
         if resp.status_code == 200:
             try:
                 data = resp.json()
-            except ValueError:
-                data = {}
+            except ValueError as exc:
+                app.logger.error(f"Upstream claim failed JSON decode: {exc}, raw content: {resp.content[:100]}")
+                return jsonify({"success": False, "error": "Invalid upstream payload (not JSON)"}), 400
 
-            full_config = data.get("fullConfig") or data.get("wireguardConfig")
-            if full_config:
-                os.makedirs(DATA_DIR, exist_ok=True)
-                backup_existing_wireguard_configs()
+            # If the upstream actively rejected the claim with a 200 OK (semantic failure)
+            if data.get("success") is False or data.get("status") == "error":
+                msg = data.get("message", "Subscription already claimed or invalid payload.")
+                app.logger.error(f"Upstream claim semantic failure: {msg}")
+                return jsonify({"success": False, "error": msg}), 400
 
-                subscription_data = data.get("subscription", {}) if isinstance(data.get("subscription"), dict) else {}
-                server_data = data.get("server", {}) if isinstance(data.get("server"), dict) else {}
-                peer_data = data.get("peer", {}) if isinstance(data.get("peer"), dict) else {}
-                server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown")
-                server_id = server_id or "unknown"
+            full_config = data.get("config") or data.get("fullConfig") or data.get("wireguardConfig")
+            if not full_config:
+                app.logger.error(f"Upstream claim response omitted fullConfig. Received keys: {list(data.keys())}")
+                return jsonify({"success": False, "error": "Invalid upstream payload: Missing WireGuard configuration"}), 400
 
-                config_path = os.path.join(DATA_DIR, f"tunnelsats-{server_id}.conf")
-                _write_file_secure(config_path, full_config)
+            subscription_data = data.get("subscription", {}) if isinstance(data.get("subscription"), dict) else {}
+            server_data = data.get("server", {}) if isinstance(data.get("server"), dict) else {}
+            peer_data = data.get("peer", {}) if isinstance(data.get("peer"), dict) else {}
+            
+            server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown")
+            server_id = server_id or "unknown"
 
-                parsed = _parse_config_comments(full_config)
-                payment_hash = (request.json or {}).get("paymentHash", "")
-                meta = {
-                    "serverId": server_id,
-                    "paymentHash": payment_hash,
-                    "wgPublicKey": parsed.get("wgPublicKey", ""),
-                    "peerAddress": peer_data.get("address", parsed.get("peerAddress", "")),
-                    "presharedKey": peer_data.get("presharedKey", parsed.get("presharedKey", "")),
-                    "vpnPort": parsed.get("vpnPort", 0),
-                    "serverDomain": parsed.get("serverDomain", ""),
-                    "wgEndpoint": server_data.get("endpoint", parsed.get("wgEndpoint", "")),
-                    "claimedAt": datetime.now(timezone.utc).isoformat(),
-                    "expiresAt": subscription_data.get("expiresAt", parsed.get("expiresAt", "")),
-                }
-                meta_path = os.path.join(DATA_DIR, META_FILE)
-                _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            parsed = _parse_config_comments(full_config)
+            payment_hash = payload.get("paymentHash", "")
+            meta = {
+                "serverId": server_id,
+                "paymentHash": payment_hash,
+                "wgPublicKey": parsed.get("wgPublicKey", ""),
+                "peerAddress": peer_data.get("address", parsed.get("peerAddress", "")),
+                "presharedKey": peer_data.get("presharedKey", parsed.get("presharedKey", "")),
+                "vpnPort": parsed.get("vpnPort", 0),
+                "serverDomain": parsed.get("serverDomain", ""),
+                "wgEndpoint": server_data.get("endpoint", parsed.get("wgEndpoint", "")),
+                "claimedAt": datetime.now(timezone.utc).isoformat(),
+                "expiresAt": data.get("subscriptionEnd") or subscription_data.get("expiresAt", parsed.get("expiresAt", "")),
+            }
+
+            if _persist_tunnelsats_config_and_meta(full_config, meta):
+                app.logger.info("Successfully persisted claimed configuration and metadata.")
+            else:
+                return jsonify({"success": False, "error": "Failed to write configuration to local disk."}), 500
 
         excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
         filtered_headers = [
@@ -1055,6 +1089,7 @@ def claim_subscription():
         ]
         return (resp.content, resp.status_code, filtered_headers)
     except requests.RequestException as exc:
+        app.logger.error(f"Network error during upstream claim: {exc}")
         return jsonify({"error": str(exc)}), 500
 
 
@@ -1073,7 +1108,10 @@ def renew_subscription():
         except (IOError, json.JSONDecodeError) as exc:
             app.logger.warning(f"Failed to read metadata for renew autofill: {exc}")
 
-    return proxy_request("POST", "subscription/renew", payload)
+    app.logger.info("Initiating renewal upstream...")
+    res = proxy_request("POST", "subscription/renew", payload)
+    app.logger.info("Upstream renewal completed.")
+    return res
 
 
 # --- LOCAL APP ROUTES ---
@@ -1250,13 +1288,7 @@ def upload_config():
         "importedAt": datetime.now(timezone.utc).isoformat(),
     }
 
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        backup_existing_wireguard_configs()
-        _write_file_secure(os.path.join(DATA_DIR, "tunnelsats.conf"), config_text)
-        _write_file_secure(os.path.join(DATA_DIR, META_FILE), json.dumps(meta, indent=2))
-    except (IOError, OSError) as exc:
-        app.logger.error(f"Unable to persist uploaded config: {exc}")
+    if not _persist_tunnelsats_config_and_meta(config_text, meta):
         return jsonify({"success": False, "error": "Failed to save configuration on disk."}), 500
 
     return jsonify(

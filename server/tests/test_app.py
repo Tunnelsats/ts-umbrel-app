@@ -191,6 +191,48 @@ class TestClaimSavesConfig:
         new_confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
         assert len(new_confs) == 1
 
+    @patch('app.requests.post')
+    def test_claim_returns_400_when_upstream_returns_success_false(self, mock_post, client, data_dir):
+        """If upstream returns 200 OK but success=false, proxy must fail loudly with 400."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"status": "error", "message": "Subscription already claimed"}
+        mock_resp.content = b'{"status": "error", "message": "Subscription already claimed"}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+        
+        assert res.status_code == 400
+        assert b"Invalid upstream payload" in res.data or b"Already claimed" in res.data or b"Subscription already claimed" in res.data
+
+        # Ensure no config was saved
+        confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(confs) == 0
+
+    @patch('app.requests.post')
+    def test_claim_returns_400_when_upstream_omits_config(self, mock_post, client, data_dir):
+        """If upstream returns 200 OK but omits fullConfig, proxy must fail loudly with 400."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"status": "active", "message": "Success but no config", "subscription": {}}
+        mock_resp.content = b'{"status": "active", "message": "Success but no config", "subscription": {}}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+        
+        assert res.status_code == 400
+        assert b"Invalid upstream payload" in res.data
+
+        # Ensure no config was saved
+        confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(confs) == 0
+
 
 # --- Phase 1: Servers Proxy Test ---
 
@@ -1230,6 +1272,86 @@ class TestDataplaneAndRegressionFixes:
                 assert res.status_code == 200
                 with open(meta_path, 'r') as f:
                     assert json.load(f) == []
+
+class TestFullE2E_Workflow:
+    @patch('app.requests.post')
+    @patch('app.requests.get')
+    @patch('app.docker_api')
+    @patch('app.docker_api_post')
+    @patch('app.subprocess.check_output')
+    def test_full_workflow(self, mock_subprocess, mock_docker_post, mock_docker_api, mock_get, mock_post, client, data_dir):
+        # 1. Create Sub
+        mock_post_create = MagicMock()
+        mock_post_create.status_code = 200
+        mock_post_create.json.return_value = {"invoice": "lnbc123", "paymentHash": "hash123"}
+        mock_post_create.headers = {'Content-Type': 'application/json'}
+        mock_post_create.content = b'{"invoice": "lnbc123", "paymentHash": "hash123"}'
+        
+        # Set up a side effect for POST to route to different responses based on url
+        def mock_post_side_effect(url, **kwargs):
+            if "claim" in url:
+                mock_post_claim = MagicMock()
+                mock_post_claim.status_code = 200
+                mock_post_claim.json.return_value = {
+                    "success": True, 
+                    "message": "Claimed", 
+                    "config": "[Interface]\nPrivateKey = secret123\nAddress = 10.0.0.1/32\n\n[Peer]\nPublicKey = pub123\nEndpoint = wg.example.com:51820\nAllowedIPs = 0.0.0.0/0\n"
+                }
+                mock_post_claim.headers = {'Content-Type': 'application/json'}
+                mock_post_claim.content = b'{"success": true}'
+                return mock_post_claim
+            elif "restart" in url:
+                # Local restart bypass for docker api (if any)
+                pass 
+            return mock_post_create
+            
+        mock_post.side_effect = mock_post_side_effect
+
+        res = client.post('/api/subscription/create', json={"serverId": "eu-de", "duration": 1})
+        assert res.status_code == 200
+        assert json.loads(res.data)["paymentHash"] == "hash123"
+
+        # 2. Poll Status (Paid)
+        mock_get_status = MagicMock()
+        mock_get_status.status_code = 200
+        mock_get_status.json.return_value = {"status": "paid", "isProvisioned": False}
+        mock_get_status.headers = {'Content-Type': 'application/json'}
+        mock_get_status.content = b'{"status": "paid", "isProvisioned": false}'
+        mock_get.return_value = mock_get_status
+
+        res = client.get('/api/subscription/hash123')
+        assert res.status_code == 200
+        assert json.loads(res.data)["status"] == "paid"
+
+        # 3. Claim Sub
+        res = client.post('/api/subscription/claim', json={"paymentHash": "hash123", "wgPublicKey": "", "wgPresharedKey": "", "referralCode": None})
+        assert res.status_code == 200
+
+        # Verify files were saved
+        conf_path = os.path.join(data_dir, "tunnelsats.conf")
+        meta_path = os.path.join(data_dir, app_module.META_FILE)
+        assert os.path.exists(conf_path)
+        assert os.path.exists(meta_path)
+        
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+            assert meta["paymentHash"] == "hash123"
+
+        # 4. Trigger Restart
+        mock_docker_post.return_value = ({}, 200)
+        res = client.post('/api/local/restart')
+        assert res.status_code == 200
+
+        # 5. Status Check
+        mock_subprocess.return_value = b"interface: tunnelsatsv2\n  public key: pubKey123\n  private key: (hidden)\n  listening port: 51820\n"
+        
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        status_data = json.loads(res.data)
+        assert status_data["wg_status"] == "Connected"
+        assert status_data["wg_pubkey"] == "pubKey123"
+        assert "tunnelsats.conf" in status_data["configs_found"]
+
 
 
 class TestMetadataSync:
