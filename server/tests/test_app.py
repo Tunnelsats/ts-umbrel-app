@@ -99,7 +99,6 @@ def _mock_claim_post(*args, **kwargs):
     mock_resp.json.return_value = MOCK_CLAIM_RESPONSE
     mock_resp.content = json.dumps(MOCK_CLAIM_RESPONSE).encode()
     mock_resp.headers = {"Content-Type": "application/json"}
-    mock_resp.headers = {'Content-Type': 'application/json'}
     return mock_resp
 
 
@@ -255,6 +254,26 @@ class TestClaimSavesConfig:
         confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
         assert len(confs) == 0
 
+    @patch('app.requests.post')
+    def test_claim_returns_400_when_upstream_returns_non_object_json(self, mock_post, client, data_dir):
+        """If upstream returns JSON but not an object, claim endpoint should reject with 400."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = []
+        mock_resp.content = b"[]"
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+
+        assert res.status_code == 400
+        assert b"Invalid upstream payload" in res.data
+
+        confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(confs) == 0
+
 
 # --- Phase 1: Servers Proxy Test ---
 
@@ -381,6 +400,20 @@ class TestRenewEndpoint:
         call_kwargs = mock_post.call_args.kwargs
         assert call_kwargs['json']['serverId'] == 'new-server'
         assert call_kwargs['json']['wgPublicKey'] == 'newkey'
+
+    @patch('app.requests.post')
+    def test_renew_handles_non_object_json_body(self, mock_post, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"success": true}'
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/renew', json=['invalid'])
+        assert res.status_code == 200
+
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs['json'] == {}
 
 
 class TestDataplaneAndRegressionFixes:
@@ -1314,6 +1347,7 @@ class TestFullE2E_Workflow:
             if "claim" in url:
                 mock_post_claim = MagicMock()
                 mock_post_claim.status_code = 200
+                mock_post_claim.headers = {'Content-Type': 'application/json'}
                 mock_post_claim.json.return_value = {
                     "success": True, 
                     "message": "Claimed", 
@@ -1427,7 +1461,7 @@ def test_claim_subscription_invalid_config(client, data_dir):
         mock_resp.headers = {"Content-Type": "application/json"}
         mock_post.return_value = mock_resp
         
-        res = client.post('/api/local/claim', 
+        res = client.post('/api/subscription/claim',
                          json={"paymentHash": "abc"},
                          headers={"Content-Type": "application/json"})
         

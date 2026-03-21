@@ -1025,7 +1025,9 @@ def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Opti
 def claim_subscription():
     # If the claim was successful, intercept and persist WireGuard config + metadata.
     url = f"{TUNNELSATS_API_URL}/subscription/claim"
-    payload = request.json or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
     
     # Hide sensitive logs
     safe_payload = dict(payload)
@@ -1044,6 +1046,10 @@ def claim_subscription():
             except ValueError as exc:
                 app.logger.error(f"Upstream claim failed JSON decode: {exc}, raw content: {resp.content[:100]}")
                 return jsonify({"success": False, "error": "Invalid upstream payload (not JSON)"}), 400
+
+            if not isinstance(data, dict):
+                app.logger.error(f"Upstream claim returned non-object JSON payload: {type(data).__name__}")
+                return jsonify({"success": False, "error": "Invalid upstream payload (expected JSON object)"}), 400
 
             # If the upstream actively rejected the claim with a 200 OK (semantic failure)
             if data.get("success") is False or data.get("status") == "error":
@@ -1079,7 +1085,7 @@ def claim_subscription():
 
             if not _has_required_wireguard_blocks(full_config):
                 app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
-                return jsonify({"success": False, "error": "Invalid WireGuard configuration received from upstream."}), 400
+                return jsonify({"success": False, "error": "Invalid upstream payload: WireGuard config missing [Interface] or [Peer] block"}), 400
 
             if _persist_tunnelsats_config_and_meta(full_config, meta):
                 app.logger.info("Successfully persisted claimed configuration and metadata.")
@@ -1098,7 +1104,9 @@ def claim_subscription():
 
 @app.route("/api/subscription/renew", methods=["POST"])
 def renew_subscription():
-    payload = dict(request.json or {})
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
     if os.path.exists(meta_path):
         try:

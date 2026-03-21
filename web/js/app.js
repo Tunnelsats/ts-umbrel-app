@@ -604,8 +604,10 @@ async function fetchStatus() {
             bannerDots.classList.add('hidden');
         }
 
+        return data;
     } catch (e) {
         console.error("Failed to fetch status", e);
+        return null;
     }
 }
 
@@ -901,33 +903,25 @@ async function claimSubscription(mode) {
             button.className = 'mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition shadow-lg';
             button.textContent = 'Restart Apps & Tunnel';
             button.addEventListener('click', async () => {
-                const ok = await restartTunnel();
+                const ok = await restartTunnel({
+                    maxAttempts: 5,
+                    intervalMs: 2000,
+                    onConnected: () => {
+                        showToast("VPN tunnel is UP! Now configure your Lightning Node below.", "success");
+                        const configNodeInput = document.getElementById('node-type-selected');
+                        if (configNodeInput && configNodeInput.parentElement) {
+                            configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    },
+                    onTimeout: () => {
+                        showToast("VPN restart requested, but connection verification timed out. Please check the dashboard.", "warning");
+                    }
+                });
                 document.getElementById('pending-install-section').classList.add('hidden');
                 activePaymentHash = null;
                 
                 if (ok) {
                     showToast("VPN restarted successfully! Confirming connection...", "info");
-                    
-                    // Poll for VPN status instead of fixed timeout
-                    let attempts = 0;
-                    const maxAttempts = 5;
-                    const interval = 2000;
-                    
-                    const poll = setInterval(async () => {
-                        attempts++;
-                        const status = await fetchStatus();
-                        if (status && status.vpn_status === 'active') {
-                            clearInterval(poll);
-                            showToast("VPN tunnel is UP! Now configure your Lightning Node below.", "success");
-                            const configNodeInput = document.getElementById('node-type-selected');
-                            if (configNodeInput && configNodeInput.parentElement) {
-                                configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                            }
-                        } else if (attempts >= maxAttempts) {
-                            clearInterval(poll);
-                            showToast("VPN restart requested, but connection verification timed out. Please check the dashboard.", "warning");
-                        }
-                    }, interval);
                 } else {
                     showToast("Restart request failed — please restart manually from the dashboard.", "error");
                 }
@@ -1245,11 +1239,34 @@ async function importConfig() {
     }
 }
 
-async function restartTunnel() {
+async function pollUntilConnected(options = {}) {
+    const maxAttempts = Number.isInteger(options.maxAttempts) && options.maxAttempts > 0 ? options.maxAttempts : 5;
+    const intervalMs = Number.isInteger(options.intervalMs) && options.intervalMs > 0 ? options.intervalMs : 2000;
+    const onConnected = typeof options.onConnected === 'function' ? options.onConnected : null;
+    const onTimeout = typeof options.onTimeout === 'function' ? options.onTimeout : null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const status = await fetchStatus();
+        if (status && status.vpn_active === true) {
+            if (onConnected) onConnected(status);
+            return true;
+        }
+        if (attempt < maxAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+    }
+
+    if (onTimeout) onTimeout();
+    return false;
+}
+
+async function restartTunnel(pollOptions = {}) {
     try {
         const res = await fetch('/api/local/restart', { method: 'POST' });
-        // The container entrypoint will catch the trigger file, and restart `wg-quick`
-        setTimeout(fetchStatus, 3000);
+        if (res.ok) {
+            // The container entrypoint will catch the trigger file, and restart `wg-quick`.
+            void pollUntilConnected(pollOptions);
+        }
         return res.ok;
     } catch (e) {
         return false;
