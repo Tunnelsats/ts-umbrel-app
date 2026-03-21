@@ -1473,7 +1473,6 @@ class TestMetadataSync:
 def test_claim_subscription_invalid_config(client, data_dir):
     """Verify that claim_subscription returns 400 if the upstream config is malformed."""
     malformed_response = MOCK_CLAIM_RESPONSE.copy()
-    malformed_response.pop("fullConfig", None)
     malformed_response["config"] = "[Interface]\nPrivateKey = 123\n# Missing Peer block"
     
     with patch('app.requests.post') as mock_post:
