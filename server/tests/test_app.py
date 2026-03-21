@@ -98,6 +98,7 @@ def _mock_claim_post(*args, **kwargs):
     mock_resp.status_code = 200
     mock_resp.json.return_value = MOCK_CLAIM_RESPONSE
     mock_resp.content = json.dumps(MOCK_CLAIM_RESPONSE).encode()
+    mock_resp.headers = {"Content-Type": "application/json"}
     mock_resp.headers = {'Content-Type': 'application/json'}
     return mock_resp
 
@@ -1412,3 +1413,25 @@ class TestMetadataSync:
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         assert meta["expiresAt"] == "2027-02-01T00:00:00Z"
+
+def test_claim_subscription_invalid_config(client, data_dir):
+    """Verify that claim_subscription returns 400 if the upstream config is malformed."""
+    malformed_response = MOCK_CLAIM_RESPONSE.copy()
+    malformed_response["fullConfig"] = "[Interface]\nPrivateKey = 123\n# Missing Peer block"
+    
+    with patch('requests.post') as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = malformed_response
+        mock_resp.content = json.dumps(malformed_response).encode()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_post.return_value = mock_resp
+        
+        res = client.post('/api/local/claim', 
+                         json={"paymentHash": "abc"},
+                         headers={"Content-Type": "application/json"})
+        
+        assert res.status_code == 400
+        data = json.loads(res.data)
+        assert data["success"] is False
+        assert "Invalid upstream payload" in data["error"]

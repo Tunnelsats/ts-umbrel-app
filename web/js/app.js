@@ -906,12 +906,28 @@ async function claimSubscription(mode) {
                 activePaymentHash = null;
                 
                 if (ok) {
-                    showToast("VPN restarted successfully! Now configure your Lightning Node below.", "success");
-                    // Smooth scroll to the Configure Node section
-                    const configNodeInput = document.getElementById('node-type-selected');
-                    if (configNodeInput && configNodeInput.parentElement) {
-                        configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    }
+                    showToast("VPN restarted successfully! Confirming connection...", "info");
+                    
+                    // Poll for VPN status instead of fixed timeout
+                    let attempts = 0;
+                    const maxAttempts = 5;
+                    const interval = 2000;
+                    
+                    const poll = setInterval(async () => {
+                        attempts++;
+                        const status = await fetchStatus();
+                        if (status && status.vpn_status === 'active') {
+                            clearInterval(poll);
+                            showToast("VPN tunnel is UP! Now configure your Lightning Node below.", "success");
+                            const configNodeInput = document.getElementById('node-type-selected');
+                            if (configNodeInput && configNodeInput.parentElement) {
+                                configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            }
+                        } else if (attempts >= maxAttempts) {
+                            clearInterval(poll);
+                            showToast("VPN restart requested, but connection verification timed out. Please check the dashboard.", "warning");
+                        }
+                    }, interval);
                 } else {
                     showToast("Restart request failed — please restart manually from the dashboard.", "error");
                 }
