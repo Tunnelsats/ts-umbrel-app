@@ -286,6 +286,18 @@ function renderDurations() {
 
 // Initialization (idempotent to avoid duplicate listener registration)
 let isAppInitialized = false;
+function handleScrollToClick(e) {
+    const target = e.target.closest('[data-scroll-to]');
+    if (!target) return;
+
+    const id = target.getAttribute('data-scroll-to');
+    const el = document.getElementById(id);
+    if (el) {
+        e.preventDefault();
+        el.scrollIntoView({ behavior: 'smooth' });
+    }
+}
+
 function initApp() {
     if (isAppInitialized) return;
     isAppInitialized = true;
@@ -343,18 +355,12 @@ function initApp() {
         if (val && val !== '.---') copyToClipboard(val.replace('.', ''), 'IP Suffix');
     });
 
-    // Global Scroll Handler for data-scroll-to elements
-    document.addEventListener('click', (e) => {
-        const target = e.target.closest('[data-scroll-to]');
-        if (target) {
-            const id = target.getAttribute('data-scroll-to');
-            const el = document.getElementById(id);
-            if (el) {
-                e.preventDefault();
-                el.scrollIntoView({ behavior: 'smooth' });
-            }
-        }
-    });
+    // Global scroll handler: remove any prior instance before registering.
+    if (window.__tsScrollToHandler) {
+        document.removeEventListener('click', window.__tsScrollToHandler);
+    }
+    window.__tsScrollToHandler = handleScrollToClick;
+    document.addEventListener('click', window.__tsScrollToHandler);
 }
 
 document.addEventListener("DOMContentLoaded", initApp);

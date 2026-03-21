@@ -82,6 +82,7 @@ describe('UI Routing and Initialization', () => {
         tocLink.dispatchEvent(clickEvent);
 
         expect(clickEvent.defaultPrevented).toBe(true);
+        expect(faq3.scrollIntoView).toHaveBeenCalledTimes(1);
         expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
     });
 
