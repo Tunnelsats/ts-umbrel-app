@@ -917,10 +917,10 @@ async function claimSubscription(mode) {
                         showToast("VPN restart requested, but connection verification timed out. Please check the dashboard.", "warning");
                     }
                 });
-                document.getElementById('pending-install-section').classList.add('hidden');
-                activePaymentHash = null;
-                
-                if (!ok) {
+                if (ok) {
+                    document.getElementById('pending-install-section').classList.add('hidden');
+                    activePaymentHash = null;
+                } else {
                     showToast("Restart request failed — please restart manually from the dashboard.", "error");
                 }
             });
