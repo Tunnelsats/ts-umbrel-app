@@ -1066,9 +1066,12 @@ def claim_subscription():
                 app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
                 return jsonify({"success": False, "error": "Invalid upstream payload: WireGuard config missing [Interface] or [Peer] block"}), 400
 
-            subscription_data = sub if isinstance(sub := data.get("subscription"), dict) else {}
-            server_data = srv if isinstance(srv := data.get("server"), dict) else {}
-            peer_data = peer if isinstance(peer := data.get("peer"), dict) else {}
+            sub = data.get("subscription")
+            subscription_data = sub if isinstance(sub, dict) else {}
+            srv = data.get("server")
+            server_data = srv if isinstance(srv, dict) else {}
+            peer = data.get("peer")
+            peer_data = peer if isinstance(peer, dict) else {}
             
             server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown") or "unknown"
 
