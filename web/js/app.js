@@ -884,7 +884,7 @@ async function claimSubscription(mode) {
             data = { error: "Server returned an invalid response." };
         }
 
-        if (res.ok && data.success !== false && data.status !== "error" && !data.error) {
+        if (res.ok && data.success !== false && data.status !== "error") {
             const configMsg = "Node configuration will be available after dataplane setup.";
 
             const h3 = document.createElement('h3');

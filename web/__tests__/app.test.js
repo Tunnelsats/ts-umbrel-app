@@ -344,6 +344,29 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
             })
         );
     });
+
+    test('claimSubscription treats success payload with informational error field as success', async () => {
+        window.activePaymentHash = 'buy-hash-123';
+
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/subscription/claim') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        error: 'Deprecation notice: this field is informational only'
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.claimSubscription('import');
+
+        const invoiceBox = document.getElementById('invoice-box-import');
+        expect(invoiceBox.textContent).toContain('Installation Complete!');
+        expect(invoiceBox.textContent).not.toContain('Provisioning Error');
+    });
 });
 
 

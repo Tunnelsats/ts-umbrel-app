@@ -73,7 +73,7 @@ MOCK_CLAIM_RESPONSE = {
         "privateKey": "clientPrivateKeyBase64==",
         "presharedKey": "presharedKeyBase64=="
     },
-    "fullConfig": (
+    "config": (
         "# TunnelSats WireGuard Configuration\n"
         "# Server: de2.tunnelsats.com\n"
         "# Port Forwarding: 35825\n"
@@ -106,8 +106,8 @@ class TestClaimSavesConfig:
     """Test that claim_subscription correctly intercepts and saves the config."""
 
     @patch('app.requests.post', side_effect=_mock_claim_post)
-    def test_claim_saves_conf_file_from_fullConfig(self, mock_post, client, data_dir):
-        """The .conf file must be written from the 'fullConfig' field."""
+    def test_claim_saves_conf_file_from_config(self, mock_post, client, data_dir):
+        """The .conf file must be written from the 'config' field."""
         res = client.post('/api/subscription/claim',
                           json={"paymentHash": "test-hash-123", "referralCode": None},
                           content_type='application/json')
@@ -118,12 +118,34 @@ class TestClaimSavesConfig:
         assert len(conf_files) == 1
         assert 'tunnelsats' in conf_files[0]
 
-        # Verify content matches fullConfig
+        # Verify content matches config
         with open(os.path.join(data_dir, conf_files[0])) as f:
             content = f.read()
         assert '[Interface]' in content
         assert 'clientPrivateKeyBase64==' in content
         assert '# Port Forwarding: 35825' in content
+
+    @patch('app.requests.post')
+    def test_claim_saves_conf_file_from_legacy_fullconfig_fallback(self, mock_post, client, data_dir):
+        """Legacy 'fullConfig' fallback should still be accepted."""
+        legacy_response = MOCK_CLAIM_RESPONSE.copy()
+        legacy_response["fullConfig"] = legacy_response["config"]
+        legacy_response.pop("config", None)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = legacy_response
+        mock_resp.content = json.dumps(legacy_response).encode()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+        assert res.status_code == 200
+
+        conf_files = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(conf_files) == 1
 
     @patch('app.requests.post', side_effect=_mock_claim_post)
     def test_claim_saves_metadata_json(self, mock_post, client, data_dir):
@@ -235,7 +257,7 @@ class TestClaimSavesConfig:
 
     @patch('app.requests.post')
     def test_claim_returns_400_when_upstream_omits_config(self, mock_post, client, data_dir):
-        """If upstream returns 200 OK but omits fullConfig, proxy must fail loudly with 400."""
+        """If upstream returns 200 OK but omits all WireGuard config keys, proxy must fail with 400."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"status": "active", "message": "Success but no config", "subscription": {}}
@@ -1451,7 +1473,8 @@ class TestMetadataSync:
 def test_claim_subscription_invalid_config(client, data_dir):
     """Verify that claim_subscription returns 400 if the upstream config is malformed."""
     malformed_response = MOCK_CLAIM_RESPONSE.copy()
-    malformed_response["fullConfig"] = "[Interface]\nPrivateKey = 123\n# Missing Peer block"
+    malformed_response.pop("fullConfig", None)
+    malformed_response["config"] = "[Interface]\nPrivateKey = 123\n# Missing Peer block"
     
     with patch('app.requests.post') as mock_post:
         mock_resp = MagicMock()
