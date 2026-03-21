@@ -97,10 +97,13 @@ describe('UI Routing and Initialization', () => {
         missingTargetLink.setAttribute('data-scroll-to', 'missing-faq-item');
         document.body.appendChild(missingTargetLink);
 
-        const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
-        missingTargetLink.dispatchEvent(clickEvent);
-
-        expect(clickEvent.defaultPrevented).toBe(false);
+        try {
+            const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+            expect(() => missingTargetLink.dispatchEvent(clickEvent)).not.toThrow();
+            expect(clickEvent.defaultPrevented).toBe(false);
+        } finally {
+            missingTargetLink.remove();
+        }
     });
 
     test('all target=_blank links include noopener and noreferrer', () => {

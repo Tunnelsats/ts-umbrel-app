@@ -154,118 +154,11 @@
     </header>
 
     <div
-        class="app-shell-height flex flex-col-reverse md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl spotlight relative overflow-hidden">
-
-        <!-- Sidebar Configuration -->
-        <aside id="sidebar"
-            class="w-full md:w-64 bg-gray-950/80 border-t md:border-t-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
-            <!-- Sidebar Header (Desktop Only) -->
-            <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
-                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
-                <div class="flex flex-col">
-                    <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
-                            class="text-tsyellow">Sats</span></h1>
-                    <span id="app-version"
-                        class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.0.0</span>
-                </div>
-            </div>
-
-            <!-- Navigation -->
-            <nav id="sidebar-nav" class="hidden md:block flex-1 overflow-y-auto scrollbar-hide px-4 py-6 space-y-2">
-                <button id="nav-dashboard"
-                    class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
-                    <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
-                        stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
-                        </path>
-                    </svg>
-                    <span>Dashboard</span>
-                </button>
-                <button id="nav-buy"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                    </svg>
-                    <span>Purchase New</span>
-                </button>
-                <button id="nav-renew"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                        </path>
-                    </svg>
-                    <span>Renew Target</span>
-                </button>
-                <button id="nav-import"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
-                    </svg>
-                    <span>Install / Import</span>
-                </button>
-                <button id="nav-uninstall"
-                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
-                    <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
-                        </path>
-                    </svg>
-                    <span>Uninstall</span>
-                </button>
-            </nav>
-
-            <!-- Status Badge Area (Moved from Header) -->
-            <div class="p-6 border-t border-gray-800 bg-gray-900/40">
-                <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2">VPN Status</p>
-                <div id="statusBadge"
-                    class="w-full text-center px-4 py-2 rounded-lg font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400 shadow-inner truncate">
-                    Checking...
-                </div>
-            </div>
-
-            <!-- Footer Links -->
-            <div class="px-6 py-4 flex flex-col space-y-2 border-t border-gray-800">
-                <a href="https://tunnelsats.com" target="_blank" rel="noopener noreferrer"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
-                        </path>
-                    </svg>
-                    <span>Homepage</span>
-                </a>
-                <a href="https://tunnelsats.com/status" target="_blank" rel="noopener noreferrer"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
-                        </path>
-                    </svg>
-                    <span>Server Status</span>
-                </a>
-                <button id="btn-footer-faq" type="button"
-                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-blue-400 transition-colors group">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
-                        </path>
-                    </svg>
-                    <span>Help & FAQ</span>
-                </button>
-            </div>
-        </aside>
+        class="app-shell-height flex flex-col md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl spotlight relative overflow-hidden">
 
         <!-- Main Content Area -->
         <main
-            class="flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
+            class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
             <!-- Dynamic Background Glows -->
             <div
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
@@ -1118,6 +1011,113 @@
                 </div>
             </section>
         </main>
+
+        <!-- Sidebar Configuration -->
+        <aside id="sidebar"
+            class="order-last md:order-first w-full md:w-64 bg-gray-950/80 border-t md:border-t-0 md:border-r border-white/10 flex flex-col shadow-xl z-20 relative">
+            <!-- Sidebar Header (Desktop Only) -->
+            <div class="hidden md:flex p-6 border-b border-gray-800 items-center space-x-4">
+                <img src="img/brand/logo.svg" alt="TunnelSats" class="h-10 w-10 sidebar-logo">
+                <div class="flex flex-col">
+                    <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
+                            class="text-tsyellow">Sats</span></h1>
+                    <span id="app-version"
+                        class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.0.0</span>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <nav id="sidebar-nav" class="hidden md:block flex-1 overflow-y-auto scrollbar-hide px-4 py-6 space-y-2">
+                <button id="nav-dashboard"
+                    class="nav-active flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 bg-gray-800 text-white border-tsgreen shadow-sm group">
+                    <svg class="w-5 h-5 text-tsgreen group-hover:scale-110 transition-transform" fill="none"
+                        stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Dashboard</span>
+                </button>
+                <button id="nav-buy"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>Purchase New</span>
+                </button>
+                <button id="nav-renew"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsyellow group-hover:scale-110 group-hover:rotate-180 transition-all duration-500"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                        </path>
+                    </svg>
+                    <span>Renew Target</span>
+                </button>
+                <button id="nav-import"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-blue-400 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                    </svg>
+                    <span>Install / Import</span>
+                </button>
+                <button id="nav-uninstall"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-red-500 group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
+                        </path>
+                    </svg>
+                    <span>Uninstall</span>
+                </button>
+            </nav>
+
+            <!-- Status Badge Area (Moved from Header) -->
+            <div class="p-6 border-t border-gray-800 bg-gray-900/40">
+                <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2">VPN Status</p>
+                <div id="statusBadge"
+                    class="w-full text-center px-4 py-2 rounded-lg font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400 shadow-inner truncate">
+                    Checking...
+                </div>
+            </div>
+
+            <!-- Footer Links -->
+            <div class="px-6 py-4 flex flex-col space-y-2 border-t border-gray-800">
+                <a href="https://tunnelsats.com" target="_blank" rel="noopener noreferrer"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                        </path>
+                    </svg>
+                    <span>Homepage</span>
+                </a>
+                <a href="https://tunnelsats.com/status" target="_blank" rel="noopener noreferrer"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                        </path>
+                    </svg>
+                    <span>Server Status</span>
+                </a>
+                <button id="btn-footer-faq" type="button"
+                    class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-blue-400 transition-colors group">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                        </path>
+                    </svg>
+                    <span>Help & FAQ</span>
+                </button>
+            </div>
+        </aside>
     </div>
 
     <!-- Logic -->
