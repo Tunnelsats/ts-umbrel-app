@@ -318,7 +318,7 @@ function initApp() {
     attachListener('nav-renew', 'click', () => switchTab('renew'));
     attachListener('nav-import', 'click', () => switchTab('import'));
     attachListener('nav-uninstall', 'click', () => switchTab('uninstall'));
-    attachListener('btn-footer-faq', 'click', (e) => { e.preventDefault(); switchTab('faq'); });
+    attachListener('btn-footer-faq', 'click', () => switchTab('faq'));
     attachListener('buy-server-btn', 'click', () => toggleDropdown('buy-server'));
     attachListener('buy-duration-btn', 'click', () => toggleDropdown('buy-duration'));
     attachListener('renew-duration-btn', 'click', () => toggleDropdown('renew-duration'));
