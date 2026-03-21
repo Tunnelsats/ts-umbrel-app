@@ -898,20 +898,23 @@ async function claimSubscription(mode) {
             const button = document.createElement('button');
             button.className = 'mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition shadow-lg';
             button.textContent = 'Restart Apps & Tunnel';
-            button.onclick = async () => {
-                await restartTunnel();
+            button.addEventListener('click', async () => {
+                const ok = await restartTunnel();
                 document.getElementById('pending-install-section').classList.add('hidden');
                 activePaymentHash = null;
                 
-                // Do not navigate away. Keep the user on the Install screen so they can connect their node.
-                showToast("VPN restarted successfully! Now configure your Lightning Node below.", "success");
+                if (ok) {
+                    showToast("VPN restarted successfully! Now configure your Lightning Node below.", "success");
+                } else {
+                    showToast("Restart request failed — please restart manually from the dashboard.", "error");
+                }
                 
                 // Smooth scroll to the Configure Node section
                 const configNodeInput = document.getElementById('node-type-selected');
                 if (configNodeInput && configNodeInput.parentElement) {
                     configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }
-            };
+            });
 
             if (btnInstall) btnInstall.classList.add('hidden'); // Hide the install button now
             invoiceBox.append(h3, p1, p2, button);
@@ -1227,10 +1230,13 @@ async function importConfig() {
 
 async function restartTunnel() {
     try {
-        await fetch('/api/local/restart', { method: 'POST' });
+        const res = await fetch('/api/local/restart', { method: 'POST' });
         // The container entrypoint will catch the trigger file, and restart `wg-quick`
         setTimeout(fetchStatus, 3000);
-    } catch (e) { }
+        return res.ok;
+    } catch (e) {
+        return false;
+    }
 }
 
 // Copy Invoice to Clipboard
