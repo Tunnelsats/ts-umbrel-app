@@ -794,7 +794,7 @@ async function pollPayment() {
         if (data.status === 'paid') {
             clearInterval(pollInterval);
             const invoiceBox = document.getElementById(`invoice-box-${purchaseMode}`);
-            invoiceBox.innerHTML = ''; // Clear content
+            invoiceBox.replaceChildren(); // Clear content
 
             if (purchaseMode === 'buy') {
                 // Celebration SVG (safely parsed to avoid innerHTML AST warnings)
@@ -874,7 +874,7 @@ async function claimSubscription(mode) {
         });
 
         const invoiceBox = document.getElementById(`invoice-box-${mode}`);
-        invoiceBox.innerHTML = '';
+        invoiceBox.replaceChildren();
         
         let data;
         try {
@@ -920,9 +920,7 @@ async function claimSubscription(mode) {
                 document.getElementById('pending-install-section').classList.add('hidden');
                 activePaymentHash = null;
                 
-                if (ok) {
-                    showToast("VPN restarted successfully! Confirming connection...", "info");
-                } else {
+                if (!ok) {
                     showToast("Restart request failed — please restart manually from the dashboard.", "error");
                 }
             });

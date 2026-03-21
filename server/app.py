@@ -1062,9 +1062,13 @@ def claim_subscription():
                 app.logger.error(f"Upstream claim response omitted fullConfig. Received keys: {list(data.keys())}")
                 return jsonify({"success": False, "error": "Invalid upstream payload: Missing WireGuard configuration"}), 400
 
-            subscription_data = data.get("subscription", {}) if isinstance(data.get("subscription"), dict) else {}
-            server_data = data.get("server", {}) if isinstance(data.get("server"), dict) else {}
-            peer_data = data.get("peer", {}) if isinstance(data.get("peer"), dict) else {}
+            if not _has_required_wireguard_blocks(full_config):
+                app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
+                return jsonify({"success": False, "error": "Invalid upstream payload: WireGuard config missing [Interface] or [Peer] block"}), 400
+
+            subscription_data = sub if isinstance(sub := data.get("subscription"), dict) else {}
+            server_data = srv if isinstance(srv := data.get("server"), dict) else {}
+            peer_data = peer if isinstance(peer := data.get("peer"), dict) else {}
             
             server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown") or "unknown"
 
@@ -1082,10 +1086,6 @@ def claim_subscription():
                 "claimedAt": datetime.now(timezone.utc).isoformat(),
                 "expiresAt": data.get("subscriptionEnd") or subscription_data.get("expiresAt", parsed.get("expiresAt", "")),
             }
-
-            if not _has_required_wireguard_blocks(full_config):
-                app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
-                return jsonify({"success": False, "error": "Invalid upstream payload: WireGuard config missing [Interface] or [Peer] block"}), 400
 
             if _persist_tunnelsats_config_and_meta(full_config, meta):
                 app.logger.info("Successfully persisted claimed configuration and metadata.")

@@ -1453,7 +1453,7 @@ def test_claim_subscription_invalid_config(client, data_dir):
     malformed_response = MOCK_CLAIM_RESPONSE.copy()
     malformed_response["fullConfig"] = "[Interface]\nPrivateKey = 123\n# Missing Peer block"
     
-    with patch('requests.post') as mock_post:
+    with patch('app.requests.post') as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = malformed_response
