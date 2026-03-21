@@ -284,8 +284,12 @@ function renderDurations() {
     });
 }
 
-// Initialization
-document.addEventListener("DOMContentLoaded", () => {
+// Initialization (idempotent to avoid duplicate listener registration)
+let isAppInitialized = false;
+function initApp() {
+    if (isAppInitialized) return;
+    isAppInitialized = true;
+
     setNodeType('lnd', false);
     fetchStatus();
     fetchServers();
@@ -351,7 +355,12 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
     });
-});
+}
+
+document.addEventListener("DOMContentLoaded", initApp);
+if (document.readyState !== 'loading') {
+    initApp();
+}
 
 // UI Routing
 function switchTab(tabId) {

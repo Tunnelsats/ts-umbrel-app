@@ -61,7 +61,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('footer FAQ link switches to FAQ view without requiring a nav button', () => {
-        document.dispatchEvent(new Event('DOMContentLoaded'));
+        window.initApp();
         const faqView = document.getElementById('view-faq');
         const footerFaq = document.getElementById('btn-footer-faq');
 
@@ -74,7 +74,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('delegated data-scroll-to click prevents default and smooth-scrolls when target exists', () => {
-        document.dispatchEvent(new Event('DOMContentLoaded'));
+        window.initApp();
         const faq3 = document.getElementById('faq-3');
         const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
         faq3.scrollIntoView = jest.fn();
@@ -87,7 +87,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('delegated data-scroll-to click does not prevent default when target does not exist', () => {
-        document.dispatchEvent(new Event('DOMContentLoaded'));
+        window.initApp();
         const missingTargetLink = document.createElement('a');
         missingTargetLink.setAttribute('href', '#missing-faq-item');
         missingTargetLink.setAttribute('data-scroll-to', 'missing-faq-item');
@@ -920,8 +920,7 @@ describe('NWC Auto-Renew Features', () => {
     beforeEach(() => {
         setupDOM();
         evalScript();
-        // Manually trigger initialization as JSDOM won't fire DOMContentLoaded for eval'd script
-        document.dispatchEvent(new Event('DOMContentLoaded'));
+        window.initApp();
         // Mock clipboard API
         Object.defineProperty(navigator, 'clipboard', {
             value: {
