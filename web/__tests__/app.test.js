@@ -71,6 +71,11 @@ describe('UI Routing and Initialization', () => {
 
         expect(faqView.classList.contains('hidden')).toBe(false);
         expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
+        expect(footerFaq.classList.contains('text-blue-400')).toBe(true);
+
+        window.switchTab('buy');
+        expect(footerFaq.classList.contains('text-blue-400')).toBe(false);
+        expect(footerFaq.classList.contains('text-gray-500')).toBe(true);
     });
 
     test('delegated data-scroll-to click prevents default and smooth-scrolls when target exists', () => {

@@ -375,6 +375,11 @@ function switchTab(tabId) {
         el.classList.remove('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
         el.classList.add('text-gray-400', 'border-transparent');
     });
+    const footerFaqBtn = document.getElementById('btn-footer-faq');
+    if (footerFaqBtn) {
+        footerFaqBtn.classList.remove('text-blue-400');
+        footerFaqBtn.classList.add('text-gray-500');
+    }
 
     document.getElementById(`view-${tabId}`).classList.remove('hidden');
     const mainEl = document.querySelector('main');
@@ -383,6 +388,10 @@ function switchTab(tabId) {
     if (btn) {
         btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');
         btn.classList.remove('text-gray-400', 'border-transparent');
+    }
+    if (footerFaqBtn && tabId === 'faq') {
+        footerFaqBtn.classList.remove('text-gray-500');
+        footerFaqBtn.classList.add('text-blue-400');
     }
 
     // Reset polling and invoice UI when navigating away
