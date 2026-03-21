@@ -547,7 +547,8 @@ async function fetchStatus() {
 
         // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.
 
-        let confs = data.configs_found.length > 0 ? data.configs_found.join(", ") : "None Detected";
+        const configsArr = data.configs_found || [];
+        let confs = configsArr.length > 0 ? configsArr.join(", ") : "None Detected";
         const configsEl = document.getElementById('txt-configs');
         if (configsEl) {
             configsEl.replaceChildren(document.createTextNode(confs));
