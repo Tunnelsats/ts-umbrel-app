@@ -1077,6 +1077,10 @@ def claim_subscription():
                 "expiresAt": data.get("subscriptionEnd") or subscription_data.get("expiresAt", parsed.get("expiresAt", "")),
             }
 
+            if not _has_required_wireguard_blocks(full_config):
+                app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
+                return jsonify({"success": False, "error": "Invalid WireGuard configuration received from upstream."}), 400
+
             if _persist_tunnelsats_config_and_meta(full_config, meta):
                 app.logger.info("Successfully persisted claimed configuration and metadata.")
             else:

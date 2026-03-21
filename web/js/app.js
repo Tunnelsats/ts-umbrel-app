@@ -825,10 +825,10 @@ async function pollPayment() {
                 const button = document.createElement('button');
                 button.className = 'mt-4 w-full bg-tsgreen hover:bg-cyan-500 text-gray-900 font-bold py-2 px-6 rounded transition shadow-lg';
                 button.textContent = 'Proceed to Installation';
-                button.onclick = () => {
+                button.addEventListener('click', () => {
                     document.getElementById('pending-install-section').classList.remove('hidden');
                     switchTab('import');
-                };
+                });
 
                 invoiceBox.append(celebrationSvg, h3, p, button);
             } else {
@@ -848,7 +848,7 @@ async function pollPayment() {
                 const button = document.createElement('button');
                 button.className = 'mt-4 w-full bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2 px-6 rounded transition shadow-lg';
                 button.textContent = 'Return to Dashboard';
-                button.onclick = () => switchTab('dashboard');
+                button.addEventListener('click', () => switchTab('dashboard'));
 
                 invoiceBox.append(h3, p, button);
             }
