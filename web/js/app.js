@@ -377,6 +377,8 @@ function switchTab(tabId) {
     });
 
     document.getElementById(`view-${tabId}`).classList.remove('hidden');
+    const mainEl = document.querySelector('main');
+    if (mainEl) mainEl.scrollTop = 0;
     const btn = document.getElementById(`nav-${tabId}`);
     if (btn) {
         btn.classList.add('nav-active', 'bg-gray-800', 'text-white', 'border-tsgreen');

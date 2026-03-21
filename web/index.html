@@ -108,6 +108,17 @@
             mask-image: linear-gradient(to bottom, black 97%, transparent 100%);
         }
 
+        .app-shell-height {
+            height: calc(100vh - 120px);
+            height: calc(100svh - 120px);
+        }
+
+        @media (min-width: 768px) {
+            .app-shell-height {
+                height: 85vh;
+            }
+        }
+
         .invoice-input {
             word-break: break-all;
         }
@@ -143,7 +154,7 @@
     </header>
 
     <div
-        class="flex flex-col-reverse md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl h-[calc(100svh-120px)] md:h-[85vh] spotlight relative overflow-hidden">
+        class="app-shell-height flex flex-col-reverse md:flex-row w-full max-w-6xl glass-panel rounded-2xl shadow-2xl spotlight relative overflow-hidden">
 
         <!-- Sidebar Configuration -->
         <aside id="sidebar"
@@ -1094,7 +1105,7 @@
                 </div>
 
                 <!-- Floating Back to Top Button -->
-                <div class="sticky bottom-6 mt-8 flex justify-end z-40">
+                <div class="sticky bottom-16 mt-8 flex justify-end z-40">
                     <a href="#faq-top" data-scroll-to="faq-top"
                         class="bg-gray-900 border border-gray-700 hover:bg-gray-800 hover:border-tsgreen text-gray-400 hover:text-tsgreen rounded-full w-12 h-12 flex items-center justify-center shadow-[0_0_15px_rgba(0,0,0,0.5)] transition-all group"
                         title="Back to Top">
