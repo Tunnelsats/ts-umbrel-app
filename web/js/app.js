@@ -873,14 +873,15 @@ async function claimSubscription(mode) {
         const invoiceBox = document.getElementById(`invoice-box-${mode}`);
         invoiceBox.innerHTML = '';
         
-        let data = {};
+        let data;
         try {
             data = await res.json();
         } catch (e) {
             console.warn("Failed to parse JSON response from claim");
+            data = { error: "Server returned an invalid response." };
         }
 
-        if (res.ok && data.success !== false && data.status !== "error") {
+        if (res.ok && data.success !== false && data.status !== "error" && !data.error) {
             const configMsg = "Node configuration will be available after dataplane setup.";
 
             const h3 = document.createElement('h3');
@@ -905,14 +906,13 @@ async function claimSubscription(mode) {
                 
                 if (ok) {
                     showToast("VPN restarted successfully! Now configure your Lightning Node below.", "success");
+                    // Smooth scroll to the Configure Node section
+                    const configNodeInput = document.getElementById('node-type-selected');
+                    if (configNodeInput && configNodeInput.parentElement) {
+                        configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
                 } else {
                     showToast("Restart request failed — please restart manually from the dashboard.", "error");
-                }
-                
-                // Smooth scroll to the Configure Node section
-                const configNodeInput = document.getElementById('node-type-selected');
-                if (configNodeInput && configNodeInput.parentElement) {
-                    configNodeInput.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }
             });
 
