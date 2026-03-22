@@ -164,7 +164,7 @@
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
             </div>
             <div
-                class="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-tsyellow/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
+                class="absolute bottom-0 right-[-10%] w-96 h-96 bg-tsyellow/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
             </div>
 
             <!-- 1. Dashboard View -->
@@ -190,9 +190,24 @@
                                     </div>
                                 </div>
                                 <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
+                                <div class="flex space-x-1 ml-auto hidden" id="dashboard-banner-dots">
+                                    <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping"></div>
+                                    <div
+                                        class="w-1.5 h-1.5 bg-tsyellow rounded-full animate-ping [animation-delay:0.3s]">
+                                    </div>
+                                    <div
+                                        class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping [animation-delay:0.6s]">
+                                    </div>
+                                </div>
                             </div>
                             <div id="txt-wg-status" class="text-2xl font-mono text-gray-500 font-bold tracking-tight">
                                 <span class="skeleton w-32 h-8"></span>
+                            </div>
+                            <div class="mt-4 pt-4 border-t border-gray-800/50">
+                                <h3 id="dashboard-banner-title" class="text-sm font-bold text-gray-300">Checking Connection...</h3>
+                                <p id="dashboard-banner-text" class="text-sm text-gray-400 mt-1">
+                                    Initializing network status check. Please wait while we verify your tunnel state.
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -313,26 +328,6 @@
                     </div>
                 </div>
 
-                <!-- Subtle Slick Backdrop for the dashboard results -->
-                <div id="dashboard-banner" class="mt-12 p-1 relative overflow-hidden rounded-3xl group">
-                    <div
-                        class="absolute inset-0 bg-gradient-to-r from-tsgreen/20 via-tsyellow/20 to-tsgreen/20 blur-2xl opacity-30 group-hover:opacity-50 transition-opacity duration-1000">
-                    </div>
-                    <div
-                        class="relative bg-gray-950/60 backdrop-blur-xl border border-gray-800 rounded-[22px] p-8 flex flex-col items-center justify-center space-y-4">
-                        <div class="flex space-x-2" id="dashboard-banner-dots">
-                            <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping"></div>
-                            <div class="w-1.5 h-1.5 bg-tsyellow rounded-full animate-ping [animation-delay:0.3s]"></div>
-                            <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping [animation-delay:0.6s]"></div>
-                        </div>
-                        <p id="dashboard-banner-title"
-                            class="text-base font-bold text-gray-300 tracking-widest uppercase">Checking Connection...
-                        </p>
-                        <p id="dashboard-banner-text" class="text-sm text-gray-400 text-center max-w-md">
-                            Initializing network status check. Please wait while we verify your tunnel state.</p>
-                        <div id="dashboard-banner-extra" class="hidden"></div>
-                    </div>
-                </div>
             </section>
 
             <!-- 2. Purchase New View -->
@@ -425,6 +420,27 @@
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for payment confirmation...</p>
                         </div>
                     </div>
+                </div>
+
+                <div class="border-t border-gray-800 pt-6 mt-10">
+                    <h2 class="text-xl font-bold text-white mb-2">Import Existing Config</h2>
+                    <p class="text-sm text-gray-400 mb-6">Already have a TunnelSats config from the website? Paste it
+                        below to apply it to your node.</p>
+
+                    <textarea id="config-text" rows="8"
+                        class="w-full bg-gray-900 border border-gray-700 text-tsgreen font-mono text-sm rounded-xl p-5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen transition-all shadow-inner scrollbar-hide"
+                        placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."></textarea>
+
+                    <button id="btn-import-config"
+                        class="mt-6 w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
+                        <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4">
+                            </path>
+                        </svg>
+                        <span>Import</span>
+                    </button>
+                    <p id="import-msg" class="text-center mt-4 text-sm font-semibold"></p>
                 </div>
             </section>
 
@@ -596,7 +612,8 @@
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Configure Lightning Node</h2>
                     <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats
-                        forwarding host.</p>
+                        forwarding host. This step applies the WireGuard configuration to your node and restarts the
+                        necessary containers so your Lightning node connects through the secure TunnelSats network.</p>
 
                     <div class="grid grid-cols-2 gap-3 mb-4">
                         <button id="node-type-lnd" type="button"
@@ -617,26 +634,6 @@
                     <p id="configure-node-msg" class="text-center mt-3 text-sm font-semibold"></p>
                 </div>
 
-                <div class="border-t border-gray-800 pt-6">
-                    <h2 class="text-xl font-bold text-white mb-2">Import Existing Config</h2>
-                    <p class="text-sm text-gray-400 mb-6">Already have a TunnelSats config from the website? Paste it
-                        below to apply it to your node.</p>
-
-                    <textarea id="config-text" rows="8"
-                        class="w-full bg-gray-900 border border-gray-700 text-tsgreen font-mono text-sm rounded-xl p-5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen transition-all shadow-inner scrollbar-hide"
-                        placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."></textarea>
-
-                    <button id="btn-import-config"
-                        class="mt-6 w-full relative overflow-hidden group bg-gradient-to-r from-tsyellow to-yellow-500 hover:from-yellow-400 hover:to-yellow-300 text-black font-bold py-4 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.2)] hover:shadow-[0_0_25px_rgba(250,204,21,0.5)] transition-all duration-300 transform hover:-translate-y-0.5 flex items-center justify-center space-x-2">
-                        <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4">
-                            </path>
-                        </svg>
-                        <span>Import</span>
-                    </button>
-                    <p id="import-msg" class="text-center mt-4 text-sm font-semibold"></p>
-                </div>
             </section>
 
             <!-- 5. Uninstall / Restore View -->
@@ -712,17 +709,10 @@
                                         stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
-                                    </svg> 5. Why does CLN use port 9736 internally?</a></li>
+                                    </svg> 5. How do I safely uninstall the TunnelSats App on Umbrel?</a></li>
                             <li><a href="#faq-6"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-6"><svg class="w-4 h-4 text-gray-500" fill="none"
-                                        stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                            d="M9 5l7 7-7 7"></path>
-                                    </svg> 6. How do I safely uninstall the TunnelSats App on Umbrel?</a></li>
-                            <li><a href="#faq-7"
-                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
-                                    data-scroll-to="faq-7"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
@@ -768,7 +758,8 @@
                                 <p><strong class="text-white">Yes!</strong> The TunnelSats background daemon polls the
                                     <code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">data/</code>
-                                    directory every 30 seconds.</p>
+                                    directory every 30 seconds.
+                                </p>
                                 <p>If you drop a new <code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">.conf</code>
                                     file via SSH, the daemon will automatically detect it during its next periodic
@@ -777,16 +768,6 @@
                                     to apply the new cryptographic keys and endpoints mid-flight, meaning <strong>your
                                         Lightning node container does not need to be restarted</strong> and your routing
                                     won't even drop.</p>
-                                <div
-                                    class="bg-blue-900/10 border border-blue-500/30 border-l-2 border-l-blue-500 p-3 rounded text-blue-300 mt-2 shadow-sm">
-                                    <span class="font-bold flex items-center gap-1.5 mb-1.5 text-blue-400"><svg
-                                            class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                        </svg> Note</span>
-                                    You no longer need to press a "Reconcile" button in the dashboard, just drop the
-                                    file and wait up to 30 seconds.
-                                </div>
                             </div>
                         </div>
 
@@ -798,13 +779,15 @@
                                 <p>The dashboard uses our internal <strong>Dataplane API</strong>. You can query this
                                     directly via SSH to debug your network state:</p>
                                 <div
-                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">curl -s http://umbrel.lan:9739/api/local/status | jq</div>
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
+                                    curl -s http://umbrel.lan:9739/api/local/status | jq</div>
                                 <p>This returns a JSON payload containing the active WireGuard endpoint, internal
                                     routing metrics, and any failure logs (<code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">last_error</code>).
                                     To check the live WireGuard handshake:</p>
                                 <div
-                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">docker exec tunnelsats wg show</div>
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
+                                    docker exec tunnelsats wg show</div>
                             </div>
                         </div>
 
@@ -831,32 +814,12 @@
 
                         <!-- Q5 -->
                         <div id="faq-5" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
-                            <h3 class="text-white font-bold mb-2 text-base">5. Why does CLN use port 9736 internally?
-                            </h3>
-                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
-                                <p>When TunnelSats detects CLN, it handles two distinct ports:</p>
-                                <ul class="list-disc pl-5 space-y-2 marker:text-blue-400">
-                                    <li><strong class="text-white">Internal (9736):</strong> This is the local bind port
-                                        required by the Umbrel architecture. It is used for local communication inside
-                                        the Docker network.</li>
-                                    <li><strong class="text-white">External (VPN Port):</strong> This is the port
-                                        assigned by your TunnelSats subscription (e.g., 39486). This port is gossiped to
-                                        the network so other nodes can reach you.</li>
-                                </ul>
-                                <p>TunnelSats handles this mapping automatically—you do not need to manually change your
-                                    CLN <code
-                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">bind-addr</code>.
-                                </p>
-                            </div>
-                        </div>
-
-                        <!-- Q6 -->
-                        <div id="faq-6" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
-                            <h3 class="text-white font-bold mb-2 text-base">6. How do I safely uninstall the TunnelSats
+                            <h3 class="text-white font-bold mb-2 text-base">5. How do I safely uninstall the TunnelSats
                                 App on Umbrel?</h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p>To prevent network routing issues with your Lightning node, you must perform a
-                                    <strong class="text-red-400">two-step uninstall process</strong>.</p>
+                                    <strong class="text-red-400">two-step uninstall process</strong>.
+                                </p>
                                 <p>Because of how Umbrel isolates applications, simply clicking "Uninstall" in the
                                     Umbrel App Store immediately kills the TunnelSats background processes. If this
                                     happens while your node is still actively routing through the VPN, your Lightning
@@ -873,11 +836,11 @@
                                     <p class="mb-2">First, we must safely detach the VPN from your Lightning node and
                                         return it to its default Tor/Clearnet state.</p>
                                     <ol class="list-decimal pl-5 space-y-1 text-xs">
-                                        <li>Open the <strong>TunnelSats App</strong> from your Umbrel dashboard.</li>
-                                        <li>Locate the <strong>Node Routing Status</strong> section.</li>
-                                        <li>Click the <strong>Disable Routing (Uninstall)</strong> button.</li>
-                                        <li>Wait for the UI to confirm that your node has been successfully restored to
-                                            its default routing state.</li>
+                                        <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.
+                                        </li>
+                                        <li>Click the <strong>Restore Node Networking</strong> button.</li>
+                                        <li>Wait for the UI to confirm that your node configuration has been restored to
+                                            its default state without TunnelSats routing.</li>
                                     </ol>
                                 </div>
 
@@ -893,6 +856,7 @@
                                         <li>Go to the <strong>Umbrel App Store</strong>.</li>
                                         <li>Navigate to your installed apps and locate TunnelSats.</li>
                                         <li>Click <strong>Uninstall</strong>.</li>
+                                        <li>Restart Umbrel to flush all remnant iptables rules.</li>
                                     </ol>
                                 </div>
 
@@ -914,7 +878,7 @@
                         </div>
 
                         <!-- Troubleshooting -->
-                        <div id="faq-7" class="bg-red-900/10 border border-red-500/30 rounded-lg p-5 scroll-mt-6">
+                        <div id="faq-6" class="bg-red-900/10 border border-red-500/30 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2"><svg
                                     class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1045,7 +1009,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                     </svg>
-                    <span>Purchase New</span>
+                    <span>Subscribe / Import</span>
                 </button>
                 <button id="nav-renew"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
@@ -1064,7 +1028,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
                     </svg>
-                    <span>Install / Import</span>
+                    <span>Installation</span>
                 </button>
                 <button id="nav-uninstall"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
@@ -1093,7 +1057,7 @@
                     class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsyellow transition-colors group">
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6">
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
                         </path>
                     </svg>
                     <span>Homepage</span>
@@ -1102,7 +1066,7 @@
                     class="flex items-center space-x-2 text-[10px] uppercase font-bold tracking-widest text-gray-500 hover:text-tsgreen transition-colors group">
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
                         </path>
                     </svg>
                     <span>Server Status</span>

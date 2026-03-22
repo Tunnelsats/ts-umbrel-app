@@ -8,6 +8,7 @@ const BASE_PRICE_USD = 3;
 const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
+let tsServers = [];
 
 // Local Development Mocking
 const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -62,6 +63,7 @@ async function mockFetch(url) {
             ok: true,
             body: {
                 serverId: 'de2.tunnelsats.com',
+                server_domain: 'de2.tunnelsats.com',
                 wgPublicKey: 'MOCK_WG_PUBKEY_XYZ'
             }
         };
@@ -432,7 +434,21 @@ function switchTab(tabId) {
 
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
-            document.getElementById('renew-server').value = data.serverId || 'Not found';
+            let lookupId = data.serverId;
+            if (lookupId === 'unknown' && data.server_domain) {
+                lookupId = data.server_domain;
+            }
+            let serverStr = lookupId || 'Not found';
+            
+            if (lookupId && lookupId !== 'unknown' && tsServers) {
+                const sId = lookupId.split('.')[0];
+                const prefix = sId.replace(/[0-9]/g, '');
+                const srv = tsServers.find(s => s.id === prefix || s.id === sId);
+                if (srv) {
+                    serverStr = `${srv.flag} ${srv.country} — ${srv.city}`;
+                }
+            }
+            document.getElementById('renew-server').value = serverStr;
             document.getElementById('renew-pubkey').value = data.wgPublicKey || 'Not found';
         }).catch(e => {
             console.error("Could not load metadata for renew:", e);
@@ -595,13 +611,13 @@ async function fetchStatus() {
         const bannerDots = document.getElementById('dashboard-banner-dots');
 
         if (vpnActive) {
-            bannerTitle.textContent = "Network Layer Active";
-            bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
-            bannerDots.classList.remove('hidden');
+            if (bannerTitle) bannerTitle.textContent = "Network Layer Active";
+            if (bannerText) bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
+            if (bannerDots) bannerDots.classList.remove('hidden');
         } else {
-            bannerTitle.textContent = "Hybrid Lightning Connectivity";
-            bannerText.textContent = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
-            bannerDots.classList.add('hidden');
+            if (bannerTitle) bannerTitle.textContent = "Hybrid Lightning Connectivity";
+            if (bannerText) bannerText.textContent = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";
+            if (bannerDots) bannerDots.classList.add('hidden');
         }
 
         return data;
@@ -617,6 +633,8 @@ async function fetchServers() {
         const res = await fetch('/api/servers');
         const data = await res.json();
         const servers = Array.isArray(data) ? data : (data.servers || []);
+        
+        tsServers = servers;
 
         const selBuyList = document.getElementById('buy-server-list');
         if (selBuyList) {
@@ -1229,6 +1247,7 @@ async function importConfig() {
         const data = await res.json();
         if (res.ok && data.success !== false) {
             setImportMessage(data.message || "Configuration saved and parsed.", 'success');
+            setTimeout(() => switchTab('import'), 1500);
         } else {
             setImportMessage(data.error || "Import failed.", 'error');
         }
