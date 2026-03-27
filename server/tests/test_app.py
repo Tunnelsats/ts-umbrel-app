@@ -32,6 +32,36 @@ def test_status_endpoint(client):
     data = json.loads(res.data)
     assert 'wg_status' in data
 
+
+def test_security_headers_present(client):
+    """Test that security headers (CSP, X-Frame-Options) are present on all responses."""
+    res = client.get('/')
+    assert res.status_code == 200
+    
+    # Verify Content-Security-Policy
+    csp = res.headers.get('Content-Security-Policy')
+    assert csp is not None
+    assert "default-src 'self'" in csp
+    assert "tunnelsats.com" in csp
+    assert "fonts.googleapis.com" in csp
+    
+    # Verify Defense-in-Depth headers
+    assert res.headers.get('X-Frame-Options') == 'DENY'
+    assert res.headers.get('X-Content-Type-Options') == 'nosniff'
+    assert res.headers.get('X-XSS-Protection') == '1; mode=block'
+
+
+def test_localized_vendor_assets_are_reachable(client):
+    """Test that localized 3D assets in /web/vendor are correctly served."""
+    vendor_files = [
+        '/vendor/globe.gl.min.js',
+        '/vendor/img/earth-dark.jpg',
+        '/vendor/img/earth-topology.png'
+    ]
+    for file_path in vendor_files:
+        res = client.get(file_path)
+        assert res.status_code == 200, f"Failed to reach localized asset: {file_path}"
+
 def test_proxy_fix(client):
     res = client.get('/api/local/status', environ_base={
         'REMOTE_ADDR': '127.0.0.1',
@@ -320,6 +350,39 @@ class TestServersProxy:
         data = json.loads(res.data)
         assert 'servers' in data
         assert len(data['servers']) == 2
+        
+        # Verify Enrichment
+        de = next(s for s in data['servers'] if s['id'] == 'eu-de')
+        assert de['lat'] == 49.4521  # Nuremberg default for 'de'
+        assert de['label'] == 'NUREMBERG, DE'
+        assert de['flag'] == '🇩🇪'
+
+        us = next(s for s in data['servers'] if s['id'] == 'us-east')
+        assert us['lat'] == 40.7128  # NY default for 'us'
+        assert us['label'] == 'NEW YORK, US'
+        assert us['flag'] == '🇺🇸'
+
+class TestServerEnrichment:
+    """Test the enrichment of server data with coordinates."""
+
+    def test_local_status_enrichment(self, client, data_dir):
+        # Setup metadata file
+        meta_path = os.path.join(data_dir, 'tunnelsats-meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump({
+                "serverDomain": "au1.tunnelsats.com",
+                "expiresAt": "2025-12-31T23:59:59Z",
+                "vpnPort": "42521"
+            }, f)
+        
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data['server_domain'] == "au1.tunnelsats.com"
+        assert data['lat'] == -33.8688
+        assert data['lng'] == 151.2093
+        assert data['label'] == "SYDNEY, AU"
+        assert data['flag'] == "🇦🇺"
 
 
 # --- Phase 1: Meta Endpoint Test ---

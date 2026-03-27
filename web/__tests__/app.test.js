@@ -12,6 +12,27 @@ function setupDOM() {
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
     }));
+    // Mock Globe.gl globally
+    const mockGlobe = {};
+    [
+        'backgroundColor', 'showAtmosphere', 'atmosphereColor', 'atmosphereAltitude',
+        'globeImageUrl', 'bumpImageUrl', 'pointsData', 'pointAltitude', 'pointColor',
+        'pointRadius', 'pointsTransitionDuration', 'ringsData', 'ringColor',
+        'ringMaxRadius', 'ringPropagationSpeed', 'ringRepeatPeriod', 'labelsData',
+        'labelLat', 'labelLng', 'labelText', 'labelSize', 'labelDotRadius',
+        'labelColor', 'labelResolution', 'controls', 'autoRotate', 'autoRotateSpeed',
+        'enableZoom', 'width', 'height', 'pointOfView'
+    ].forEach(method => {
+        mockGlobe[method] = jest.fn().mockReturnValue(mockGlobe);
+    });
+    // Mock controls() sub-object
+    mockGlobe.controls = jest.fn().mockReturnValue({
+        autoRotate: true,
+        autoRotateSpeed: 0.5,
+        enableZoom: false
+    });
+    // Globe() returns a function that returns mockGlobe
+    global.Globe = jest.fn().mockReturnValue(jest.fn().mockReturnValue(mockGlobe));
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
 }
 
@@ -36,6 +57,9 @@ describe('UI Routing and Initialization', () => {
                     wg_status: 'Connected',
                     wg_pubkey: 'testpubkey123',
                     server_domain: 'au1.tunnelsats.com',
+                    lat: -33.8688,
+                    lng: 151.2093,
+                    label: 'SYDNEY, AU',
                     vpn_port: 39486,
                     expires_at: '2027-03-10T12:00:00Z',
                     target_impl: 'lnd',
@@ -120,8 +144,8 @@ describe('UI Routing and Initialization', () => {
     test('fetchStatus updates DOM elements', async () => {
         await window.fetchStatus();
         expect(document.getElementById('txt-wg-status').textContent).toBe('Connected');
-        expect(document.getElementById('txt-routing-status').textContent).toBe('Routing: Secured via Tunnelsats');
-        expect(document.getElementById('badge-routing').textContent).toBe('Secured');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Node Routing Secured');
+        expect(document.getElementById('badge-routing').textContent).toBe('Active');
         expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('btn-dash-enable-routing').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('box-pubkey').textContent).toBe('testpubkey123');
@@ -201,8 +225,8 @@ describe('Phase 1: fetchServers', () => {
                 return Promise.resolve({
                     json: () => Promise.resolve({
                         servers: [
-                            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' },
-                            { id: 'us-east', country: 'USA', city: 'Ashburn', flag: '🇺🇸', status: 'online' }
+                            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online', lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE' },
+                            { id: 'us-east', country: 'USA', city: 'Ashburn', flag: '🇺🇸', status: 'online', lat: 40.7128, lng: -74.0060, label: 'NEW YORK, US' }
                         ]
                     }),
                     ok: true

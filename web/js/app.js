@@ -12,13 +12,6 @@ let tsServers = [];
 
 // 3D Visualization State
 let myGlobe = null;
-const TUNNELSATS_SERVERS = {
-    'au1': { lat: -33.8688, lng: 151.2093, label: 'Sydney, Australia', color: '#22c55e' },
-    'de2': { lat: 50.1109, lng: 8.6821, label: 'Frankfurt, Germany', color: '#22c55e' },
-    'fi1': { lat: 60.1695, lng: 24.9354, label: 'Helsinki, Finland', color: '#22c55e' },
-    'sg1': { lat: 1.3521, lng: 103.8198, label: 'Singapore', color: '#22c55e' },
-    'us1': { lat: 40.7128, lng: -74.0060, label: 'New York, USA', color: '#22c55e' }
-};
 
 // Local Development Mocking
 const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -116,14 +109,14 @@ function initGlobe() {
         .ringMaxRadius(5)
         .ringPropagationSpeed(1.5)
         .ringRepeatPeriod(2000)
-        // Labels: Floating city names
+        // Labels: Miniature high-tech city names
         .labelsData([])
-        .labelLat(d => d.lat)
+        .labelLat(d => d.lat - 1)
         .labelLng(d => d.lng)
         .labelText(d => d.label)
-        .labelSize(1.5)
-        .labelDotRadius(0.2)
-        .labelColor(() => '#22c55e')
+        .labelSize(1.2)
+        .labelDotRadius(0)
+        .labelColor(() => 'rgba(34, 197, 94, 0.7)') // 70% opacity
         .labelResolution(3);
 
     // Dotted projection effect
@@ -147,14 +140,18 @@ function initGlobe() {
     });
 }
 
-function updateGlobeMarker(serverDomain) {
-    if (!myGlobe || !serverDomain) return;
+function updateGlobeMarker(serverDomain, forcedCoords = null) {
+    if (!myGlobe) return;
 
-    const sId = serverDomain.split('.')[0];
-    const prefix = sId.replace(/[0-9]/g, '');
-    const coords = TUNNELSATS_SERVERS[sId] || TUNNELSATS_SERVERS[prefix];
+    let coords = forcedCoords;
+    if (!coords && serverDomain) {
+        const sId = serverDomain.split('.')[0];
+        const prefix = sId.replace(/[0-9]/g, '');
+        // Search in the dynamically loaded tsServers list
+        coords = tsServers.find(s => s.id === sId) || tsServers.find(s => s.id.startsWith(prefix));
+    }
 
-    if (coords) {
+    if (coords && coords.lat != null && coords.lng != null) {
         // Update Core Point
         myGlobe.pointsData([{
             lat: coords.lat,
@@ -172,7 +169,7 @@ function updateGlobeMarker(serverDomain) {
         myGlobe.labelsData([{
             lat: coords.lat,
             lng: coords.lng,
-            label: coords.label.toUpperCase()
+            label: coords.label
         }]);
 
         // Smooth camera transitions to the new location
@@ -660,9 +657,13 @@ async function fetchStatus() {
             boxExpirationEl.replaceChildren(document.createTextNode(expText));
         }
 
-        // Update Globe Marker
+        // Update Globe Marker for currently active VPN server
         if (data.server_domain) {
-            updateGlobeMarker(data.server_domain);
+            updateGlobeMarker(data.server_domain, {
+                lat: data.lat,
+                lng: data.lng,
+                label: data.label
+            });
         } else {
             updateGlobeMarker(null);
         }
@@ -767,7 +768,11 @@ async function fetchServers() {
                 let btn = document.createElement('button');
                 btn.type = 'button';
                 const label = `${s.flag} ${s.country} — ${s.city}`;
-                btn.addEventListener('click', () => selectOption('buy-server', s.id, label));
+                btn.addEventListener('click', () => {
+                    selectOption('buy-server', s.id, label);
+                    // Update globe when selecting a new server during buy flow
+                    updateGlobeMarker(null, s);
+                });
                 btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
                 btn.textContent = label;
                 selBuyList.appendChild(btn);
