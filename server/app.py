@@ -987,7 +987,10 @@ def serve_static(path):
 
 @app.route("/api/servers", methods=["GET"])
 def get_servers():
-    content, status_code, headers = proxy_request("GET", "servers")
+    proxy_res = proxy_request("GET", "servers")
+    if len(proxy_res) == 2:
+        return proxy_res  # Error JSON and status code
+    content, status_code, headers = proxy_res
     if status_code == 200:
         try:
             data = json.loads(content)
