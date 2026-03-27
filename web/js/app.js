@@ -62,8 +62,8 @@ async function mockFetch(url) {
         return {
             ok: true,
             body: {
-                serverId: 'de2.tunnelsats.com',
-                server_domain: 'de2.tunnelsats.com',
+                serverId: 'au1.tunnelsats.com',
+                server_domain: 'au1.tunnelsats.com',
                 wgPublicKey: 'MOCK_WG_PUBKEY_XYZ'
             }
         };
@@ -72,9 +72,19 @@ async function mockFetch(url) {
         return {
             ok: true,
             body: [
+                { id: 'au1', country: 'Australia', city: 'Sydney', flag: '🇦🇺' },
                 { id: 'de2', country: 'Germany', city: 'Frankfurt', flag: '🇩🇪' },
                 { id: 'fi1', country: 'Finland', city: 'Helsinki', flag: '🇫🇮' }
             ]
+        };
+    }
+    if (url === '/api/subscription/create') {
+        return {
+            ok: true,
+            body: {
+                payment_hash: 'mock_hash_12345',
+                payment_request: 'lnbc1mockinvoicepaythisnow1234567890abcdefghijklmnopqrstuvwxyz'
+            }
         };
     }
     return { ok: false, status: 404, body: { error: 'Not Found' } };
