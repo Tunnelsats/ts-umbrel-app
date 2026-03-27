@@ -13,12 +13,6 @@
       "version": "1.0.0",
       "source_url": "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js",
       "local_path": "web/vendor/qrcode.min.js"
-    },
-    {
-      "name": "inter-font",
-      "version": "v20",
-      "source_url": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
-      "local_path": "web/vendor/inter.css"
     }
   ]
 }
