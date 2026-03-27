@@ -183,15 +183,14 @@ touch -t 202603211000 "${BOOT_DIR}/tunnelsats.conf.bak.1"                 # newe
 touch -t 202603211100 "${BOOT_DIR}/tunnelsats.conf"                       # primary (newest)
 
 # Mock read_wg_config_path exactly as entrypoint.sh —
-# flat ls -1t glob, relying on non-recursion and timestamp order.
-# The glob "tunnelsats*.conf" also matches "tunnelsats.conf.bak" etc in some shells,
-# so we add a grep filter to be safe.
+# but with a broader glob (tunnelsats*) to catch .bak files
+# so that the grep filter is genuinely exercised.
 read_wg_config_path_boot() {
     local data_dir="$1"
     local -a files=()
-    mapfile -t files < <(ls -1t "${data_dir}"/tunnelsats*.conf 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true)
+    mapfile -t files < <(ls -1t "${data_dir}"/tunnelsats* 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true)
     if [ "${#files[@]}" -gt 1 ]; then
-        log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
+        log WARN "Multiple tunnelsats files found, using most recent: ${files[0]}"
     fi
     echo "${files[0]:-}"
 }

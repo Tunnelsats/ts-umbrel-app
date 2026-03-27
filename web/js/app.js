@@ -62,8 +62,8 @@ async function mockFetch(url) {
         return {
             ok: true,
             body: {
-                serverId: 'au1.tunnelsats.com',
-                server_domain: 'au1.tunnelsats.com',
+                serverId: 'unknown',
+                serverDomain: 'au1.tunnelsats.com',
                 wgPublicKey: 'MOCK_WG_PUBKEY_XYZ'
             }
         };
