@@ -4,8 +4,10 @@
 
 set -e
 
-MANIFEST="web/vendor/vendor.json"
-VENDOR_DIR="web/vendor"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MANIFEST="$REPO_ROOT/web/vendor/vendor.json"
+VENDOR_DIR="$REPO_ROOT/web/vendor"
 
 echo "🌍 TunnelSats Vendor Pulse-Check"
 echo "-------------------------------"
@@ -26,13 +28,13 @@ echo "$assets" | while IFS= read -r asset; do
     [ -z "$asset" ] && continue
     name=$(echo "$asset" | jq -r '.name')
     url=$(echo "$asset" | jq -r '.source_url')
-    path=$(echo "$asset" | jq -r '.local_path')
+    path="$REPO_ROOT/$(echo "$asset" | jq -r '.local_path')"
 
     echo "🔍 Checking $name..."
 
     if [ "$FORCE" == "force" ] || [ ! -f "$path" ]; then
         echo "⬇️ Downloading latest $name from $url..."
-        curl -L -s "$url" -o "$path"
+        curl -L -s --fail --show-error "$url" -o "$path"
         echo "✅ Updated $name at $path"
     else
         echo "💎 $name is already localized at $path"

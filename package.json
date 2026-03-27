@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "build:css": "tailwindcss -i web/css/input.css -o web/dist/tailwind.css --minify"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.27",
