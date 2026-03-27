@@ -10,6 +10,16 @@ let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
 
+// 3D Visualization State
+let myGlobe = null;
+const TUNNELSATS_SERVERS = {
+    'au1': { lat: -33.8688, lng: 151.2093, label: 'Sydney, Australia', color: '#22c55e' },
+    'de2': { lat: 50.1109, lng: 8.6821, label: 'Frankfurt, Germany', color: '#22c55e' },
+    'fi1': { lat: 60.1695, lng: 24.9354, label: 'Helsinki, Finland', color: '#22c55e' },
+    'sg1': { lat: 1.3521, lng: 103.8198, label: 'Singapore', color: '#22c55e' },
+    'us1': { lat: 40.7128, lng: -74.0060, label: 'New York, USA', color: '#22c55e' }
+};
+
 // Local Development Mocking
 const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
@@ -78,6 +88,70 @@ async function mockFetch(url) {
         };
     }
     return { ok: false, status: 404, body: { error: 'Not Found' } };
+}
+
+function initGlobe() {
+    const container = document.getElementById('globe-container');
+    if (!container || myGlobe) return;
+
+    // Pulse markers for the active connection
+    const markerData = [];
+
+    myGlobe = Globe()
+        (container)
+        .backgroundColor('rgba(0,0,0,0)')
+        .showAtmosphere(true)
+        .atmosphereColor('#22c55e')
+        .atmosphereAltitude(0.1)
+        .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-dark.jpg')
+        .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png')
+        .pointsData(markerData)
+        .pointAltitude(0.1)
+        .pointColor('color')
+        .pointRadius(1.5)
+        .pointsTransitionDuration(1000);
+
+    // Dotted projection effect
+    myGlobe.controls().autoRotate = true;
+    myGlobe.controls().autoRotateSpeed = 0.5;
+    myGlobe.controls().enableZoom = false;
+
+    // Optimization: Pause when tab hidden
+    document.addEventListener('visibilitychange', () => {
+        if (myGlobe) {
+            myGlobe.controls().autoRotate = document.visibilityState === 'visible';
+        }
+    });
+
+    // Resize handler
+    window.addEventListener('resize', () => {
+        if (myGlobe) {
+            myGlobe.width(container.offsetWidth);
+            myGlobe.height(container.offsetHeight);
+        }
+    });
+}
+
+function updateGlobeMarker(serverDomain) {
+    if (!myGlobe || !serverDomain) return;
+
+    const sId = serverDomain.split('.')[0];
+    const prefix = sId.replace(/[0-9]/g, '');
+    const coords = TUNNELSATS_SERVERS[sId] || TUNNELSATS_SERVERS[prefix];
+
+    if (coords) {
+        myGlobe.pointsData([{
+            lat: coords.lat,
+            lng: coords.lng,
+            size: 1.5,
+            color: '#22c55e',
+            label: coords.label
+        }]);
+        // Slow rotation towards the marker
+        myGlobe.pointOfView({ lat: coords.lat, lng: coords.lng, altitude: 2.5 }, 2000);
+    } else {
+        myGlobe.pointsData([]);
+    }
 }
 
 function toggleMobileMenu() {
@@ -301,6 +375,7 @@ function handleScrollToClick(e) {
 }
 
 function initApp() {
+    initGlobe();
     if (isAppInitialized) return;
     isAppInitialized = true;
 
@@ -551,6 +626,13 @@ async function fetchStatus() {
             boxExpirationEl.replaceChildren(document.createTextNode(expText));
         }
 
+        // Update Globe Marker
+        if (data.server_domain) {
+            updateGlobeMarker(data.server_domain);
+        } else {
+            updateGlobeMarker(null);
+        }
+
         // Update Renew IP Suffix
         if (data.vpn_internal_ip) {
             const parts = data.vpn_internal_ip.split('.');
@@ -564,10 +646,18 @@ async function fetchStatus() {
         // Note: renew-pubkey is populated via /api/local/meta on tab switch instead.
 
         const configsArr = data.configs_found || [];
-        let confs = configsArr.length > 0 ? configsArr.join(", ") : "None Detected";
         const configsEl = document.getElementById('txt-configs');
         if (configsEl) {
-            configsEl.replaceChildren(document.createTextNode(confs));
+            if (configsArr.length > 0) {
+                configsEl.replaceChildren(...configsArr.map(c => {
+                    const span = document.createElement('span');
+                    span.className = 'px-2 py-0.5 rounded border border-gray-700 bg-gray-900/50 text-xs font-mono text-gray-400';
+                    span.textContent = c;
+                    return span;
+                }));
+            } else {
+                configsEl.replaceChildren(document.createTextNode("None Detected"));
+            }
         }
 
         if (data.version) {
@@ -595,13 +685,13 @@ async function fetchStatus() {
             if (txtRoutingStatus) txtRoutingStatus.textContent = "VPN Disconnected";
         } else if (!routingActive) {
             // State 3
-            if (badgeRouting) { badgeRouting.textContent = "Unsecured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow"; }
-            if (txtRoutingStatus) txtRoutingStatus.textContent = "Routing: Default (Tor/Clearnet)";
+            if (badgeRouting) { badgeRouting.textContent = "Unsecured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow pulse-yellow"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "Hybrid Lightning Connectivity";
             if (btnDashEnable) btnDashEnable.classList.remove('hidden');
         } else {
             // State 4
-            if (badgeRouting) { badgeRouting.textContent = "Secured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-green-700 bg-green-900/50 text-tsgreen"; }
-            if (txtRoutingStatus) txtRoutingStatus.textContent = "Routing: Secured via Tunnelsats";
+            if (badgeRouting) { badgeRouting.textContent = "Active"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"; }
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "Node Routing Secured";
             if (btnDashDisable) btnDashDisable.classList.remove('hidden');
         }
 

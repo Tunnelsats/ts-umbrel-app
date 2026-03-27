@@ -7,6 +7,8 @@
     <title>TunnelSats Plugin</title>
     <!-- Use a modern font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Modern 3D Visuals -->
+    <script src="https://unpkg.com/globe.gl"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -37,11 +39,48 @@
         }
 
         .glass-panel {
-            background: rgba(15, 17, 21, 0.8);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(15, 17, 21, 0.7);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
             position: relative;
             overflow: hidden;
+        }
+
+        #globe-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+            opacity: 0.6;
+            mask-image: radial-gradient(circle at center, black 30%, transparent 80%);
+            -webkit-mask-image: radial-gradient(circle at center, black 30%, transparent 80%);
+        }
+
+        .pulse-green {
+            box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+            animation: pulse-green 2s infinite;
+        }
+
+        .pulse-yellow {
+            box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.7);
+            animation: pulse-yellow 2s infinite;
+        }
+
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+
+        @keyframes pulse-yellow {
+            0% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(250, 204, 21, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
         }
 
         .spotlight::before {
@@ -159,6 +198,10 @@
         <!-- Main Content Area -->
         <main
             class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
+            
+            <!-- 3D Globe Background -->
+            <div id="globe-container"></div>
+
             <!-- Dynamic Background Glows -->
             <div
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
@@ -186,7 +229,7 @@
                                         </path>
                                     </svg>
                                     <div id="ping-tunnel"
-                                        class="hidden w-2 h-2 bg-tsgreen rounded-full animate-ping absolute -top-1 -right-1">
+                                        class="hidden w-2 h-2 bg-tsgreen rounded-full pulse-green absolute -top-1 -right-1">
                                     </div>
                                 </div>
                                 <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
@@ -228,7 +271,7 @@
                                 <p class="text-sm font-semibold text-gray-400">Current Routing</p>
                             </div>
                             <span id="badge-routing"
-                                class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Checking...</span>
+                                class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-400 group-hover:border-blue-400/50 transition-all">Checking...</span>
                         </div>
                         <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
                             <span class="skeleton w-48 h-6"></span>
@@ -257,9 +300,8 @@
                                 </path>
                             </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Active Wireguard
-                                    Pubkey</p>
-                                <p id="box-pubkey" class="text-sm font-mono text-gray-300 truncate w-full"><span
+                                <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em]">Active Wireguard Pubkey</p>
+                                <p id="box-pubkey" class="text-xs font-mono text-gray-300 truncate w-full"><span
                                         class="skeleton w-32"></span></p>
                             </div>
                         </div>
@@ -312,8 +354,8 @@
                                 </path>
                             </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Expiration Date</p>
-                                <p id="box-expiration" class="text-sm font-semibold text-gray-300 truncate w-full"><span
+                                <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em]">Expiration Date</p>
+                                <p id="box-expiration" class="text-sm font-mono text-gray-400 truncate w-full"><span
                                         class="skeleton w-24"></span></p>
                             </div>
                         </div>
@@ -321,9 +363,9 @@
                     </div>
                 </div>
 
-                <div class="bg-gray-800/60 p-4 rounded-lg border border-gray-700 mt-6 relative z-20">
-                    <p class="text-sm text-gray-400 mb-2">Detected Configurations on Disk</p>
-                    <div id="txt-configs" class="text-sm font-mono text-gray-300">
+                <div class="bg-gray-900/60 p-4 rounded-xl border border-gray-800/50 mt-6 relative z-20 backdrop-blur-sm">
+                    <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em] mb-3">Detected Configurations on Disk</p>
+                    <div id="txt-configs" class="flex flex-wrap gap-2">
                         <span class="skeleton w-full"></span>
                     </div>
                 </div>
