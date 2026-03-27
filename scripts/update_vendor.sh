@@ -19,9 +19,9 @@ fi
 # Usage: ./scripts/update_vendor.sh [force]
 FORCE=$1
 
-assets=$(jq -c '.assets[]' "$MANIFEST")
-
-for asset in $assets; do
+# Robustly iterate over assets line-by-line to avoid fragile word-splitting
+echo "$assets" | while IFS= read -r asset; do
+    [ -z "$asset" ] && continue
     name=$(echo "$asset" | jq -r '.name')
     url=$(echo "$asset" | jq -r '.source_url')
     path=$(echo "$asset" | jq -r '.local_path')

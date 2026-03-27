@@ -140,7 +140,7 @@ function initGlobe() {
     });
 }
 
-function updateGlobeMarker(serverDomain, forcedCoords = null) {
+function updateGlobeMarker(forcedCoords = null) {
     if (!myGlobe) return;
 
     const coords = forcedCoords;
@@ -652,7 +652,7 @@ async function fetchStatus() {
 
         // Update Globe Marker for currently active VPN server
         if (data.server_domain) {
-            updateGlobeMarker(data.server_domain, {
+            updateGlobeMarker({
                 lat: data.lat,
                 lng: data.lng,
                 label: data.label
@@ -764,7 +764,7 @@ async function fetchServers() {
                 btn.addEventListener('click', () => {
                     selectOption('buy-server', s.id, label);
                     // Update globe when selecting a new server during buy flow
-                    updateGlobeMarker(null, s);
+                    updateGlobeMarker(s);
                 });
                 btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
                 btn.textContent = label;
