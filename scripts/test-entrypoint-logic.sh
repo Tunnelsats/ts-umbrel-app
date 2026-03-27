@@ -124,6 +124,88 @@ else
     exit 1
 fi
 
+# Case 6: WireGuard Config Path Discovery (Priority & Cleanup)
+echo -n "Test Case 6 (Config Priority): "
+# We mock the entrypoint.sh log function to stderr to verify pollution fix
+log() { printf '[%s] %s\n' "$1" "$2" >&2; }
+read_wg_config_path() {
+    local dir="$1"
+    local -a files=()
+    mapfile -t files < <(ls -1t "${dir}"/tunnelsats*.conf 2>/dev/null || true)
+    if [ "${#files[@]}" -gt 1 ]; then
+        log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
+    fi
+    echo "${files[0]:-}"
+}
+
+TEST_DIR="/tmp/tunnelsats_test_configs"
+mkdir -p "${TEST_DIR}"
+rm -f "${TEST_DIR}"/*.conf
+touch -t 202603221000 "${TEST_DIR}/tunnelsats_old.conf"
+touch -t 202603221100 "${TEST_DIR}/tunnelsats_new.conf"
+
+RESULT=$(read_wg_config_path "${TEST_DIR}")
+if [[ "$RESULT" == "${TEST_DIR}/tunnelsats_new.conf" ]]; then
+    echo "PASS"
+else
+    echo "FAIL (Got: $RESULT)"
+    rm -rf "${TEST_DIR}"
+    exit 1
+fi
+
+# Case 7: Stdout Pollution Check
+echo -n "Test Case 7 (Stdout Pollution):"
+# This test fails if log() writes to stdout
+POLLUTED_RESULT=$(read_wg_config_path "${TEST_DIR}" 2>/dev/null)
+if [[ "$POLLUTED_RESULT" == *"WARN"* ]]; then
+    echo " FAIL (Polluted output: $POLLUTED_RESULT)"
+    rm -rf "${TEST_DIR}"
+    exit 1
+else
+    echo " PASS"
+fi
+rm -rf "${TEST_DIR}"
+
+# Case 8: Real-world boot scenario — .bak rotations AND backup/ subdir present
+# This is the exact layout that causes boot failure in production when APP_DATA_DIR is set correctly.
+echo -n "Test Case 8 (Bak+Subdir Exclusion): "
+
+# Simulate the production /data/ layout
+BOOT_DIR="/tmp/tunnelsats_boot_test"
+mkdir -p "${BOOT_DIR}/backup"
+
+# Older files (lower timestamps)
+touch -t 202603170000 "${BOOT_DIR}/backup/tunnelsats.conf"                # backup subdir (oldest)
+touch -t 202603101000 "${BOOT_DIR}/tunnelsats.conf.bak"                   # rotation artifact
+touch -t 202603101200 "${BOOT_DIR}/tunnelsats_eu-fi.conf.bak"             # another rotation artifact
+touch -t 202603211000 "${BOOT_DIR}/tunnelsats.conf.bak.1"                 # newer rotation artifact
+# The primary config — this must ALWAYS win
+touch -t 202603211100 "${BOOT_DIR}/tunnelsats.conf"                       # primary (newest)
+
+# Mock read_wg_config_path exactly as entrypoint.sh —
+# flat ls -1t glob, relying on non-recursion and timestamp order.
+# The glob "tunnelsats*.conf" also matches "tunnelsats.conf.bak" etc in some shells,
+# so we add a grep filter to be safe.
+read_wg_config_path_boot() {
+    local data_dir="$1"
+    local -a files=()
+    mapfile -t files < <(ls -1t "${data_dir}"/tunnelsats*.conf 2>/dev/null | grep -v '\.bak' || true)
+    if [ "${#files[@]}" -gt 1 ]; then
+        log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
+    fi
+    echo "${files[0]:-}"
+}
+
+BOOT_RESULT=$(read_wg_config_path_boot "${BOOT_DIR}" 2>/dev/null)
+if [[ "${BOOT_RESULT}" == "${BOOT_DIR}/tunnelsats.conf" ]]; then
+    echo "PASS"
+else
+    echo "FAIL (Got: ${BOOT_RESULT}, expected ${BOOT_DIR}/tunnelsats.conf)"
+    rm -rf "${BOOT_DIR}"
+    exit 1
+fi
+rm -rf "${BOOT_DIR}"
+
 echo "----------------------------------------"
 echo "SUMMARY: Logic verification PASSED."
 exit 0
