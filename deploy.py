@@ -48,8 +48,8 @@ def sftp_put_dir(sftp, local_dir, remote_dir):
             sftp.put(local_path, remote_path)
 
 try:
-    print("Connecting to umbrel.lan...")
-    ssh.connect('umbrel.lan', username='umbrel', password=password, timeout=10)
+    print("Connecting to umbrel.local...")
+    ssh.connect('umbrel.local', username='umbrel', password=password, timeout=10)
     print("Starting SFTP transfer...")
     sftp = ssh.open_sftp()
     try:
@@ -104,7 +104,7 @@ try:
         print("ERROR: Remote command returned non-zero exit status.")
         sys.exit(exit_status)
     
-    print("\nSUCCESS: UI Modernization deployed to umbrel.lan")
+    print("\nSUCCESS: UI Modernization deployed to umbrel.local")
 
 except paramiko.ssh_exception.SSHException as exc:
     print("SSH error:", exc)
