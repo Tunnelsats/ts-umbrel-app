@@ -131,7 +131,7 @@ log() { printf '[%s] %s\n' "$1" "$2" >&2; }
 read_wg_config_path() {
     local dir="$1"
     local -a files=()
-    mapfile -t files < <(ls -1t "${dir}"/tunnelsats*.conf 2>/dev/null || true)
+    mapfile -t files < <(ls -1t "${dir}"/tunnelsats*.conf 2>/dev/null | grep -v '\.bak' || true)
     if [ "${#files[@]}" -gt 1 ]; then
         log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
     fi

@@ -77,7 +77,7 @@ try:
     # Phase 3: restart so the new entrypoint takes effect.
     remote_commands = [
         # Recreate with correct volume mounts
-        f'docker rm -f tunnelsats',
+        f'docker rm -f tunnelsats 2>/dev/null || true',
         f'APP_DATA_DIR={UMBREL_APP_DATA} docker compose -f {UMBREL_COMPOSE} up -d',
         # Inject our local builds (entrypoint fix, web UI, server, metadata)
         'docker cp /home/umbrel/tunnelsats-entrypoint.sh tunnelsats:/app/scripts/entrypoint.sh',
