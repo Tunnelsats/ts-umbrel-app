@@ -48,8 +48,8 @@ def sftp_put_dir(sftp, local_dir, remote_dir):
             sftp.put(local_path, remote_path)
 
 try:
-    print("Connecting to umbrel.lan...")
-    ssh.connect('umbrel.lan', username='umbrel', password=password, timeout=10)
+    print("Connecting to umbrel.local...")
+    ssh.connect('umbrel.local', username='umbrel', password=password, timeout=10)
     print("Starting SFTP transfer...")
     sftp = ssh.open_sftp()
     try:
