@@ -25,13 +25,14 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 @app.after_request
 def add_security_headers(response):
     # CSP Hardening: 
-    # - Removed external CDN origins (tailwindcss, googlefonts, etc.)
-    # - 'unsafe-eval' is retained temporarily as Globe.gl/Three.js utilizes it for performance-critical JS execution.
-    # - 'unsafe-inline' is retained for the static <style> block in index.html, as moving it to a file is a secondary refactor.
+    # - REMOVED 'unsafe-inline' by moving all configuration and CSS to external files.
+    # - 'unsafe-eval' is REQUIRED for the Globe.gl (Three.js) shader compilation and JIT rendering.
+    #   ADVISORY: While this increases the XSS surface area, it is necessary for high-performance 3D visuals.
+    #   Always prefer pre-compiled logic over eval-heavy patterns where possible.
     csp = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-eval'; "
+        "style-src 'self'; "
         "font-src 'self'; "
         "img-src 'self' data: https://*.tunnelsats.com; "
         "connect-src 'self' https://*.tunnelsats.com; "
@@ -85,21 +86,24 @@ ALLOWED_NETWORKS = (
 )
 
 
+NUREMBERG_DE = {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'}
+NEW_YORK_US = {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'}
+
 TUNNELSATS_SERVER_METADATA = {
     'au1': {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'},
     'br1': {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'},
     'de1': {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'},
-    'de2': {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'},
-    'de3': {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'},
+    'de2': NUREMBERG_DE,
+    'de3': NUREMBERG_DE,
     'fi1': {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'},
     'sg1': {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'},
-    'us1': {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'},
+    'us1': NEW_YORK_US,
     'us2': {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'},
     'us3': {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'},
     'za1': {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'},
     # Regional Defaults
-    'de': {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'},
-    'us': {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'},
+    'de': NUREMBERG_DE,
+    'us': NEW_YORK_US,
 }
 
 
