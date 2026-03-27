@@ -131,7 +131,7 @@ read_wg_config_path() {
     # Use ls -1t for flat (non-recursive), time-ordered discovery.
     # grep -v '.bak' explicitly excludes any rotation artifacts (*.conf.bak, *.conf.bak.1, etc.)
     # that server/app.py leaves in the same /data/ directory.
-    mapfile -t files < <(ls -1t /data/tunnelsats*.conf 2>/dev/null | grep -v '\.bak' || true)
+    mapfile -t files < <(ls -1t /data/tunnelsats*.conf 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true)
     if [ "${#files[@]}" -gt 1 ]; then
         log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
     fi
