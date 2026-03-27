@@ -445,8 +445,10 @@ function switchTab(tabId) {
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
             let lookupId = data.serverId;
-            if (lookupId === 'unknown' && data.server_domain) {
-                lookupId = data.server_domain;
+            // Handle naming mismatch: /api/local/meta (metadata JSON) uses camelCase.
+            const sDomain = data.serverDomain || data.server_domain;
+            if (lookupId === 'unknown' && sDomain) {
+                lookupId = sDomain;
             }
             let serverStr = lookupId || 'Not found';
             
@@ -459,7 +461,8 @@ function switchTab(tabId) {
                 }
             }
             document.getElementById('renew-server').value = serverStr;
-            document.getElementById('renew-pubkey').value = data.wgPublicKey || 'Not found';
+            // Handle naming mismatch: /api/local/meta (metadata JSON) uses camelCase.
+            document.getElementById('renew-pubkey').value = data.wgPublicKey || data.wg_pubkey || 'Not found';
         }).catch(e => {
             console.error("Could not load metadata for renew:", e);
             document.getElementById('renew-server').value = 'Error loading';
