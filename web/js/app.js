@@ -105,11 +105,26 @@ function initGlobe() {
         .atmosphereAltitude(0.1)
         .globeImageUrl('vendor/img/earth-dark.jpg')
         .bumpImageUrl('vendor/img/earth-topology.png')
+        // Markers: Small glowing core
         .pointsData(markerData)
-        .pointAltitude(0.1)
-        .pointColor('color')
-        .pointRadius(1.5)
-        .pointsTransitionDuration(1000);
+        .pointAltitude(0.01)
+        .pointColor(() => '#22c55e')
+        .pointRadius(0.5)
+        // Rings: Pulsing radar effect
+        .ringsData([])
+        .ringColor(() => '#22c55e')
+        .ringMaxRadius(5)
+        .ringPropagationSpeed(1.5)
+        .ringRepeatPeriod(2000)
+        // Labels: Floating city names
+        .labelsData([])
+        .labelLat(d => d.lat)
+        .labelLng(d => d.lng)
+        .labelText(d => d.label)
+        .labelSize(1.5)
+        .labelDotRadius(0.2)
+        .labelColor(() => '#22c55e')
+        .labelResolution(3);
 
     // Dotted projection effect
     myGlobe.controls().autoRotate = true;
@@ -140,17 +155,36 @@ function updateGlobeMarker(serverDomain) {
     const coords = TUNNELSATS_SERVERS[sId] || TUNNELSATS_SERVERS[prefix];
 
     if (coords) {
+        // Update Core Point
         myGlobe.pointsData([{
             lat: coords.lat,
             lng: coords.lng,
-            size: 1.5,
-            color: '#22c55e',
             label: coords.label
         }]);
-        // Slow rotation towards the marker
-        myGlobe.pointOfView({ lat: coords.lat, lng: coords.lng, altitude: 2.5 }, 2000);
+
+        // Update Pulsing Rings
+        myGlobe.ringsData([{
+            lat: coords.lat,
+            lng: coords.lng
+        }]);
+
+        // Update Labels
+        myGlobe.labelsData([{
+            lat: coords.lat,
+            lng: coords.lng,
+            label: coords.label.toUpperCase()
+        }]);
+
+        // Smooth camera transitions to the new location
+        myGlobe.pointOfView({ 
+            lat: coords.lat, 
+            lng: coords.lng, 
+            altitude: 2.2 
+        }, 2000);
     } else {
         myGlobe.pointsData([]);
+        myGlobe.ringsData([]);
+        myGlobe.labelsData([]);
     }
 }
 
