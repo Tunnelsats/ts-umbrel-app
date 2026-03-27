@@ -5,27 +5,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TunnelSats Plugin</title>
-    <!-- Use a modern font -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Use a modern font (Local) -->
+    <link href="vendor/inter.css" rel="stylesheet">
     <!-- Modern 3D Visuals (Local) -->
     <script src="vendor/globe.gl.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                    },
-                    colors: {
-                        tsgreen: '#22c55e',
-                        tsyellow: '#facc15',
-                        tsgray: '#0f1115',
-                    }
-                }
-            }
-        }
-    </script>
+    <script src="vendor/tailwind.min.js"></script>
+    <script src="js/tailwind-config.js"></script>
     <style>
         body {
             background-color: #0d1117;
@@ -1126,8 +1111,8 @@
         </aside>
     </div>
 
-    <!-- Logic -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <!-- Logic (Local) -->
+    <script src="vendor/qrcode.min.js"></script>
     <script src="js/app.js"></script>
     <div id="toast-container" class="fixed bottom-5 right-5 z-[200] flex flex-col gap-2 pointer-events-none"></div>
 </body>

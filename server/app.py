@@ -24,11 +24,15 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 @app.after_request
 def add_security_headers(response):
+    # CSP Hardening: 
+    # - Removed external CDN origins (tailwindcss, googlefonts, etc.)
+    # - 'unsafe-eval' is retained temporarily as Globe.gl/Three.js utilizes it for performance-critical JS execution.
+    # - 'unsafe-inline' is retained for the static <style> block in index.html, as moving it to a file is a secondary refactor.
     csp = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' cdn.tailwindcss.com; "
-        "style-src 'self' 'unsafe-inline' fonts.googleapis.com cdn.tailwindcss.com; "
-        "font-src 'self' fonts.gstatic.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
         "img-src 'self' data: https://*.tunnelsats.com; "
         "connect-src 'self' https://*.tunnelsats.com; "
         "frame-ancestors 'none'; "
@@ -37,7 +41,6 @@ def add_security_headers(response):
     response.headers['Content-Security-Policy'] = csp
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
     return response
 
 # Ensure verbose logging for container restarts is visible and unbuffered
@@ -141,6 +144,29 @@ def read_app_version():
             return normalize_version(manifest.get("version", "3.0.0"))
     except Exception:
         return "v3.0.0"
+
+def get_server_geodata(s_id):
+    """Unified lookup for server coordinates, labels and flags."""
+    if not s_id:
+        return None
+
+    # Matching Strategy: 
+    # 1. Exact match (au1)
+    # 2. Digit-stripped (us2 -> us)
+    # 3. Hyphen-split component (eu-de -> de, us-east -> us)
+    meta = TUNNELSATS_SERVER_METADATA.get(s_id)
+    if not meta:
+        prefix = re.sub(r'[0-9]', '', s_id)
+        meta = TUNNELSATS_SERVER_METADATA.get(prefix)
+
+    if not meta:
+        parts = s_id.split('-')
+        for p in parts:
+            clean_p = re.sub(r'[0-9]', '', p)
+            meta = TUNNELSATS_SERVER_METADATA.get(clean_p)
+            if meta: break
+
+    return meta
 
 
 def backup_existing_wireguard_configs(excluded_files=None):
@@ -967,24 +993,10 @@ def get_servers():
             data = json.loads(content)
             servers = data.get("servers", []) if isinstance(data, dict) else data
             
-            # Enrich with coordinates and labels
+            # Enrich with coordinates and labels using unified helper
             for s in servers:
                 s_id = s.get("id", "")
-                # Matching Strategy: 
-                # 1. Exact match (au1)
-                # 2. Digit-stripped (us2 -> us)
-                # 3. Hyphen-split component (eu-de -> de, us-east -> us)
-                meta = TUNNELSATS_SERVER_METADATA.get(s_id)
-                if not meta:
-                    prefix = re.sub(r'[0-9]', '', s_id)
-                    meta = TUNNELSATS_SERVER_METADATA.get(prefix)
-                
-                if not meta:
-                    parts = s_id.split('-')
-                    for p in parts:
-                        clean_p = re.sub(r'[0-9]', '', p)
-                        meta = TUNNELSATS_SERVER_METADATA.get(clean_p)
-                        if meta: break
+                meta = get_server_geodata(s_id)
 
                 if meta:
                     s["lat"] = meta["lat"]
@@ -1283,14 +1295,11 @@ def local_status():
             app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
             pass
 
-    # Enrich with location metadata if domain is found
+    # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
     if server_domain:
         s_id = server_domain.split(".")[0]
-        meta = TUNNELSATS_SERVER_METADATA.get(s_id)
-        if not meta:
-            prefix = re.sub(r'[0-9]', '', s_id)
-            meta = TUNNELSATS_SERVER_METADATA.get(prefix)
+        meta = get_server_geodata(s_id)
         
         if meta:
             lat = meta["lat"]

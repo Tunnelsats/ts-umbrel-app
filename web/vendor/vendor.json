@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-03-27",
+  "assets": [
+    {
+      "name": "tailwind",
+      "version": "latest",
+      "source_url": "https://cdn.tailwindcss.com",
+      "local_path": "web/vendor/tailwind.min.js"
+    },
+    {
+      "name": "globe.gl",
+      "version": "2.32.2",
+      "source_url": "https://unpkg.com/globe.gl/dist/globe.gl.min.js",
+      "local_path": "web/vendor/globe.gl.min.js"
+    },
+    {
+      "name": "three",
+      "version": "0.160.0",
+      "source_url": "https://unpkg.com/three/build/three.min.js",
+      "local_path": "web/vendor/three.min.js"
+    },
+    {
+      "name": "qrcode",
+      "version": "1.0.0",
+      "source_url": "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js",
+      "local_path": "web/vendor/qrcode.min.js"
+    },
+    {
+      "name": "inter-font",
+      "version": "v20",
+      "source_url": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+      "local_path": "web/vendor/inter.css"
+    }
+  ]
+}

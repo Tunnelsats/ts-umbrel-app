@@ -43,12 +43,11 @@ def test_security_headers_present(client):
     assert csp is not None
     assert "default-src 'self'" in csp
     assert "tunnelsats.com" in csp
-    assert "fonts.googleapis.com" in csp
+    assert "fonts.googleapis.com" not in csp
     
     # Verify Defense-in-Depth headers
     assert res.headers.get('X-Frame-Options') == 'DENY'
     assert res.headers.get('X-Content-Type-Options') == 'nosniff'
-    assert res.headers.get('X-XSS-Protection') == '1; mode=block'
 
 
 def test_localized_vendor_assets_are_reachable(client):
@@ -56,7 +55,10 @@ def test_localized_vendor_assets_are_reachable(client):
     vendor_files = [
         '/vendor/globe.gl.min.js',
         '/vendor/img/earth-dark.jpg',
-        '/vendor/img/earth-topology.png'
+        '/vendor/img/earth-topology.png',
+        '/vendor/inter.css',
+        '/vendor/tailwind.min.js',
+        '/vendor/qrcode.min.js'
     ]
     for file_path in vendor_files:
         res = client.get(file_path)

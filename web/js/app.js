@@ -143,14 +143,7 @@ function initGlobe() {
 function updateGlobeMarker(serverDomain, forcedCoords = null) {
     if (!myGlobe) return;
 
-    let coords = forcedCoords;
-    if (!coords && serverDomain) {
-        const sId = serverDomain.split('.')[0];
-        const prefix = sId.replace(/[0-9]/g, '');
-        // Search in the dynamically loaded tsServers list
-        coords = tsServers.find(s => s.id === sId) || tsServers.find(s => s.id.startsWith(prefix));
-    }
-
+    const coords = forcedCoords;
     if (coords && coords.lat != null && coords.lng != null) {
         // Update Core Point
         myGlobe.pointsData([{
