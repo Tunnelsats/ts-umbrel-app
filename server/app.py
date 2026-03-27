@@ -22,6 +22,24 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
+@app.after_request
+def add_security_headers(response):
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' cdn.tailwindcss.com; "
+        "style-src 'self' 'unsafe-inline' fonts.googleapis.com cdn.tailwindcss.com; "
+        "font-src 'self' fonts.gstatic.com; "
+        "img-src 'self' data: https://*.tunnelsats.com; "
+        "connect-src 'self' https://*.tunnelsats.com; "
+        "frame-ancestors 'none'; "
+        "object-src 'none';"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
 # Ensure verbose logging for container restarts is visible and unbuffered
 class TunnelsatsFormatter(logging.Formatter):
     def format(self, record):
