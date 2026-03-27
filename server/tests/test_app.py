@@ -57,7 +57,7 @@ def test_localized_vendor_assets_are_reachable(client):
         '/vendor/img/earth-dark.jpg',
         '/vendor/img/earth-topology.png',
         '/vendor/inter.css',
-        '/vendor/tailwind.min.js',
+        '/dist/tailwind.css',
         '/vendor/qrcode.min.js'
     ]
     for file_path in vendor_files:
