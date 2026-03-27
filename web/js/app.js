@@ -699,7 +699,10 @@ async function fetchStatus() {
         const btnDashEnable = document.getElementById('btn-dash-enable-routing');
         const btnDashDisable = document.getElementById('btn-dash-disable-routing');
 
-        if (routingActions) routingActions.classList.remove('hidden');
+        if (routingActions) {
+            routingActions.classList.remove('hidden');
+            routingActions.classList.add('flex');
+        }
         if (btnDashEnable) btnDashEnable.classList.add('hidden');
         if (btnDashDisable) btnDashDisable.classList.add('hidden');
 
@@ -731,7 +734,10 @@ async function fetchStatus() {
         if (vpnActive) {
             if (bannerTitle) bannerTitle.textContent = "Network Layer Active";
             if (bannerText) bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
-            if (bannerDots) bannerDots.classList.remove('hidden');
+            if (bannerDots) {
+                bannerDots.classList.remove('hidden');
+                bannerDots.classList.add('flex');
+            }
         } else {
             if (bannerTitle) bannerTitle.textContent = "Hybrid Lightning Connectivity";
             if (bannerText) bannerText.textContent = "TunnelSats enables privacy-preserving clearnet connectivity for your node. Keep your home IP hidden while benefiting from faster, more reliable Lightning routing.";

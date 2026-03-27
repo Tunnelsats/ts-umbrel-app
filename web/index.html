@@ -71,7 +71,7 @@
                                     </div>
                                 </div>
                                 <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
-                                <div class="flex space-x-1 ml-auto hidden" id="dashboard-banner-dots">
+                                <div class="space-x-1 ml-auto hidden" id="dashboard-banner-dots">
                                     <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping"></div>
                                     <div
                                         class="w-1.5 h-1.5 bg-tsyellow rounded-full animate-ping [animation-delay:0.3s]">
@@ -114,7 +114,7 @@
                         <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
                             <span class="skeleton w-48 h-6"></span>
                         </div>
-                        <div id="routing-actions" class="mt-6 flex space-x-3 hidden">
+                        <div id="routing-actions" class="mt-6 space-x-3 hidden">
                             <button id="btn-dash-enable-routing"
                                 class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable
                                 Routing</button>
@@ -684,7 +684,7 @@
                                     <li><strong class="text-white">Switching:</strong> <span class="font-normal">If you
                                             stop LND and start CLN, the daemon will automatically detect the change and
                                             reroute the tunnel to CLN.</span></li>
-                                    <li><strong class="text-white text-red-400">Warning:</strong> <span
+                                    <li><strong class="text-red-400">Warning:</strong> <span
                                             class="font-normal">Starting a second node while one is already tunneled may
                                             cause an IP conflict in Docker. Always stop one before starting the
                                             other.</span></li>
@@ -742,7 +742,7 @@
 
                                 <div
                                     class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
-                                    <strong class="text-gray-300 block not-italic mb-1 flex items-center gap-1.5"><svg
+                                    <strong class="text-gray-300 not-italic mb-1 flex items-center gap-1.5"><svg
                                             class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
                                             viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
