@@ -65,8 +65,8 @@ async function mockFetch(url) {
         return {
             ok: true,
             body: {
-                serverId: 'de2.tunnelsats.com',
-                server_domain: 'de2.tunnelsats.com',
+                serverId: 'unknown',
+                serverDomain: 'au1.tunnelsats.com',
                 wgPublicKey: 'MOCK_WG_PUBKEY_XYZ'
             }
         };
@@ -75,9 +75,19 @@ async function mockFetch(url) {
         return {
             ok: true,
             body: [
+                { id: 'au1', country: 'Australia', city: 'Sydney', flag: '🇦🇺' },
                 { id: 'de2', country: 'Germany', city: 'Frankfurt', flag: '🇩🇪' },
                 { id: 'fi1', country: 'Finland', city: 'Helsinki', flag: '🇫🇮' }
             ]
+        };
+    }
+    if (url === '/api/subscription/create') {
+        return {
+            ok: true,
+            body: {
+                payment_hash: 'mock_hash_12345',
+                payment_request: 'lnbc1mockinvoicepaythisnow1234567890abcdefghijklmnopqrstuvwxyz'
+            }
         };
     }
     return { ok: false, status: 404, body: { error: 'Not Found' } };
@@ -534,8 +544,10 @@ function switchTab(tabId) {
     if (tabId === 'renew') {
         fetch('/api/local/meta').then(r => r.json()).then(data => {
             let lookupId = data.serverId;
-            if (lookupId === 'unknown' && data.server_domain) {
-                lookupId = data.server_domain;
+            // Handle naming mismatch: /api/local/meta (metadata JSON) uses camelCase.
+            const sDomain = data.serverDomain || data.server_domain;
+            if (lookupId === 'unknown' && sDomain) {
+                lookupId = sDomain;
             }
             let serverStr = lookupId || 'Not found';
             
@@ -548,7 +560,8 @@ function switchTab(tabId) {
                 }
             }
             document.getElementById('renew-server').value = serverStr;
-            document.getElementById('renew-pubkey').value = data.wgPublicKey || 'Not found';
+            // Handle naming mismatch: /api/local/meta (metadata JSON) uses camelCase.
+            document.getElementById('renew-pubkey').value = data.wgPublicKey || data.wg_pubkey || 'Not found';
         }).catch(e => {
             console.error("Could not load metadata for renew:", e);
             document.getElementById('renew-server').value = 'Error loading';

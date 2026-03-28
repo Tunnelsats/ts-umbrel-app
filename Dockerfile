@@ -19,6 +19,7 @@ RUN sed -i 's/sysctl -q net.ipv4.conf.all.src_valid_mark=1/echo "Bypassing sysct
 COPY scripts/ /app/scripts/
 COPY web/ /app/web/
 COPY server/ /app/server/
+COPY umbrel-app.yml /app/
 RUN chmod +x /app/scripts/*.sh
 
 ENV WG_CONF_PATH="/data/tunnelsats*.conf"

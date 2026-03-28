@@ -56,6 +56,7 @@ try:
         # Transfer scripts
         sftp.put('scripts/entrypoint.sh', '/home/umbrel/tunnelsats-entrypoint.sh')
         sftp.put('scripts/verify-dataplane-lean.sh', '/home/umbrel/verify-dataplane-lean.sh')
+        sftp.put('umbrel-app.yml', '/home/umbrel/umbrel-app.yml')
         
         # Transfer web and server directories (UI Modernization)
         print("Syncing web directory...")
@@ -66,16 +67,29 @@ try:
         sftp.close()
 
     print("Executing Docker sync and restart...")
-    # Sync individual scripts and entire directories into the container
+
+    UMBREL_APP_DATA = '/home/umbrel/umbrel/app-data/tunnelsats'
+    UMBREL_COMPOSE  = f'{UMBREL_APP_DATA}/docker-compose.yml'
+
+    # Phase 1: recreate the container from the Umbrel-managed compose file with APP_DATA_DIR set.
+    #           This ensures /data is mounted to the correct app-data path (not the host /data root).
+    # Phase 2: inject our local artifacts into the freshly-created container via docker cp.
+    # Phase 3: restart so the new entrypoint takes effect.
     remote_commands = [
+        # Recreate with correct volume mounts
+        f'docker rm -f tunnelsats 2>/dev/null || true',
+        f'APP_DATA_DIR={UMBREL_APP_DATA} docker compose -f {UMBREL_COMPOSE} up -d',
+        # Inject our local builds (entrypoint fix, web UI, server, metadata)
         'docker cp /home/umbrel/tunnelsats-entrypoint.sh tunnelsats:/app/scripts/entrypoint.sh',
         'docker cp /home/umbrel/verify-dataplane-lean.sh tunnelsats:/app/scripts/verify-dataplane-lean.sh',
         'docker cp /home/umbrel/tunnelsats-web/. tunnelsats:/app/web/',
         'docker cp /home/umbrel/tunnelsats-server/. tunnelsats:/app/server/',
+        'docker cp /home/umbrel/umbrel-app.yml tunnelsats:/app/umbrel-app.yml',
         'docker exec tunnelsats chmod +x /app/scripts/entrypoint.sh /app/scripts/verify-dataplane-lean.sh',
-        'docker restart tunnelsats'
+        # Restart to activate the patched entrypoint
+        'docker restart tunnelsats',
     ]
-    
+
     stdin, stdout, stderr = ssh.exec_command(' && '.join(remote_commands))
 
     stdout_chunks = []
@@ -99,12 +113,12 @@ try:
     print("Restart completed with exit status:", exit_status)
     if stdout_text: print("STDOUT:", stdout_text)
     if stderr_text: print("STDERR:", stderr_text)
-    
+
     if exit_status != 0:
         print("ERROR: Remote command returned non-zero exit status.")
         sys.exit(exit_status)
-    
-    print("\nSUCCESS: UI Modernization deployed to umbrel.local")
+
+    print("\nSUCCESS: Deployed to umbrel.local (APP_DATA_DIR correctly mounted)")
 
 except paramiko.ssh_exception.SSHException as exc:
     print("SSH error:", exc)

@@ -47,7 +47,7 @@ jobs:
         run: |
           sleep 10
           docker logs tunnelsats
-          if ! docker logs tunnelsats | grep -q "Starting internal dashboard"; then
+          if ! docker logs tunnelsats 2>&1 | grep -q "Starting internal dashboard"; then
             echo "ERROR: Tunnelsats entrypoint failed to start the dashboard server."
             exit 1
           fi
