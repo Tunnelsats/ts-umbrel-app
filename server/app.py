@@ -32,7 +32,7 @@ def add_security_headers(response):
     csp = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-eval'; "
-        "style-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
         "font-src 'self'; "
         "img-src 'self' data: https://*.tunnelsats.com; "
         "connect-src 'self' https://*.tunnelsats.com; "
