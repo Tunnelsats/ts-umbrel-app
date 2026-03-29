@@ -96,58 +96,64 @@ async function mockFetch(url) {
 function initGlobe() {
     const container = document.getElementById('globe-container');
     if (!container || myGlobe) return;
+    
+    // Immediate synchronous guard to prevent race conditions during concurrent bootstrap
+    myGlobe = "initializing"; 
 
-    // Pulse markers for the active connection
-    const markerData = [];
+    // Purge any existing elements (redundant but safe)
+    container.innerHTML = "";
 
-    myGlobe = Globe()
-        (container)
-        .backgroundColor('rgba(0,0,0,0)')
-        .showAtmosphere(true)
-        .atmosphereColor('#22c55e')
-        .atmosphereAltitude(0.1)
-        .globeImageUrl('vendor/img/earth-dark.jpg')
-        .bumpImageUrl('vendor/img/earth-topology.png')
-        // Markers: Small glowing core
-        .pointsData(markerData)
-        .pointAltitude(0.01)
-        .pointColor(() => '#22c55e')
-        .pointRadius(0.5)
-        // Rings: Pulsing radar effect
-        .ringsData([])
-        .ringColor(() => '#22c55e')
-        .ringMaxRadius(5)
-        .ringPropagationSpeed(1.5)
-        .ringRepeatPeriod(2000)
-        // Labels: Miniature high-tech city names
-        .labelsData([])
-        .labelLat(d => d.lat - 1)
-        .labelLng(d => d.lng)
-        .labelText(d => d.label)
-        .labelSize(1.2)
-        .labelDotRadius(0)
-        .labelColor(() => 'rgba(34, 197, 94, 0.7)') // 70% opacity
-        .labelResolution(3);
+    try {
+        const globe = Globe()
+            (container)
+            .backgroundColor('rgba(0,0,0,0)')
+            .showAtmosphere(true)
+            .atmosphereColor('#22c55e')
+            .atmosphereAltitude(0.1)
+            .globeImageUrl('vendor/img/earth-dark.jpg')
+            .bumpImageUrl('vendor/img/earth-topology.png')
+            .pointsData([])
+            .pointAltitude(0.01)
+            .pointColor(() => '#22c55e')
+            .pointRadius(0.5)
+            .ringsData([])
+            .ringColor(() => '#22c55e')
+            .ringMaxRadius(5)
+            .ringPropagationSpeed(1.5)
+            .ringRepeatPeriod(2000)
+            .labelsData([])
+            .labelLat(d => d.lat - 1)
+            .labelLng(d => d.lng)
+            .labelText(d => d.label)
+            .labelSize(1.2)
+            .labelDotRadius(0)
+            .labelColor(() => 'rgba(34, 197, 94, 0.7)')
+            .labelResolution(3);
 
-    // Dotted projection effect
-    myGlobe.controls().autoRotate = true;
-    myGlobe.controls().autoRotateSpeed = 0.5;
-    myGlobe.controls().enableZoom = false;
+        globe.controls().autoRotate = true;
+        globe.controls().autoRotateSpeed = 0.5;
+        globe.controls().enableZoom = false;
 
-    // Optimization: Pause when tab hidden
-    document.addEventListener('visibilitychange', () => {
-        if (myGlobe) {
-            myGlobe.controls().autoRotate = document.visibilityState === 'visible';
-        }
-    });
+        myGlobe = globe;
 
-    // Resize handler
-    window.addEventListener('resize', () => {
-        if (myGlobe) {
-            myGlobe.width(container.offsetWidth);
-            myGlobe.height(container.offsetHeight);
-        }
-    });
+        // Resize handler
+        window.addEventListener('resize', () => {
+            if (myGlobe && typeof myGlobe !== 'string') {
+                myGlobe.width(container.offsetWidth);
+                myGlobe.height(container.offsetHeight);
+            }
+        });
+
+        // Optimization: Pause when tab hidden
+        document.addEventListener('visibilitychange', () => {
+            if (myGlobe && typeof myGlobe !== 'string') {
+                myGlobe.controls().autoRotate = document.visibilityState === 'visible';
+            }
+        });
+    } catch (e) {
+        console.error("Globe initialization failed:", e);
+        myGlobe = null; // Allow retry on next initApp
+    }
 }
 
 function updateGlobeMarker(forcedCoords = null) {
@@ -409,9 +415,10 @@ function handleScrollToClick(e) {
 }
 
 function initApp() {
-    initGlobe();
     if (isAppInitialized) return;
     isAppInitialized = true;
+    
+    initGlobe();
 
     setNodeType('lnd', false);
     fetchStatus();
@@ -474,9 +481,10 @@ function initApp() {
     document.addEventListener('click', window.__tsScrollToHandler);
 }
 
-document.addEventListener("DOMContentLoaded", initApp);
 if (document.readyState !== 'loading') {
     initApp();
+} else {
+    document.addEventListener("DOMContentLoaded", initApp);
 }
 
 // UI Routing
