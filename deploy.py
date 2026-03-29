@@ -118,7 +118,7 @@ try:
         print("ERROR: Remote command returned non-zero exit status.")
         sys.exit(exit_status)
 
-    print("\nSUCCESS: Deployed to umbrel.lan (APP_DATA_DIR correctly mounted)")
+    print("\nSUCCESS: Deployed to umbrel.local (APP_DATA_DIR correctly mounted)")
 
 except paramiko.ssh_exception.SSHException as exc:
     print("SSH error:", exc)

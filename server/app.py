@@ -22,6 +22,28 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
+@app.after_request
+def add_security_headers(response):
+    # CSP Hardening: 
+    # - REMOVED 'unsafe-inline' by moving all configuration and CSS to external files.
+    # - 'unsafe-eval' is REQUIRED for the Globe.gl (Three.js) shader compilation and JIT rendering.
+    #   ADVISORY: While this increases the XSS surface area, it is necessary for high-performance 3D visuals.
+    #   Always prefer pre-compiled logic over eval-heavy patterns where possible.
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-eval'; "
+        "style-src 'self'; "
+        "font-src 'self'; "
+        "img-src 'self' data: https://*.tunnelsats.com; "
+        "connect-src 'self' https://*.tunnelsats.com; "
+        "frame-ancestors 'none'; "
+        "object-src 'none';"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    return response
+
 # Ensure verbose logging for container restarts is visible and unbuffered
 class TunnelsatsFormatter(logging.Formatter):
     def format(self, record):
@@ -62,6 +84,27 @@ ALLOWED_NETWORKS = (
     ip_network("fc00::/7"),
     # NOTE: fe80::/10 (IPv6 link-local) is intentionally excluded.
 )
+
+
+NUREMBERG_DE = {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'}
+NEW_YORK_US = {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'}
+
+TUNNELSATS_SERVER_METADATA = {
+    'au1': {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'},
+    'br1': {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'},
+    'de1': {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'},
+    'de2': NUREMBERG_DE,
+    'de3': NUREMBERG_DE,
+    'fi1': {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'},
+    'sg1': {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'},
+    'us1': NEW_YORK_US,
+    'us2': {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'},
+    'us3': {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'},
+    'za1': {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'},
+    # Regional Defaults
+    'de': NUREMBERG_DE,
+    'us': NEW_YORK_US,
+}
 
 
 def client_is_allowed(remote_addr):
@@ -105,6 +148,29 @@ def read_app_version():
             return normalize_version(manifest.get("version", "3.0.0"))
     except Exception:
         return "v3.0.0"
+
+def get_server_geodata(s_id):
+    """Unified lookup for server coordinates, labels and flags."""
+    if not s_id:
+        return None
+
+    # Matching Strategy: 
+    # 1. Exact match (au1)
+    # 2. Digit-stripped (us2 -> us)
+    # 3. Hyphen-split component (eu-de -> de, us-east -> us)
+    meta = TUNNELSATS_SERVER_METADATA.get(s_id)
+    if not meta:
+        prefix = re.sub(r'[0-9]', '', s_id)
+        meta = TUNNELSATS_SERVER_METADATA.get(prefix)
+
+    if not meta:
+        parts = s_id.split('-')
+        for p in parts:
+            clean_p = re.sub(r'[0-9]', '', p)
+            meta = TUNNELSATS_SERVER_METADATA.get(clean_p)
+            if meta: break
+
+    return meta
 
 
 def backup_existing_wireguard_configs(excluded_files=None):
@@ -925,7 +991,31 @@ def serve_static(path):
 
 @app.route("/api/servers", methods=["GET"])
 def get_servers():
-    return proxy_request("GET", "servers")
+    proxy_res = proxy_request("GET", "servers")
+    if len(proxy_res) == 2:
+        return proxy_res  # Error JSON and status code
+    content, status_code, headers = proxy_res
+    if status_code == 200:
+        try:
+            data = json.loads(content)
+            servers = data.get("servers", []) if isinstance(data, dict) else data
+            
+            # Enrich with coordinates and labels using unified helper
+            for s in servers:
+                s_id = s.get("id", "")
+                meta = get_server_geodata(s_id)
+
+                if meta:
+                    s["lat"] = meta["lat"]
+                    s["lng"] = meta["lng"]
+                    s["label"] = meta["label"]
+                    if "flag" not in s:
+                        s["flag"] = meta["flag"]
+            
+            return jsonify(data), status_code, headers
+        except Exception as e:
+            app.logger.warning(f"Failed to enrich servers: {e}")
+    return content, status_code, headers
 
 
 @app.route("/api/subscription/create", methods=["POST"])
@@ -1212,6 +1302,18 @@ def local_status():
             app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
             pass
 
+    # Enrich with location metadata using unified helper
+    lat, lng, label, flag = None, None, None, None
+    if server_domain:
+        s_id = server_domain.split(".")[0]
+        meta = get_server_geodata(s_id)
+        
+        if meta:
+            lat = meta["lat"]
+            lng = meta["lng"]
+            label = meta["label"]
+            flag = meta["flag"]
+
     return jsonify(
         {
             "wg_status": wg_status,
@@ -1227,6 +1329,10 @@ def local_status():
             "lnd_routing_active": lnd_routing_active,
             "cln_routing_active": cln_routing_active,
             "server_domain": server_domain,
+            "lat": lat,
+            "lng": lng,
+            "label": label,
+            "flag": flag,
             "expires_at": expires_at,
             "vpn_port": vpn_port,
             "dataplane_mode": dataplane["dataplane_mode"],

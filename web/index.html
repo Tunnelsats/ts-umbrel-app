@@ -5,136 +5,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TunnelSats Plugin</title>
-    <!-- Use a modern font -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                    },
-                    colors: {
-                        tsgreen: '#22c55e',
-                        tsyellow: '#facc15',
-                        tsgray: '#0f1115',
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        body {
-            background-color: #0d1117;
-            color: #c9d1d9;
-        }
-
-        .tab-active {
-            border-bottom: 2px solid #facc15;
-            color: #ffffff;
-            font-weight: 600;
-        }
-
-        .glass-panel {
-            background: rgba(15, 17, 21, 0.8);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .spotlight::before {
-            content: "";
-            position: absolute;
-            inset: 0;
-            background: radial-gradient(600px at var(--mouse-x, 0px) var(--mouse-y, 0px),
-                    rgba(255, 255, 255, 0.08) 0%,
-                    transparent 100%);
-            z-index: 10;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.5s;
-        }
-
-        .spotlight:hover::before {
-            opacity: 1;
-        }
-
-        /* Hide scrollbar for Chrome, Safari and Opera */
-        .scrollbar-hide::-webkit-scrollbar {
-            display: none;
-        }
-
-        /* Hide scrollbar for IE, Edge and Firefox */
-        .scrollbar-hide {
-            -ms-overflow-style: none;
-            /* IE and Edge */
-            scrollbar-width: none;
-            /* Firefox */
-        }
-
-        .animated-gradient-text {
-            background: linear-gradient(to right, #22c55e, #facc15, #22c55e);
-            background-size: 200% auto;
-            color: transparent;
-            -webkit-background-clip: text;
-            background-clip: text;
-            animation: gradientMove 3s linear infinite;
-        }
-
-        @keyframes gradientMove {
-            to {
-                background-position: 200% center;
-            }
-        }
-
-        .skeleton {
-            display: inline-block;
-            height: 1em;
-            background-color: #374151;
-            /* gray-700 */
-            border-radius: 0.25rem;
-            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-            vertical-align: middle;
-        }
-
-        .sidebar-logo {
-            filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.5));
-        }
-
-        .main-content-mask {
-            -webkit-mask-image: linear-gradient(to bottom, black 97%, transparent 100%);
-            mask-image: linear-gradient(to bottom, black 97%, transparent 100%);
-        }
-
-        .app-shell-height {
-            height: calc(100vh - 120px);
-            height: calc(100svh - 120px);
-        }
-
-        @media (min-width: 768px) {
-            .app-shell-height {
-                height: 85vh;
-            }
-        }
-
-        .invoice-input {
-            word-break: break-all;
-        }
-
-        @keyframes pulse {
-
-            0%,
-            100% {
-                opacity: 1;
-            }
-
-            50% {
-                opacity: .5;
-            }
-        }
-    </style>
+    <!-- Use a modern font (Local) -->
+    <link href="vendor/inter.css" rel="stylesheet">
+    <!-- Modern 3D Visuals (Local) -->
+    <script src="vendor/globe.gl.min.js"></script>
+    <!-- Styles (Local) -->
+    <link href="dist/tailwind.css" rel="stylesheet">
+    <link href="css/main.css" rel="stylesheet">
 </head>
 
 <body class="min-h-screen flex flex-col items-center justify-start py-6 md:py-10 px-4 md:px-8">
@@ -159,6 +36,10 @@
         <!-- Main Content Area -->
         <main
             class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
+            
+            <!-- 3D Globe Background -->
+            <div id="globe-container"></div>
+
             <!-- Dynamic Background Glows -->
             <div
                 class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-tsgreen/10 rounded-full blur-[100px] pointer-events-none mix-blend-screen">
@@ -186,11 +67,11 @@
                                         </path>
                                     </svg>
                                     <div id="ping-tunnel"
-                                        class="hidden w-2 h-2 bg-tsgreen rounded-full animate-ping absolute -top-1 -right-1">
+                                        class="hidden w-2 h-2 bg-tsgreen rounded-full pulse-green absolute -top-1 -right-1">
                                     </div>
                                 </div>
                                 <p class="text-sm font-semibold text-gray-400">Tunnel State</p>
-                                <div class="flex space-x-1 ml-auto hidden" id="dashboard-banner-dots">
+                                <div class="space-x-1 ml-auto hidden" id="dashboard-banner-dots">
                                     <div class="w-1.5 h-1.5 bg-tsgreen rounded-full animate-ping"></div>
                                     <div
                                         class="w-1.5 h-1.5 bg-tsyellow rounded-full animate-ping [animation-delay:0.3s]">
@@ -228,12 +109,12 @@
                                 <p class="text-sm font-semibold text-gray-400">Current Routing</p>
                             </div>
                             <span id="badge-routing"
-                                class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-500">Checking...</span>
+                                class="text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 text-gray-400 group-hover:border-blue-400/50 transition-all">Checking...</span>
                         </div>
                         <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
                             <span class="skeleton w-48 h-6"></span>
                         </div>
-                        <div id="routing-actions" class="mt-6 flex space-x-3 hidden">
+                        <div id="routing-actions" class="mt-6 space-x-3 hidden">
                             <button id="btn-dash-enable-routing"
                                 class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable
                                 Routing</button>
@@ -257,9 +138,8 @@
                                 </path>
                             </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Active Wireguard
-                                    Pubkey</p>
-                                <p id="box-pubkey" class="text-sm font-mono text-gray-300 truncate w-full"><span
+                                <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em]">Active Wireguard Pubkey</p>
+                                <p id="box-pubkey" class="text-xs font-mono text-gray-300 truncate w-full"><span
                                         class="skeleton w-32"></span></p>
                             </div>
                         </div>
@@ -312,8 +192,8 @@
                                 </path>
                             </svg>
                             <div class="flex-1 overflow-hidden">
-                                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Expiration Date</p>
-                                <p id="box-expiration" class="text-sm font-semibold text-gray-300 truncate w-full"><span
+                                <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em]">Expiration Date</p>
+                                <p id="box-expiration" class="text-sm font-mono text-gray-400 truncate w-full"><span
                                         class="skeleton w-24"></span></p>
                             </div>
                         </div>
@@ -321,9 +201,9 @@
                     </div>
                 </div>
 
-                <div class="bg-gray-800/60 p-4 rounded-lg border border-gray-700 mt-6 relative z-20">
-                    <p class="text-sm text-gray-400 mb-2">Detected Configurations on Disk</p>
-                    <div id="txt-configs" class="text-sm font-mono text-gray-300">
+                <div class="bg-gray-900/60 p-4 rounded-xl border border-gray-800/50 mt-6 relative z-20 backdrop-blur-sm">
+                    <p class="text-[10px] text-gray-500 font-bold uppercase tracking-[0.1em] mb-3">Detected Configurations on Disk</p>
+                    <div id="txt-configs" class="flex flex-wrap gap-2">
                         <span class="skeleton w-full"></span>
                     </div>
                 </div>
@@ -804,7 +684,7 @@
                                     <li><strong class="text-white">Switching:</strong> <span class="font-normal">If you
                                             stop LND and start CLN, the daemon will automatically detect the change and
                                             reroute the tunnel to CLN.</span></li>
-                                    <li><strong class="text-white text-red-400">Warning:</strong> <span
+                                    <li><strong class="text-red-400">Warning:</strong> <span
                                             class="font-normal">Starting a second node while one is already tunneled may
                                             cause an IP conflict in Docker. Always stop one before starting the
                                             other.</span></li>
@@ -862,7 +742,7 @@
 
                                 <div
                                     class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
-                                    <strong class="text-gray-300 block not-italic mb-1 flex items-center gap-1.5"><svg
+                                    <strong class="text-gray-300 not-italic mb-1 flex items-center gap-1.5"><svg
                                             class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
                                             viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1084,8 +964,8 @@
         </aside>
     </div>
 
-    <!-- Logic -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <!-- Logic (Local) -->
+    <script src="vendor/qrcode.min.js"></script>
     <script src="js/app.js"></script>
     <div id="toast-container" class="fixed bottom-5 right-5 z-[200] flex flex-col gap-2 pointer-events-none"></div>
 </body>

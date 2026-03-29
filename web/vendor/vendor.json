@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-03-27",
+  "assets": [
+    {
+      "name": "globe.gl",
+      "version": "2.45.1",
+      "source_url": "https://unpkg.com/globe.gl@2.45.1/dist/globe.gl.min.js",
+      "local_path": "web/vendor/globe.gl.min.js"
+    },
+    {
+      "name": "qrcode",
+      "version": "1.0.0",
+      "source_url": "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js",
+      "local_path": "web/vendor/qrcode.min.js"
+    }
+  ]
+}
