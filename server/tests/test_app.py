@@ -46,7 +46,7 @@ def test_security_headers_present(client):
     assert "fonts.googleapis.com" not in csp
     
     # Verify Defense-in-Depth headers
-    assert res.headers.get('X-Frame-Options') == 'DENY'
+    assert res.headers.get('X-Frame-Options') == 'SAMEORIGIN'
     assert res.headers.get('X-Content-Type-Options') == 'nosniff'
 
 

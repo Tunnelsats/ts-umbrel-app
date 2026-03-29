@@ -33,13 +33,9 @@ class SecurityHeadersMiddleware:
     def __call__(self, environ, start_response):
         def custom_start_response(status, headers, exc_info=None):
             # Headers is a list of tuples (name, value)
-            new_headers = []
-            
             # 1. Strip any existing security headers to prevent duplication/intersection
             security_keys = {'content-security-policy', 'x-frame-options', 'x-content-type-options'}
-            for name, value in headers:
-                if name.lower() not in security_keys:
-                    new_headers.append((name, value))
+            new_headers = [(n, v) for n, v in headers if n.lower() not in security_keys]
 
             # 2. Define our authoritative, hardened CSP
             # - 'unsafe-eval' & 'blob:': Required for Globe.gl/Three.js workers & shaders
@@ -48,7 +44,7 @@ class SecurityHeadersMiddleware:
             csp = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-eval' blob:; "
-                "script-src-elem 'self' 'unsafe-eval' blob:; "
+                "script-src-elem 'self' blob:; "
                 "style-src 'self' 'unsafe-inline'; "
                 "font-src 'self'; "
                 "img-src 'self' data: blob: https://*.tunnelsats.com; "
