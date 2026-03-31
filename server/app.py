@@ -22,27 +22,48 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-@app.after_request
-def add_security_headers(response):
-    # CSP Hardening: 
-    # - REMOVED 'unsafe-inline' by moving all configuration and CSS to external files.
-    # - 'unsafe-eval' is REQUIRED for the Globe.gl (Three.js) shader compilation and JIT rendering.
-    #   ADVISORY: While this increases the XSS surface area, it is necessary for high-performance 3D visuals.
-    #   Always prefer pre-compiled logic over eval-heavy patterns where possible.
-    csp = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval'; "
-        "style-src 'self'; "
-        "font-src 'self'; "
-        "img-src 'self' data: https://*.tunnelsats.com; "
-        "connect-src 'self' https://*.tunnelsats.com; "
-        "frame-ancestors 'none'; "
-        "object-src 'none';"
-    )
-    response.headers['Content-Security-Policy'] = csp
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    return response
+class SecurityHeadersMiddleware:
+    """
+    WSGI middleware to ensure exactly one set of security headers is sent.
+    This prevents 'Ghost' CSP policies (where browsers intersect multiple headers).
+    """
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        def custom_start_response(status, headers, exc_info=None):
+            # Headers is a list of tuples (name, value)
+            # 1. Strip any existing security headers to prevent duplication/intersection
+            security_keys = {'content-security-policy', 'x-frame-options', 'x-content-type-options'}
+            new_headers = [(n, v) for n, v in headers if n.lower() not in security_keys]
+
+            # 2. Define our authoritative, hardened CSP
+            # - 'unsafe-eval' & 'blob:': Required for Globe.gl/Three.js workers & shaders
+            # - 'unsafe-inline': Required for Globe.gl layout style injection
+            # - 'frame-ancestors self': Permits Umbrel dashboard framing
+            csp = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-eval' blob:; "
+                "script-src-elem 'self' blob:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "font-src 'self'; "
+                "img-src 'self' data: blob: https://*.tunnelsats.com; "
+                "connect-src 'self' https://*.tunnelsats.com; "
+                "worker-src 'self' blob:; "
+                "frame-ancestors 'self'; "
+                "object-src 'none';"
+            )
+
+            # 3. Append our single, canonical security headers
+            new_headers.append(('Content-Security-Policy', csp))
+            new_headers.append(('X-Frame-Options', 'SAMEORIGIN'))
+            new_headers.append(('X-Content-Type-Options', 'nosniff'))
+
+            return start_response(status, new_headers, exc_info)
+
+        return self.app(environ, custom_start_response)
+
+app.wsgi_app = SecurityHeadersMiddleware(app.wsgi_app)
 
 # Ensure verbose logging for container restarts is visible and unbuffered
 class TunnelsatsFormatter(logging.Formatter):
