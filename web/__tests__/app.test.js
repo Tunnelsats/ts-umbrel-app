@@ -6,13 +6,7 @@ const script = fs.readFileSync(path.resolve(__dirname, '../js/app.js'), 'utf8');
 
 // --- Helpers ---
 
-function setupDOM() {
-    document.documentElement.innerHTML = html.toString();
-    // Mock QRCode globally (loaded via CDN in real app)
-    global.QRCode = jest.fn().mockImplementation(() => ({
-        makeCode: jest.fn()
-    }));
-    // Mock Globe.gl globally
+function createMockGlobeInstance() {
     const mockGlobe = {};
     [
         'backgroundColor', 'showAtmosphere', 'atmosphereColor', 'atmosphereAltitude',
@@ -25,12 +19,22 @@ function setupDOM() {
     ].forEach(method => {
         mockGlobe[method] = jest.fn().mockReturnValue(mockGlobe);
     });
-    // Mock controls() sub-object
     mockGlobe.controls = jest.fn().mockReturnValue({
         autoRotate: true,
         autoRotateSpeed: 0.5,
         enableZoom: false
     });
+    return mockGlobe;
+}
+
+function setupDOM() {
+    document.documentElement.innerHTML = html.toString();
+    // Mock QRCode globally (loaded via CDN in real app)
+    global.QRCode = jest.fn().mockImplementation(() => ({
+        makeCode: jest.fn()
+    }));
+    // Mock Globe.gl globally
+    const mockGlobe = createMockGlobeInstance();
     // Globe() returns a function that returns mockGlobe
     global.Globe = jest.fn().mockReturnValue(jest.fn().mockReturnValue(mockGlobe));
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
@@ -40,6 +44,40 @@ function evalScript() {
     // In jsdom, document.readyState is already "complete", so app.js eagerly runs initApp().
     window.eval(script);
 }
+
+describe('Globe initialization resilience', () => {
+    afterEach(() => {
+        jest.useRealTimers();
+        jest.restoreAllMocks();
+    });
+
+    test('retries globe initialization after a transient failure', () => {
+        jest.useFakeTimers();
+        setupDOM();
+
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({ servers: [], wg_status: 'Disconnected' }),
+                ok: true
+            })
+        );
+
+        const mockGlobe = createMockGlobeInstance();
+        let attempts = 0;
+        global.Globe = jest.fn().mockReturnValue(jest.fn().mockImplementation(() => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('transient globe init error');
+            return mockGlobe;
+        }));
+        jest.spyOn(console, 'error').mockImplementation(() => {});
+
+        evalScript();
+        expect(attempts).toBe(1);
+
+        jest.advanceTimersByTime(1000);
+        expect(attempts).toBe(2);
+    });
+});
 
 // --- Test Suites ---
 

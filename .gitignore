@@ -20,6 +20,7 @@ venv/
 *.bak
 *.bak.*
 *.md.resolved*
+.codex
 
 # Scripts/Testing Temp Files
 PR_DESCRIPTION*.md

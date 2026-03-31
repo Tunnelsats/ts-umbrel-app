@@ -12,6 +12,10 @@ let tsServers = [];
 
 // 3D Visualization State
 let myGlobe = null;
+let globeInitAttempts = 0;
+let globeInitRetryTimer = null;
+const GLOBE_INIT_MAX_ATTEMPTS = 3;
+const GLOBE_INIT_RETRY_DELAY_MS = 1000;
 
 // Local Development Mocking
 const IS_MOCK_MODE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -99,6 +103,7 @@ function initGlobe() {
     
     // Immediate synchronous guard to prevent race conditions during concurrent bootstrap
     myGlobe = "initializing"; 
+    globeInitAttempts += 1;
 
     // Purge any existing elements (redundant but safe)
     container.innerHTML = "";
@@ -135,6 +140,11 @@ function initGlobe() {
         globe.controls().enableZoom = false;
 
         myGlobe = globe;
+        globeInitAttempts = 0;
+        if (globeInitRetryTimer) {
+            clearTimeout(globeInitRetryTimer);
+            globeInitRetryTimer = null;
+        }
 
         // Resize handler
         window.addEventListener('resize', () => {
@@ -152,7 +162,13 @@ function initGlobe() {
         });
     } catch (e) {
         console.error("Globe initialization failed:", e);
-        myGlobe = null; // Allow retry on next initApp
+        myGlobe = null;
+        if (!globeInitRetryTimer && globeInitAttempts < GLOBE_INIT_MAX_ATTEMPTS) {
+            globeInitRetryTimer = setTimeout(() => {
+                globeInitRetryTimer = null;
+                initGlobe();
+            }, GLOBE_INIT_RETRY_DELAY_MS);
+        }
     }
 }
 
@@ -415,10 +431,11 @@ function handleScrollToClick(e) {
 }
 
 function initApp() {
+    // Keep globe bootstrap independent from one-time app initialization.
+    if (!myGlobe) initGlobe();
+
     if (isAppInitialized) return;
     isAppInitialized = true;
-    
-    initGlobe();
 
     setNodeType('lnd', false);
     fetchStatus();
