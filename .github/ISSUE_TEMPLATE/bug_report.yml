@@ -12,8 +12,8 @@ body:
     id: version
     attributes:
       label: TunnelSats App Version
-      description: What version of the Umbrel app are you using? e.g., v3.0.0
-      placeholder: v3.0.0
+      description: What version of the Umbrel app are you using? e.g., v3.1.0
+      placeholder: v3.1.0
     validations:
       required: true
   - type: input

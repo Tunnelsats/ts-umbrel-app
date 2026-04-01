@@ -22,6 +22,9 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
+APP_VERSION = "v3.1.0"
+APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
+
 class SecurityHeadersMiddleware:
     """
     WSGI middleware to ensure exactly one set of security headers is sent.
@@ -88,7 +91,6 @@ RECONCILE_TRIGGER_DIR = "/tmp/tunnelsats_reconcile_trigger.d"
 RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
@@ -153,22 +155,21 @@ def is_loopback_ip(remote_addr):
 def normalize_version(raw_version):
     version_text = str(raw_version or "").strip()
     if not version_text:
-        return "v3.0.0"
+        return APP_VERSION
     if version_text.startswith("v"):
         return version_text
     return f"v{version_text}"
 
 
 def read_app_version():
-    if not os.path.exists(APP_MANIFEST_PATH):
-        return "v3.0.0"
-
     try:
         with open(APP_MANIFEST_PATH, "r", encoding="utf-8") as manifest_fp:
             manifest = yaml.safe_load(manifest_fp) or {}
-            return normalize_version(manifest.get("version", "3.0.0"))
+            # Fallback to APP_VERSION if 'version' key is missing in manifest
+            return normalize_version(manifest.get("version", APP_VERSION))
     except Exception:
-        return "v3.0.0"
+        # Graceful fallback for all manifest-reading failures
+        return APP_VERSION
 
 def get_server_geodata(s_id):
     """Unified lookup for server coordinates, labels and flags."""

@@ -16,7 +16,7 @@ services:
 
   tunnelsats:
     build: .
-    image: tunnelsats/umbrel-app:v3.0.0
+    image: tunnelsats/ts-umbrel-app:v3.1.0
     container_name: tunnelsats
     restart: on-failure
     network_mode: "host"

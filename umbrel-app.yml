@@ -2,7 +2,7 @@ manifestVersion: 1
 id: tunnelsats
 category: networking
 name: Tunnelsats
-version: "3.0.0"
+version: "3.1.0"
 tagline: Secure VPN routing for your Lightning Node
 description: >-
   Tunnelsats integrates with your LND and Core Lightning apps to provide anonymous, hybrid routing over the fast WireGuard protocol.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:9739}"
 COMPOSE_TEST_FILE="docker-compose.test.yml"
-TUNNELSATS_IMAGE="${TUNNELSATS_IMAGE:-tunnelsats/umbrel-app:v3.0.0}"
+TUNNELSATS_IMAGE="${TUNNELSATS_IMAGE:-tunnelsats/ts-umbrel-app:v3.1.0}"
 
 log() {
   printf '[e2e] %s\n' "$*"
