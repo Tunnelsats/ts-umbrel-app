@@ -17,9 +17,9 @@ dependencies: []
 repo: https://github.com/Tunnelsats/ts-umbrel-app
 support: https://tunnelsats.com/join-telegram
 port: 9739
-icon: https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-vpn/icon.svg
+icon: ./icon.svg
 gallery:
-  - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-vpn/gallery-1.png
+  - ./gallery-1.png
 path: ""
 defaultUsername: ""
 defaultPassword: ""
