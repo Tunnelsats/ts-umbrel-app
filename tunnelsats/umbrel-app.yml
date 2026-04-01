@@ -19,6 +19,7 @@ support: https://tunnelsats.com/join-telegram
 port: 9739
 icon: ./icon.svg
 gallery:
+  - ./gallery-2.png
   - ./gallery-1.png
 path: ""
 defaultUsername: ""
