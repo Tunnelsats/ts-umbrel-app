@@ -1,5 +1,5 @@
 manifestVersion: 1
-id: tunnelsats-vpn
+id: tunnelsats
 category: networking
 name: Tunnelsats
 version: "3.1.0"
