@@ -15,6 +15,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Harden: Configurable hostname check (Grep ID 3032889217)
+UMBREL_HOST="${UMBREL_HOST:-umbrel.local}"
+
 usage() {
     echo "Usage: $0 [node|monorepo|vendor|version]"
     exit 1
@@ -26,15 +29,18 @@ run_node() {
     export SSHPASS="${UMBREL_PASSWORD:-}"
     if [ -z "$SSHPASS" ]; then log_error "UMBREL_PASSWORD missing"; return 1; fi
 
+    # Destination hash discovery or override
+    REPO_HASH="${UMBREL_REPO_HASH:-getumbrel-umbrel-apps-github-53f74447}"
+    
     # Sync app-stores cache
-    sshpass -e rsync -av --delete "${REPO_ROOT}/tunnelsats/" umbrel@umbrel.local:/home/umbrel/umbrel/app-stores/getumbrel-umbrel-apps-github-53f74447/tunnelsats/
+    sshpass -e rsync -av --delete "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
     
     # Sync active app-data
-    sshpass -e rsync -av "${REPO_ROOT}/docker-compose.yml" umbrel@umbrel.local:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
+    sshpass -e rsync -av "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
     
     # Optional: Sync src/server/web if needed for live-patching
     log_info "Restarting tunnelsats..."
-    sshpass -e ssh -o StrictHostKeyChecking=no umbrel@umbrel.local "umbreld client apps.restart.mutate --appId tunnelsats"
+    sshpass -e ssh -o StrictHostKeyChecking=no umbrel@${UMBREL_HOST} "umbreld client apps.restart.mutate --appId tunnelsats"
 }
 
 run_node_install() {
@@ -44,14 +50,14 @@ run_node_install() {
     
     # Login & Acquire Token
     JSON_LOGIN=$(jq -nc --arg pw "$PASSWORD" '{"0": {"password": $pw}}')
-    TOKEN=$(curl -s -X POST "http://umbrel.local/trpc/user.login?batch=1" \
+    TOKEN=$(curl -s -X POST "http://${UMBREL_HOST}/trpc/user.login?batch=1" \
           -H 'Content-Type: application/json' -d "$JSON_LOGIN" | jq -r '.[0].result.data')
     
     if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then log_error "Failed to acquire JWT"; return 1; fi
 
     # Trigger Install
     JSON_INSTALL=$(jq -nc --arg id "tunnelsats" '{"0": {"appId": $id}}')
-    curl -s -X POST "http://umbrel.local/trpc/apps.install?batch=1" \
+    curl -s -X POST "http://${UMBREL_HOST}/trpc/apps.install?batch=1" \
          -H "Authorization: Bearer ${TOKEN}" \
          -H 'Content-Type: application/json' -d "$JSON_INSTALL"
     log_info "Install triggered successfully."
@@ -60,9 +66,10 @@ run_node_install() {
 run_monorepo() {
     log_info "Synchronizing staging area to Community Monorepo..."
     SOURCE_DIR="${REPO_ROOT}/tunnelsats"
-    TARGET_DIR="/mnt/development/umbrel-apps/tunnelsats"
+    # Portability: Allow user to override monorepo target path (Grep ID 3032833386)
+    TARGET_DIR="${UMBREL_APPS_REPO:-/mnt/development/umbrel-apps}/tunnelsats"
 
-    if [[ ! -d "${TARGET_DIR}" ]]; then log_error "Target monorepo not found"; return 1; fi
+    if [[ ! -d "${TARGET_DIR}" ]]; then log_error "Target monorepo not found at ${TARGET_DIR}"; return 1; fi
 
     cp "${SOURCE_DIR}/umbrel-app.yml" "${TARGET_DIR}/"
     cp "${SOURCE_DIR}/icon.svg" "${TARGET_DIR}/"
@@ -78,6 +85,10 @@ run_vendor() {
     MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
     if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest missing"; return 1; fi
 
+    FORCE=false
+    # Restore 'force' argument (Grep ID 3032537592)
+    if [[ "$*" == *"force"* ]]; then FORCE=true; fi
+
     assets=$(jq -c '.assets[]' "$MANIFEST")
     echo "$assets" | while IFS= read -r asset; do
         [ -z "$asset" ] && continue
@@ -85,9 +96,14 @@ run_vendor() {
         url=$(echo "$asset" | jq -r '.source_url')
         path="${REPO_ROOT}/$(echo "$asset" | jq -r '.local_path')"
         
-        if [ ! -f "$path" ]; then
+        if [ "$FORCE" = true ] || [ ! -f "$path" ]; then
             log_info "Downloading $name..."
+            # Ensure target directory exists (Grep ID 3032889234)
+            mkdir -p "$(dirname "$path")"
             curl -L -s --fail "$url" -o "$path"
+            log_info "✅ Updated $name at $path"
+        else
+            log_info "💎 $name is already localized at $path (use 'force' to refresh)"
         fi
     done
 }
@@ -95,9 +111,9 @@ run_vendor() {
 run_version() {
     log_info "Validating Version Parity..."
     MANIFEST_PATH="${REPO_ROOT}/tunnelsats/umbrel-app.yml"
-    VERSION=$(grep 'version:' "$MANIFEST_PATH" | tr -d '"' | awk '{print $2}')
+    # Harden parsing: Anchor to start, allow indentation, more robust quote handling (Grep ID 3032889238)
+    VERSION=$(grep -E '^\s*version:' "$MANIFEST_PATH" | sed -E 's/^\s*version:[[:space:]]*//' | tr -d '"'\'' | awk '{print $1}')
     echo "Current Version: $VERSION"
-    # Logic from sync-version.sh...
 }
 
 case "${1:-node}" in

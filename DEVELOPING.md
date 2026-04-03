@@ -28,13 +28,13 @@ umbrel@umbrel:~/umbrel/app-data/tunnelsats$ rsync -av --delete tunnelsats/ umbre
 ### 2. Monorepo Sync
 Once validated, use the sync script to mirror the staging state to the official community monorepo:
 ```bash
-./scripts/sync-monorepo.sh
+./scripts/sync.sh monorepo
 ```
 
 ## Important Files
 
-- `scripts/test-persistence.sh`: Verifies that configuration data survives Umbrel 1.x uninstallation.
-- `scripts/verify_install.sh`: Automated health check for local/remote installations.
+- `scripts/test.sh persistence`: Verifies that configuration data survives Umbrel 1.x uninstallation.
+- `scripts/verify.sh node`: Automated health check for local/remote installations.
 - `umbrel-app.yml`: Main Umbrel app manifest (located in `tunnelsats/`).
 
 > [!IMPORTANT]

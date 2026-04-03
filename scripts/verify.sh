@@ -69,7 +69,9 @@ run_dataplane() {
 
     # 1. Outbound
     if [ -n "$LND_CONT" ]; then
-        OUTBOUND=$(docker exec "$LND_CONT" curl -sL --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+        # Use TunnelSats container for curl (guaranteed presence) via the VPN interface
+        # This resolves the 'curl missing' issue in official LND/CLN images (Grep ID 3032537592)
+        OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
         if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
             echo -e "Outbound Tunnel: ${GREEN}PASS${NC} (Verified via $VPN_IP)"
         else
