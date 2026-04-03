@@ -1667,5 +1667,4 @@ def restore_node():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("DASHBOARD_PORT", "9739"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=9739)
