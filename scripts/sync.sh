@@ -27,20 +27,24 @@ run_node() {
     log_info "Synchronizing to umbrel.local..."
     # Replacement for deploy.py using rsync
     export SSHPASS="${UMBREL_PASSWORD:-}"
-    if [ -z "$SSHPASS" ]; then log_error "UMBREL_PASSWORD missing"; return 1; fi
+    if [ -z "$SSHPASS" ] && [ -z "${UMBREL_NO_PASSWORD:-}" ]; then log_error "UMBREL_PASSWORD missing"; return 1; fi
 
     # Destination hash discovery or override
     REPO_HASH="${UMBREL_REPO_HASH:-getumbrel-umbrel-apps-github-53f74447}"
     
+    # Use passwordless SSH if explicitly allowed or password missing
+    SSH_PREFIX=""
+    if [ -n "$SSHPASS" ]; then SSH_PREFIX="sshpass -e "; fi
+
     # Sync app-stores cache
-    sshpass -e rsync -av --delete -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
+    ${SSH_PREFIX}rsync -av --delete -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
     
     # Sync active app-data
-    sshpass -e rsync -av -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
+    ${SSH_PREFIX}rsync -av -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
     
     # Optional: Sync src/server/web if needed for live-patching
     log_info "Restarting tunnelsats..."
-    sshpass -e ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} "umbreld client apps.restart.mutate --appId tunnelsats"
+    ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} "umbreld client apps.restart.mutate --appId tunnelsats"
 }
 
 run_node_install() {
