@@ -77,7 +77,7 @@ run_persistence() {
 }
 
 run_entrypoint() {
-    log_info "Running Entrypoint Logic Tests (8 Cases)..."
+    log_info "Running Entrypoint Logic Tests (9 Cases)..."
     
     if ! command -v jq &> /dev/null; then log_error "jq required"; return 1; fi
 

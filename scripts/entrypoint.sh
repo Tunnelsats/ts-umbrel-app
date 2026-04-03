@@ -835,7 +835,6 @@ if [ ! -f "/data/tunnelsats.conf" ] && [ -f "/migration_source/tunnelsats.conf" 
     log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
     # Use attribute preservation to ensure consistency (Grep ID 3033189218)
     cp -p /migration_source/tunnelsats* /data/ 2>/dev/null || true
-    cp -p /migration_source/*.bak /data/ 2>/dev/null || true
     log INFO "Migration complete. Persistence initialized."
 fi
 

@@ -29,8 +29,8 @@ run_node() {
     export SSHPASS="${UMBREL_PASSWORD:-}"
     if [ -z "$SSHPASS" ] && [ -z "${UMBREL_NO_PASSWORD:-}" ]; then log_error "UMBREL_PASSWORD missing"; return 1; fi
 
-    # Destination hash discovery or override
-    REPO_HASH="${UMBREL_REPO_HASH:-getumbrel-umbrel-apps-github-53f74447}"
+    # Destination hash discovery or override (Grep ID 3033313918)
+    REPO_HASH="${REPO_HASH:-${UMBREL_REPO_HASH:-getumbrel-umbrel-apps-github-53f74447}}"
     
     # Use passwordless SSH if explicitly allowed or password missing
     SSH_PREFIX=""
@@ -54,16 +54,16 @@ run_node_install() {
     
     # Login & Acquire Token
     JSON_LOGIN=$(jq -nc --arg pw "$PASSWORD" '{"0": {"password": $pw}}')
-    TOKEN=$(curl -s -X POST "http://${UMBREL_HOST}/trpc/user.login?batch=1" \
+    TOKEN=$(curl --max-time 15 --connect-timeout 5 -s -X POST "http://${UMBREL_HOST}/trpc/user.login?batch=1" \
           -H 'Content-Type: application/json' -d "$JSON_LOGIN" | jq -r '.[0].result.data')
     
     if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then log_error "Failed to acquire JWT"; return 1; fi
 
     # Trigger Install
-    JSON_INSTALL=$(jq -nc --arg id "tunnelsats" '{"0": {"appId": $id}}')
-    curl -s -X POST "http://${UMBREL_HOST}/trpc/apps.install?batch=1" \
-         -H "Authorization: Bearer ${TOKEN}" \
-         -H 'Content-Type: application/json' -d "$JSON_INSTALL"
+    curl --max-time 30 --connect-timeout 10 -s -X POST "http://${UMBREL_HOST}/trpc/apps.install?batch=1" \
+         -H 'Content-Type: application/json' \
+         -H "Cookie: umbrel_auth_token=${TOKEN}" \
+         -d '{"0":{"appId":"tunnelsats"}}'
     log_info "Install triggered successfully."
 }
 
