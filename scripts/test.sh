@@ -132,9 +132,9 @@ run_entrypoint() {
     [ "$(resolve_port "cln")" == "9736" ] || { log_error "Failed Case 4"; return 1; }
     log_info "Case 4 (CLN Port 9736): PASS"
 
-    # Case 5: Metadata Path Priority (Aligned with production paths in verify.sh)
-    find_meta() { local paths=("/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json" "/data/tunnelsats-meta.json"); echo "${paths[0]}"; }
-    [ "$(find_meta)" == "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" ] || { log_error "Failed Case 5"; return 1; }
+    # Case 5: Metadata Path Priority (Persistent path first, then legacy fallbacks)
+    find_meta() { local paths=("/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"); echo "${paths[0]}"; }
+    [ "$(find_meta)" == "/data/tunnelsats-meta.json" ] || { log_error "Failed Case 5"; return 1; }
     log_info "Case 5 (Meta Path): PASS"
 
     # Case 6: Config Priority
@@ -150,19 +150,19 @@ run_entrypoint() {
     log_info "Case 7 (Stdout Pollution): PASS"
     rm -rf "$T_DIR"
 
-    # Case 8: Migration Logic
+    # Case 8: Migration Logic (Wildcard config support)
     migrate() {
         local data="$1"; local mig="$2";
-        if [ ! -f "$data/tunnelsats.conf" ] && [ -f "$mig/tunnelsats.conf" ]; then
-            cp "$mig"/tunnelsats* "$data/" 2>/dev/null || true
-            cp "$mig"/*.bak "$data/" 2>/dev/null || true
+        if ! ls "${data}"/tunnelsats*.conf >/dev/null 2>&1 && ls "${mig}"/tunnelsats*.conf >/dev/null 2>&1; then
+            cp -n "${mig}"/tunnelsats*.conf "${data}/" 2>/dev/null || true
+            cp -n "${mig}"/tunnelsats*.bak* "${data}/" 2>/dev/null || true
         fi
     }
     M_DIR_DATA="/tmp/ts_m_data"; M_DIR_SRC="/tmp/ts_m_src";
     mkdir -p "$M_DIR_DATA" "$M_DIR_SRC"
-    touch "$M_DIR_SRC/tunnelsats.conf" "$M_DIR_SRC/tunnelsats.bak"
+    touch "$M_DIR_SRC/tunnelsats-v2.conf" "$M_DIR_SRC/tunnelsats-v2.conf.bak.1"
     migrate "$M_DIR_DATA" "$M_DIR_SRC"
-    [ -f "$M_DIR_DATA/tunnelsats.conf" ] && [ -f "$M_DIR_DATA/tunnelsats.bak" ] || { log_error "Failed Case 8"; rm -rf "$M_DIR_DATA" "$M_DIR_SRC"; return 1; }
+    [ -f "$M_DIR_DATA/tunnelsats-v2.conf" ] && [ -f "$M_DIR_DATA/tunnelsats-v2.conf.bak.1" ] || { log_error "Failed Case 8"; rm -rf "$M_DIR_DATA" "$M_DIR_SRC"; return 1; }
     log_info "Case 8 (Migration Logic): PASS"
     rm -rf "$M_DIR_DATA" "$M_DIR_SRC"
 

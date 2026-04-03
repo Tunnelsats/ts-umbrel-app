@@ -831,12 +831,21 @@ python3 /app/server/app.py &
 API_PID=$!
 
 # Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
-if [ ! -f "/data/tunnelsats.conf" ] && [ -f "/migration_source/tunnelsats.conf" ]; then
+if ! ls /data/tunnelsats*.conf >/dev/null 2>&1 && ls /migration_source/tunnelsats*.conf >/dev/null 2>&1; then
     log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
-    # Explicitly move primary config first, then backups to prevent stale glob skips (Grep ID 3033189218)
-    cp -p /migration_source/tunnelsats.conf /data/ 2>/dev/null || true
-    cp -p /migration_source/tunnelsats*.bak /data/ 2>/dev/null || true
-    log INFO "Migration complete. Persistence initialized."
+
+    migrated_configs=0
+    while IFS= read -r -d '' legacy_cfg; do
+        if cp -pn "${legacy_cfg}" /data/ 2>/dev/null; then
+            migrated_configs=$((migrated_configs + 1))
+        fi
+    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.conf' -print0 2>/dev/null || true)
+
+    while IFS= read -r -d '' legacy_bak; do
+        cp -pn "${legacy_bak}" /data/ 2>/dev/null || true
+    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.bak*' -print0 2>/dev/null || true)
+
+    log INFO "Migration complete. Promoted ${migrated_configs} config file(s) to persistent storage."
 fi
 
 ensure_reconcile_dirs

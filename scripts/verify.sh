@@ -24,9 +24,9 @@ usage() {
 
 # Config for dataplane
 META_PATHS=(
-    "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"
-    "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json"
     "/data/tunnelsats-meta.json"
+    "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json"
+    "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"
 )
 
 run_node_check() {
