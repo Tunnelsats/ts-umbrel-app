@@ -127,8 +127,8 @@ run_version() {
 case "${1:-node}" in
     node) run_node ;;
     node-install) run_node_install ;;
-    monorepo) run_monorepo ;;
-    vendor) run_vendor ;;
+    monorepo) shift; run_monorepo "$@" ;;
+    vendor) shift; run_vendor "$@" ;;
     version) run_version ;;
     *) usage ;;
 esac
