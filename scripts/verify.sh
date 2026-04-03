@@ -64,22 +64,13 @@ run_dataplane() {
         return 1
     fi
 
-    # Detection
-    LND_CONT=$(docker ps --format '{{.Names}}' | grep -E 'lightning_lnd_1|lnd|clightning|core-lightning|cln|lightningd' | grep -vE 'app|proxy|tor|web|ui' | head -n 1 || echo "")
-
-    # 1. Outbound
-    if [ -n "$LND_CONT" ]; then
-        # Use TunnelSats container for curl (guaranteed presence) via the VPN interface
-        # This resolves the 'curl missing' issue in official LND/CLN images (Grep ID 3032537592)
-        OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
-        if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
-            echo -e "Outbound Tunnel: ${GREEN}PASS${NC} (Verified via $VPN_IP)"
-        else
-            echo -e "Outbound Tunnel: ${RED}FAIL${NC} (Leak/Timeout: $OUTBOUND)"
-            return 1
-        fi
+    # Outbound Tunnel Verification (Independent of lightning node presence)
+    # Use TunnelSats container for curl (guaranteed presence) via the VPN interface
+    OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+    if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
+        echo -e "Outbound Tunnel: ${GREEN}PASS${NC} (Verified via $VPN_IP)"
     else
-        log_error "Lightning container not found for outbound check."
+        echo -e "Outbound Tunnel: ${RED}FAIL${NC} (Leak/Timeout: $OUTBOUND)"
         return 1
     fi
 

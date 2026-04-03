@@ -1,4 +1,4 @@
-manifestVersion: 1
+manifestVersion: 1.1
 id: tunnelsats
 category: networking
 name: Tunnelsats
@@ -17,11 +17,11 @@ dependencies: []
 repo: https://github.com/Tunnelsats/ts-umbrel-app
 support: https://tunnelsats.com/join-telegram
 port: 9739
-icon: ./icon.svg
+icon: icon.svg
 gallery:
-  - ./gallery/1.png
-  - ./gallery/2.png
-  - ./gallery/3.png
+  - gallery/1.png
+  - gallery/2.png
+  - gallery/3.png
 path: ""
 defaultUsername: ""
 defaultPassword: ""

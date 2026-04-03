@@ -132,9 +132,9 @@ run_entrypoint() {
     [ "$(resolve_port "cln")" == "9736" ] || { log_error "Failed Case 4"; return 1; }
     log_info "Case 4 (CLN Port 9736): PASS"
 
-    # Case 5: Metadata Path Priority
-    find_meta() { local paths=("/data.json" "/app.json"); echo "${paths[0]}"; }
-    [ "$(find_meta)" == "/data.json" ] || { log_error "Failed Case 5"; return 1; }
+    # Case 5: Metadata Path Priority (Aligned with production paths in verify.sh)
+    find_meta() { local paths=("/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json" "/data/tunnelsats-meta.json"); echo "${paths[0]}"; }
+    [ "$(find_meta)" == "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" ] || { log_error "Failed Case 5"; return 1; }
     log_info "Case 5 (Meta Path): PASS"
 
     # Case 6: Config Priority

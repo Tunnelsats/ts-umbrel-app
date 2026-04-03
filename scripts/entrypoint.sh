@@ -833,8 +833,9 @@ API_PID=$!
 # Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
 if [ ! -f "/data/tunnelsats.conf" ] && [ -f "/migration_source/tunnelsats.conf" ]; then
     log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
-    # Use attribute preservation to ensure consistency (Grep ID 3033189218)
-    cp -p /migration_source/tunnelsats* /data/ 2>/dev/null || true
+    # Explicitly move primary config first, then backups to prevent stale glob skips (Grep ID 3033189218)
+    cp -p /migration_source/tunnelsats.conf /data/ 2>/dev/null || true
+    cp -p /migration_source/tunnelsats*.bak /data/ 2>/dev/null || true
     log INFO "Migration complete. Persistence initialized."
 fi
 
