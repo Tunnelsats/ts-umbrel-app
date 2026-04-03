@@ -36,11 +36,11 @@ run_node() {
     sshpass -e rsync -av --delete "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
     
     # Sync active app-data
-    sshpass -e rsync -av "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
+    sshpass -e rsync -av -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
     
     # Optional: Sync src/server/web if needed for live-patching
     log_info "Restarting tunnelsats..."
-    sshpass -e ssh -o StrictHostKeyChecking=no umbrel@${UMBREL_HOST} "umbreld client apps.restart.mutate --appId tunnelsats"
+    sshpass -e ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} "umbreld client apps.restart.mutate --appId tunnelsats"
 }
 
 run_node_install() {
@@ -71,12 +71,19 @@ run_monorepo() {
 
     if [[ ! -d "${TARGET_DIR}" ]]; then log_error "Target monorepo not found at ${TARGET_DIR}"; return 1; fi
 
-    cp "${SOURCE_DIR}/umbrel-app.yml" "${TARGET_DIR}/"
+    # Decouple: Only sync metadata if explicitly requested to avoid overwriting production pinning (Grep ID 3033189212)
+    if [[ "$*" == *"--meta"* ]]; then
+        log_info "Syncing metadata (docker-compose & manifest)..."
+        cp "${SOURCE_DIR}/umbrel-app.yml" "${TARGET_DIR}/"
+        cp -L "${REPO_ROOT}/docker-compose.yml" "${TARGET_DIR}/"
+    else
+        log_info "Skipping metadata sync (Production-safe mode). Use '--meta' to force overwrite."
+    fi
+
+    # Always sync core assets
     cp "${SOURCE_DIR}/icon.svg" "${TARGET_DIR}/"
-    cp -L "${REPO_ROOT}/docker-compose.yml" "${TARGET_DIR}/"
-    
     mkdir -p "${TARGET_DIR}/gallery"
-    cp "${SOURCE_DIR}/gallery-"*.png "${TARGET_DIR}/gallery/" 2>/dev/null || true
+    cp "${SOURCE_DIR}/gallery/"*.png "${TARGET_DIR}/gallery/" 2>/dev/null || true
     log_info "Monorepo staging complete."
 }
 
@@ -100,7 +107,8 @@ run_vendor() {
             log_info "Downloading $name..."
             # Ensure target directory exists (Grep ID 3032889234)
             mkdir -p "$(dirname "$path")"
-            curl -L -s --fail "$url" -o "$path"
+            # Add network timeouts to prevent hanging (Grep ID 3033104620)
+            curl --max-time 15 --connect-timeout 5 -L -s --fail "$url" -o "$path"
             log_info "✅ Updated $name at $path"
         else
             log_info "💎 $name is already localized at $path (use 'force' to refresh)"
@@ -112,7 +120,7 @@ run_version() {
     log_info "Validating Version Parity..."
     MANIFEST_PATH="${REPO_ROOT}/tunnelsats/umbrel-app.yml"
     # Harden parsing: Anchor to start, allow indentation, more robust quote handling (Grep ID 3032889238)
-    VERSION=$(grep -E '^\s*version:' "$MANIFEST_PATH" | sed -E 's/^\s*version:[[:space:]]*//' | tr -d '"'\'' | awk '{print $1}')
+    VERSION=$(grep -E '^\s*version:' "$MANIFEST_PATH" | sed -E 's/^\s*version:[[:space:]]*//' | tr -d '"' | tr -d "'" | awk '{print $1}')
     echo "Current Version: $VERSION"
 }
 

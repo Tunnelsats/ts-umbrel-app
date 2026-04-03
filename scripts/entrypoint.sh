@@ -508,18 +508,23 @@ ensure_nat_forward_rules() {
 
     NAT_CHANGED="${changed}"
 
-    # Gemini ID 3032511338: Force rule to position 1 and harden check
-    if ! iptables -t nat -S POSTROUTING | head -n 2 | grep -F "tunnelsats-masq" | grep -F -- "-s ${DOCKER_NETWORK_SUBNET}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
-        log INFO "Ensuring TunnelSats MASQUERADE is at rule position 1 for ${WG_IFACE}..."
-        # Remove any existing instance of the rule before re-inserting at index 1
-        iptables -t nat -D POSTROUTING -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE 2>/dev/null || true
+    # Verify MASQUERADE positioning to ensure deterministic routing priority (Grep ID 3033104618)
+    # Check if the exact rule exists at position 1 (first entry in POSTROUTING)
+    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${DOCKER_NETWORK_SUBNET}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log INFO "Rule rotation: TunnelSats MASQUERADE is not at position 1. Re-positioning for ${WG_IFACE}..."
+        
+        # Non-atomic but hardened: only delete if a match exists anywhere to avoid unnecessary rule-less windows
+        if iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -qF -- "-o ${WG_IFACE}"; then
+             iptables -t nat -D POSTROUTING -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE 2>/dev/null || true
+        fi
+        
         if ! iptables -t nat -I POSTROUTING 1 -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
-            LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
+            LAST_ERROR="Failed to add/re-position MASQUERADE rule for ${WG_IFACE}"
             return 1
         fi
         NAT_CHANGED="1"
     else
-        log INFO "TunnelSats MASQUERADE rule is optimally positioned."
+        log INFO "TunnelSats MASQUERADE rule confirmed at position 1 (Optimal)."
     fi
 
     return 0
@@ -826,6 +831,15 @@ echo "Starting Tunnelsats v3 (Umbrel App)..."
 log INFO "Starting internal dashboard server on port 9739"
 python3 /app/server/app.py &
 API_PID=$!
+
+# Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
+if [ ! -f "/data/tunnelsats.conf" ] && [ -f "/migration_source/tunnelsats.conf" ]; then
+    log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
+    cp /migration_source/tunnelsats* /data/ 2>/dev/null || true
+    # Also attempt to move backup files if they exist
+    cp /migration_source/*.bak /data/ 2>/dev/null || true
+    log INFO "Migration complete. Persistence initialized."
+fi
 
 ensure_reconcile_dirs
 

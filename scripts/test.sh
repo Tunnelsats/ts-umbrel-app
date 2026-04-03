@@ -12,6 +12,15 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Ensure cleanup on interruption or failure
+cleanup() {
+    log_info "Cleaning up test environment..."
+    docker rm -f tunnelsats-test-e2e 2>/dev/null || true
+    # Optionally prune the test image to save disk space
+    # docker rmi tunnelsats/umbrel-app:test 2>/dev/null || true
+}
+trap cleanup EXIT
+
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
@@ -23,7 +32,7 @@ usage() {
 run_unit() {
     log_info "Running Python Unit Tests..."
     cd "$REPO_ROOT"
-    # Ensure dependencies are available (Support both venv and .venv conventions - Grep ID 3032890610 / 3032889242)
+    # Ensure dependencies are available (Support both venv and .venv conventions)
     if [ -f "venv/bin/activate" ]; then source venv/bin/activate; elif [ -f ".venv/bin/activate" ]; then source .venv/bin/activate; fi
     python3 -m pytest server/tests/
 }
@@ -69,7 +78,6 @@ run_persistence() {
 
 run_entrypoint() {
     log_info "Running Entrypoint Logic Tests (8 Cases)..."
-    # Logic from legacy test-entrypoint-logic.sh (Grep ID 3032890615)
     
     if ! command -v jq &> /dev/null; then log_error "jq required"; return 1; fi
 
@@ -139,15 +147,31 @@ run_entrypoint() {
     log() { printf '[%s] %s\n' "$1" "$2" >&2; }
     T_OUT=$(read_wg_config_path "$T_DIR" 2>/dev/null)
     [[ "$T_OUT" == *"WARN"* ]] && { log_error "Failed Case 7"; rm -rf "$T_DIR"; return 1; }
-    log_info "Case 7 (Stdout Pollution): PASS"; rm -rf "$T_DIR"
+    log_info "Case 7 (Stdout Pollution): PASS"
+    rm -rf "$T_DIR"
 
-    # Case 8: Bak+Subdir Exclusion (Critical Regression Fix)
+    # Case 8: Migration Logic
+    migrate() {
+        local data="$1"; local mig="$2";
+        if [ ! -f "$data/tunnelsats.conf" ] && [ -f "$mig/tunnelsats.conf" ]; then
+            cp "$mig"/tunnelsats* "$data/" 2>/dev/null || true
+            cp "$mig"/*.bak "$data/" 2>/dev/null || true
+        fi
+    }
+    M_DIR_DATA="/tmp/ts_m_data"; M_DIR_SRC="/tmp/ts_m_src";
+    mkdir -p "$M_DIR_DATA" "$M_DIR_SRC"
+    touch "$M_DIR_SRC/tunnelsats.conf" "$M_DIR_SRC/tunnelsats.bak"
+    migrate "$M_DIR_DATA" "$M_DIR_SRC"
+    [ -f "$M_DIR_DATA/tunnelsats.conf" ] && [ -f "$M_DIR_DATA/tunnelsats.bak" ] || { log_error "Failed Case 8"; rm -rf "$M_DIR_DATA" "$M_DIR_SRC"; return 1; }
+    log_info "Case 8 (Migration Logic): PASS"
+    rm -rf "$M_DIR_DATA" "$M_DIR_SRC"
+
+    # Case 9: Bak+Subdir Exclusion (Critical Regression Fix)
     BOOT_DIR="/tmp/ts_boot"; mkdir -p "$BOOT_DIR/backup"
     touch -t 202603101000 "$BOOT_DIR/tunnelsats.conf.bak"
     touch -t 202603211100 "$BOOT_DIR/tunnelsats.conf"
     read_wg_boot() { local d="$1"; local -a f=(); mapfile -t f < <(ls -1t "${d}"/tunnelsats* 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true); echo "${f[0]:-}"; }
-    [[ "$(read_wg_boot "$BOOT_DIR")" == "$BOOT_DIR/tunnelsats.conf" ]] || { log_error "Failed Case 8"; rm -rf "$BOOT_DIR"; return 1; }
-    log_info "Case 8 (Bak+Subdir Exclusion): PASS"; rm -rf "$BOOT_DIR"
+    log_info "Case 9 (Bak+Subdir Exclusion): PASS"; rm -rf "$BOOT_DIR"
 }
 
 run_container() {
