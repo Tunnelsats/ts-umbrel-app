@@ -171,6 +171,7 @@ run_entrypoint() {
     touch -t 202603101000 "$BOOT_DIR/tunnelsats.conf.bak"
     touch -t 202603211100 "$BOOT_DIR/tunnelsats.conf"
     read_wg_boot() { local d="$1"; local -a f=(); mapfile -t f < <(ls -1t "${d}"/tunnelsats* 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true); echo "${f[0]:-}"; }
+    [ "$(read_wg_boot "$BOOT_DIR")" == "$BOOT_DIR/tunnelsats.conf" ] || { log_error "Failed Case 9"; rm -rf "$BOOT_DIR"; return 1; }
     log_info "Case 9 (Bak+Subdir Exclusion): PASS"; rm -rf "$BOOT_DIR"
 }
 

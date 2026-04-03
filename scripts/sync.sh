@@ -33,7 +33,7 @@ run_node() {
     REPO_HASH="${UMBREL_REPO_HASH:-getumbrel-umbrel-apps-github-53f74447}"
     
     # Sync app-stores cache
-    sshpass -e rsync -av --delete "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
+    sshpass -e rsync -av --delete -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/tunnelsats/" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/
     
     # Sync active app-data
     sshpass -e rsync -av -e "ssh -o StrictHostKeyChecking=accept-new" "${REPO_ROOT}/docker-compose.yml" umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml
