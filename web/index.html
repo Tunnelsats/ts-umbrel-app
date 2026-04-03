@@ -38,7 +38,7 @@
             class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
             
             <!-- 3D Globe Background -->
-            <div id="globe-container"></div>
+            <div id="globe-container" class="absolute inset-0 z-0"></div>
 
             <!-- Dynamic Background Glows -->
             <div
@@ -49,7 +49,7 @@
             </div>
 
             <!-- 1. Dashboard View -->
-            <section id="view-dashboard" class="space-y-6">
+            <section id="view-dashboard" class="relative z-10 space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-white mb-4">VPN Status</h2>
                     <div class="grid grid-cols-1 gap-4">
@@ -211,7 +211,7 @@
             </section>
 
             <!-- 2. Purchase New View -->
-            <section id="view-buy" class="hidden space-y-6">
+            <section id="view-buy" class="relative z-10 hidden space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Buy New Subscription</h2>
                     <p class="text-sm text-gray-400 mb-6">Create a fresh VPN config. This will override existing
@@ -325,7 +325,7 @@
             </section>
 
             <!-- 3. Renew Target View -->
-            <section id="view-renew" class="hidden space-y-6">
+            <section id="view-renew" class="relative z-10 hidden space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Renew Existing Target</h2>
                     <p class="text-sm text-gray-400 mb-6">Extend the subscription time for your installed or previously
@@ -474,7 +474,7 @@
             </section>
 
             <!-- 4. Install / Import View -->
-            <section id="view-import" class="hidden space-y-6">
+            <section id="view-import" class="relative z-10 hidden space-y-6">
                 <!-- Pending Install Section (Only visible if a payment was just completed) -->
                 <div id="pending-install-section"
                     class="hidden bg-gray-800 shadow-inner p-6 rounded-lg border border-tsgreen mb-6">
@@ -517,7 +517,7 @@
             </section>
 
             <!-- 5. Uninstall / Restore View -->
-            <section id="view-uninstall" class="hidden space-y-6">
+            <section id="view-uninstall" class="relative z-10 hidden space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-red-500 mb-2">Uninstall TunnelSats Networking</h2>
 
@@ -535,7 +535,7 @@
             </section>
 
             <!-- 6. Help & FAQ View -->
-            <section id="view-faq" class="hidden space-y-6">
+            <section id="view-faq" class="relative z-10 hidden space-y-6">
                 <div id="faq-top">
                     <div class="flex items-center justify-between mb-4">
                         <h2 class="text-xl font-bold text-white">Frequently Asked Questions</h2>

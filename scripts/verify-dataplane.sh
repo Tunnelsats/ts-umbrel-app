@@ -1,5 +1,5 @@
 #!/bin/bash
-# TunnelSats Dataplane Verification Suite
+# TunnelSats Dataplane Verification Suite (Umbrel-Edition)
 # Professional diagnostic tool for verifying Lightning Hybrid Networking
 
 # Colors
@@ -10,40 +10,42 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Config (Placeholders - Replace with your VPN details for local dev, 
-# or ensure /app/data/tunnelsats-meta.json exists on the node)
-VPN_IP="REPLACE_WITH_VPN_IP"
-VPN_HOST="REPLACE_WITH_VPN_HOST"
-VPN_PORT="REPLACE_WITH_VPN_PORT"
+# Config (Search order for metadata)
+META_PATHS=(
+    "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"
+    "/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"
+    "/app/data/tunnelsats-meta.json"
+    "/data/tunnelsats-meta.json"
+    "./tunnelsats-meta.json"
+)
 
-# Load metadata if available
-for meta_path in \
-    "/data/tunnelsats-meta.json" \
-    "/app/data/tunnelsats-meta.json" \
-    "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
-    "/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json" \
-    "./tunnelsats-meta.json"; do
+VPN_IP=""
+VPN_HOST=""
+VPN_PORT=""
+
+# Autodetect Container Names
+TS_CONT=$(docker ps --format '{{.Names}}' | grep -E '^tunnelsats(_tunnelsats_1)?$' | head -n 1)
+LND_CONT=$(docker ps --format '{{.Names}}' | grep -E 'lightning_lnd_1|lnd|clightning|core-lightning|cln|lightningd' | grep -vE 'app|proxy|tor|web|ui' | head -n 1)
+
+# Load metadata
+for meta_path in "${META_PATHS[@]}"; do
     if [ -f "$meta_path" ] && command -v jq >/dev/null 2>&1; then
         METADATA=$(cat "$meta_path")
-        VPN_IP=$(echo "$METADATA" | jq -r '.vpn_ip // empty' | grep -m1 -oE '^[0-9.]+$' || echo "INVALID")
-        VPN_HOST=$(echo "$METADATA" | jq -r '(.vpn_host // .serverDomain // empty)' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "INVALID")
-        VPN_PORT=$(echo "$METADATA" | jq -r '(.vpn_port // .vpnPort // empty)' | grep -m1 -oE '^[0-9]+$' || echo "INVALID")
-        if [ "$VPN_IP" = "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ -n "$VPN_HOST" ]; then
-            VPN_IP=$(getent hosts "$VPN_HOST" | awk '{ print $1 }' | head -n 1 || echo "INVALID")
+        VPN_IP=$(echo "$METADATA" | jq -r '(.vpn_ip // .vpnIP // empty)' | grep -m1 -oE '^[0-9.]+$' || echo "")
+        VPN_HOST=$(echo "$METADATA" | jq -r '(.vpn_host // .serverDomain // empty)' | grep -m1 -oE '^[a-zA-Z0-9.-]+$' || echo "")
+        VPN_PORT=$(echo "$METADATA" | jq -r '(.vpn_port // .vpnPort // empty)' | grep -m1 -oE '^[0-9]+$' || echo "")
+        
+        if [ -n "$VPN_HOST" ] && [ -z "$VPN_IP" ]; then
+            VPN_IP=$(getent hosts "$VPN_HOST" | awk '{ print $1 }' | head -n 1)
         fi
-        [ "$VPN_IP" != "INVALID" ] && [ "$VPN_HOST" != "INVALID" ] && [ "$VPN_PORT" != "INVALID" ] && break
+        [ -n "$VPN_IP" ] && [ -n "$VPN_PORT" ] && break
     fi
 done
 
-if [[ "$VPN_IP" == "REPLACE_WITH_VPN_IP" || "$VPN_IP" == "INVALID" || -z "$VPN_IP" ]]; then
-    echo -e "${RED}ERROR: No VPN configuration found.${NC}"
-    echo "Please either:"
-    echo " 1. Ensure /app/data/tunnelsats-meta.json exists (standard for TunnelSats app)"
-    echo " 2. Edit this script and replace the placeholders in the Config section."
+if [ -z "$VPN_IP" ]; then
+    echo -e "${RED}ERROR: No active VPN configuration metadata found.${NC}"
     exit 1
 fi
-
-FAILED_TESTS=0
 
 header() {
     clear
@@ -57,7 +59,9 @@ header() {
     echo -e "${BLUE}                                                                ${NC}"
     echo -e "${CYAN}             TunnelSats Hybrid Data-Plane Verification          ${NC}"
     echo -e "${BLUE}================================================================${NC}"
-    echo -e "${YELLOW}Target: ${NC}${VPN_HOST} (${VPN_IP}) : ${VPN_PORT}"
+    echo -e "${YELLOW}Target: ${NC}${VPN_HOST:-UNKNOWN} (${VPN_IP}) : ${VPN_PORT}"
+    echo -e "${YELLOW}Detected TunnelSats: ${NC}${TS_CONT:-MISSING}"
+    echo -e "${YELLOW}Detected Lightning:  ${NC}${LND_CONT:-MISSING}"
     echo -e "----------------------------------------------------------------"
 }
 
@@ -68,6 +72,8 @@ footer() {
     echo -e "  • Website: ${CYAN}https://tunnelsats.com${NC}"
     echo -e "${BLUE}================================================================${NC}"
 }
+
+FAILED_TESTS=0
 
 check_result() {
     if [ $1 -eq 0 ]; then
@@ -80,13 +86,17 @@ check_result() {
 
 header
 
-# 1. Outbound Test
-echo -ne "${YELLOW}[1/3] Testing Outbound Tunnel Alignment...${NC} "
-OUTBOUND=$(docker exec tunnelsats curl -sL --interface 10.9.9.1 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
-if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
-    check_result 0 "Verified via ${VPN_IP}"
+# 1. Outbound Test (LND)
+echo -ne "${YELLOW}[1/3] Testing LND Outbound Tunnel...        ${NC} "
+if [ -n "$LND_CONT" ]; then
+    OUTBOUND=$(docker exec "$LND_CONT" curl -sL --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+    if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
+        check_result 0 "Verified via ${VPN_IP}"
+    else
+        check_result 1 "Leak Detected or Timeout (Got: ${OUTBOUND:-NONE})"
+    fi
 else
-    check_result 1 "Leak Detected or Timeout (Got: ${OUTBOUND:-NONE})"
+    check_result 1 "LND container not found"
 fi
 
 # 2. Inbound IP Test
@@ -99,16 +109,19 @@ fi
 
 # 3. Inbound Hostname Test
 echo -ne "${YELLOW}[3/3] Testing Inbound Port (via Hostname)... ${NC} "
-if timeout 5s bash -c "true > /dev/tcp/${VPN_HOST}/${VPN_PORT}" 2>/dev/null; then
-    check_result 0 "Connected to ${VPN_HOST}:${VPN_PORT}"
+if [ -n "$VPN_HOST" ]; then
+    if timeout 5s bash -c "true > /dev/tcp/${VPN_HOST}/${VPN_PORT}" 2>/dev/null; then
+        check_result 0 "Connected to ${VPN_HOST}:${VPN_PORT}"
+    else
+        check_result 1 "DNS Failure or Connection Refused"
+    fi
 else
-    check_result 1 "DNS Failure or Connection Refused"
+    check_result 1 "No VPN hostname in metadata"
 fi
 
 echo ""
 footer
 
-if [ $FAILED_TESTS -gt 0 ]; then
+if [ "${FAILED_TESTS:-0}" -gt 0 ]; then
     exit 1
 fi
-exit 0

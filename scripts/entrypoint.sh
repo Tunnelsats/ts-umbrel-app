@@ -508,13 +508,18 @@ ensure_nat_forward_rules() {
 
     NAT_CHANGED="${changed}"
 
-    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
-        log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
-        if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+    # Gemini ID 3032511338: Force rule to position 1 and harden check
+    if ! iptables -t nat -S POSTROUTING | head -n 2 | grep -F "tunnelsats-masq" | grep -F -- "-s ${DOCKER_NETWORK_SUBNET}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log INFO "Ensuring TunnelSats MASQUERADE is at rule position 1 for ${WG_IFACE}..."
+        # Remove any existing instance of the rule before re-inserting at index 1
+        iptables -t nat -D POSTROUTING -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE 2>/dev/null || true
+        if ! iptables -t nat -I POSTROUTING 1 -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
             LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
             return 1
         fi
         NAT_CHANGED="1"
+    else
+        log INFO "TunnelSats MASQUERADE rule is optimally positioned."
     fi
 
     return 0
