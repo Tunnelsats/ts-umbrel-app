@@ -16,9 +16,6 @@ Yes. The TunnelSats daemon handles dynamic reloading:
 > [!WARNING]
 > Note that applying a new configuration via the **Install** tab or using the **Restore Node Networking** function will force a restart of your Lightning node container. This is required to ensure your node's networking information is correctly broadcast to the Lightning Network.
 
-> [!WARNING]
-> Note that applying a new configuration via the **Install** tab or using the **Restore Node Networking** function will force a restart of your Lightning node container. This is required to ensure your node's networking information is correctly broadcast to the Lightning Network.
-
 ### 3. How can I verify my connection from the command line?
 The dashboard uses our internal **Dataplane API**. You can query this directly via SSH to debug your network state:
 
