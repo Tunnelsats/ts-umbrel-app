@@ -508,13 +508,21 @@ ensure_nat_forward_rules() {
 
     NAT_CHANGED="${changed}"
 
-    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
-        log INFO "Adding MASQUERADE rule for ${WG_IFACE}"
-        if ! iptables -t nat -A POSTROUTING -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
-            LAST_ERROR="Failed to add MASQUERADE rule for ${WG_IFACE}"
+    # Verify MASQUERADE positioning to ensure deterministic routing priority (Grep ID 3033104618)
+    # Check if the exact rule exists at position 1 (first entry in POSTROUTING)
+    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${DOCKER_NETWORK_SUBNET}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        log INFO "Rule rotation: TunnelSats MASQUERADE is not at position 1. Re-positioning for ${WG_IFACE}..."
+        
+        # Deterministic cleanup before re-insertion at position 1 (Grep ID 3033104618)
+        remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
+        
+        if ! iptables -t nat -I POSTROUTING 1 -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+            LAST_ERROR="Failed to add/re-position MASQUERADE rule for ${WG_IFACE}"
             return 1
         fi
         NAT_CHANGED="1"
+    else
+        log INFO "TunnelSats MASQUERADE rule confirmed at position 1 (Optimal)."
     fi
 
     return 0
@@ -821,6 +829,24 @@ echo "Starting Tunnelsats v3 (Umbrel App)..."
 log INFO "Starting internal dashboard server on port 9739"
 python3 /app/server/app.py &
 API_PID=$!
+
+# Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
+if ! ls /data/tunnelsats*.conf >/dev/null 2>&1 && ls /migration_source/tunnelsats*.conf >/dev/null 2>&1; then
+    log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
+
+    migrated_configs=0
+    while IFS= read -r -d '' legacy_cfg; do
+        if cp -pn "${legacy_cfg}" /data/ 2>/dev/null; then
+            migrated_configs=$((migrated_configs + 1))
+        fi
+    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.conf' -print0 2>/dev/null || true)
+
+    while IFS= read -r -d '' legacy_bak; do
+        cp -pn "${legacy_bak}" /data/ 2>/dev/null || true
+    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.bak*' -print0 2>/dev/null || true)
+
+    log INFO "Migration complete. Promoted ${migrated_configs} config file(s) to persistent storage."
+fi
 
 ensure_reconcile_dirs
 

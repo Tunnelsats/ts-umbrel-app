@@ -35,8 +35,8 @@ jobs:
 
       - name: Verify Entrypoint Logic (Remote CI)
         run: |
-          chmod +x scripts/test-entrypoint-logic.sh
-          ./scripts/test-entrypoint-logic.sh
+          chmod +x scripts/test.sh
+          ./scripts/test.sh entrypoint
 
       - name: Build and Start Tunnelsats
         run: |
