@@ -49,7 +49,7 @@ npm run promote
 ## Important Files
 
 - `scripts/test.sh persistence`: Verifies that configuration data survives Umbrel 1.x uninstallation.
-- `scripts/verify.sh dataplane`: Automated health check for local/remote installations (must be executed with `sudo`).
+- `tunnelsats/scripts/verify.sh dataplane`: Automated health check for local/remote installations (must be executed with `sudo`).
 - `umbrel-app.yml`: Main Umbrel app manifest (located in `tunnelsats/`).
 
 > [!IMPORTANT]

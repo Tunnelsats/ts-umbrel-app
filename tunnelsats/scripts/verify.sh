@@ -46,27 +46,31 @@ run_node_check() {
 }
 
 run_dataplane() {
-    # 1. Metadata discovery
-    VPN_IP=""
-    VPN_HOST=""
-    VPN_PORT=""
-    for p in "${META_PATHS[@]}"; do
-        if [ -f "$p" ] && command -v jq &> /dev/null; then
-            RAW_VAL=$(jq -r '(.vpn_ip // .vpnIP // .wgEndpoint // empty)' "$p" 2>/dev/null || true)
-            VPN_HOST=$(jq -r '(.vpn_host // .serverDomain // empty)' "$p" 2>/dev/null || true)
-            VPN_PORT=$(jq -r '(.vpn_port // .vpnPort // empty)' "$p" 2>/dev/null || true)
-            
-            if [ -n "$RAW_VAL" ]; then
-                DOMAIN="${RAW_VAL%%:*}"
-                if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                    VPN_IP="$DOMAIN"
-                else
-                    VPN_IP=$(getent hosts "$DOMAIN" | awk '{ print $1 }' | head -n 1 || true)
+    # 1. Metadata discovery (Global ENVs take precedence)
+    VPN_IP="${VPN_IP:-}"
+    VPN_HOST="${VPN_HOST:-}"
+    VPN_PORT="${VPN_PORT:-}"
+    
+    if [ -z "$VPN_IP" ] || [ -z "$VPN_PORT" ] || [ -z "$VPN_HOST" ]; then
+        for p in "${META_PATHS[@]}"; do
+            if [ -f "$p" ] && command -v jq &> /dev/null; then
+                RAW_VAL=$(jq -r '(.vpn_ip // .vpnIP // .wgEndpoint // empty)' "$p" 2>/dev/null || true)
+                # Only overwrite if currently empty
+                [ -z "$VPN_HOST" ] && VPN_HOST=$(jq -r '(.vpn_host // .serverDomain // empty)' "$p" 2>/dev/null || true)
+                [ -z "$VPN_PORT" ] && VPN_PORT=$(jq -r '(.vpn_port // .vpnPort // empty)' "$p" 2>/dev/null || true)
+                
+                if [ -n "$RAW_VAL" ] && [ -z "$VPN_IP" ]; then
+                    DOMAIN="${RAW_VAL%%:*}"
+                    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        VPN_IP="$DOMAIN"
+                    else
+                        VPN_IP=$(getent hosts "$DOMAIN" | awk '{ print $1 }' | head -n 1 || true)
+                    fi
                 fi
+                [ -n "$VPN_IP" ] && [ -n "$VPN_PORT" ] && [ -n "$VPN_HOST" ] && break
             fi
-            [ -n "$VPN_IP" ] && [ -n "$VPN_PORT" ] && break
-        fi
-    done
+        done
+    fi
 
     if [ -z "$VPN_IP" ] || [ -z "$VPN_PORT" ]; then
         log_error "No active VPN metadata found."
@@ -112,7 +116,7 @@ run_dataplane() {
 
     # 4. Inbound IP Test
     echo -ne "${YELLOW}[2/3] Testing Inbound Port (via IP)...         ${NC} "
-    if timeout 5s bash -c "true > /dev/tcp/${VPN_IP}/${VPN_PORT}" 2>/dev/null; then
+    if timeout 5s bash -c 'true > /dev/tcp/"$1"/"$2"' _ "$VPN_IP" "$VPN_PORT" 2>/dev/null; then
         check_result 0 "Connected to ${VPN_IP}:${VPN_PORT}"
     else
         check_result 1 "Connection Refused/Timeout"
@@ -120,7 +124,7 @@ run_dataplane() {
 
     # 5. Inbound Hostname Test
     echo -ne "${YELLOW}[3/3] Testing Inbound Port (via Hostname)...   ${NC} "
-    if timeout 5s bash -c "true > /dev/tcp/${VPN_HOST}/${VPN_PORT}" 2>/dev/null; then
+    if timeout 5s bash -c 'true > /dev/tcp/"$1"/"$2"' _ "$VPN_HOST" "$VPN_PORT" 2>/dev/null; then
         check_result 0 "Connected to ${VPN_HOST}:${VPN_PORT}"
     else
         check_result 1 "DNS Failure or Connection Refused"

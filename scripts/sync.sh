@@ -100,7 +100,7 @@ run_promote() {
     
     # 5. Hybrid Pathing Strip
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
-    sed "s|https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats/||g" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    sed -E "s@https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/(master|main)/tunnelsats/@@g" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
     log_info "Manifest URLs stripped for CDN compatibility."
     
     log_info "Promotion complete. You can now commit the changes in ${UMBREL_APPS_DIR}."
