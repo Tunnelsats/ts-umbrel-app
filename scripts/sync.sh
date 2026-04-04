@@ -61,15 +61,15 @@ run_version() {
     if [ "$#" -lt 1 ]; then log_error "Version argument required"; return 1; fi
     NEW_VERSION="$1"
     log_info "Updating version to ${NEW_VERSION}..."
-    sed -i "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
-    sed -E -i "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
+    sed "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml" > "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
+    sed -E "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
 }
 
 run_promote() {
     log_info "Starting Release Promotion..."
     
     # 1. Version Discovery
-    VERSION=$(grep "version: " "${REPO_ROOT}/tunnelsats/umbrel-app.yml" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    VERSION="${VERSION:-$(grep "^version: " "${REPO_ROOT}/tunnelsats/umbrel-app.yml" | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)}"
     if [ -z "$VERSION" ]; then log_error "Could not extract version"; return 1; fi
     log_info "Promoting version: v${VERSION}"
     
@@ -85,7 +85,7 @@ run_promote() {
     log_info "Discovered Digest: ${DIGEST}"
     
     # 3. Pin local Source of Truth
-    sed -E -i "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
     log_info "Local docker-compose.yml successfully pinned."
     
     # 4. Monorepo Injection & Path Realignment
@@ -100,7 +100,7 @@ run_promote() {
     
     # 5. Hybrid Pathing Strip
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
-    sed -i "s|https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats/||g" "${TARGET_MANIFEST}"
+    sed "s|https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats/||g" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
     log_info "Manifest URLs stripped for CDN compatibility."
     
     log_info "Promotion complete. You can now commit the changes in ${UMBREL_APPS_DIR}."
