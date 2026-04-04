@@ -54,7 +54,15 @@ run_dataplane() {
     VPN_IP=""
     for p in "${META_PATHS[@]}"; do
         if [ -f "$p" ] && command -v jq &> /dev/null; then
-            VPN_IP=$(jq -r '(.vpn_ip // .vpnIP // empty)' "$p" | grep -m1 -oE '^[0-9.]+$' || echo "")
+            RAW_VAL=$(jq -r '(.vpn_ip // .vpnIP // .wgEndpoint // empty)' "$p" 2>/dev/null || true)
+            if [ -n "$RAW_VAL" ]; then
+                DOMAIN="${RAW_VAL%%:*}"
+                if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    VPN_IP="$DOMAIN"
+                else
+                    VPN_IP=$(getent hosts "$DOMAIN" | awk '{ print $1 }' | head -n 1 || true)
+                fi
+            fi
             [ -n "$VPN_IP" ] && break
         fi
     done
