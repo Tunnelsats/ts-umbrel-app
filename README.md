@@ -53,25 +53,17 @@ Because Umbrel is immutable, host-level WireGuard services and persistent host n
 
 If you are a developer looking to contribute or run tests locally, follow these steps.
 
-### Backend Unit Tests
-The workspace uses a single **Source of Truth (SOT)** for Python dependencies located at the root `.venv`.
+### Unified Test Suite
+The workspace uses a single **Source of Truth (SOT)** for backend tests, E2E dataplane scenarios, and entrypoint verification.
 ```bash
-./scripts/run-unit-tests.sh -v
+./scripts/test.sh
 ```
-*Note: This script automatically detects and uses the workspace-level virtual environment.*
+*Note: This script automatically detects and sets up the correct environment for unit and integration testing.*
 
 ### Frontend UI Tests
 ```bash
 cd web && npm test
 ```
-
-### End-to-End Dataplane Scenarios
-```bash
-./scripts/e2e-tests.sh
-```
-
-**Available E2E Scenarios**:
-`happy_lnd`, `happy_cln`, `manual_reconcile`, `drift_restart`, `inbound_reachability`, `missing_socket`, `missing_config`, `shutdown_cleanup`.
 
 ### Troubleshooting API
 - Check `GET /api/local/status` first to view the current `dataplane_mode` and `wg_status`.

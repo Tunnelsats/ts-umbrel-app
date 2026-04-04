@@ -3,14 +3,14 @@
 ### 1. How do I manually add a WireGuard configuration?
 The TunnelSats app automatically watches the `/data/` directory for configuration files. If you are using SSH or restoring a backup, place your `.conf` file into this folder:
 
-`~/umbrel/app-data/tunnelsats/data/`
+`~/umbrel/app-data/tunnelsats-data/`
 
 > [!NOTE]
-> Files placed in the parent directory `~/umbrel/app-data/tunnelsats/` will be ignored.
+> Files placed in the application directory `~/umbrel/app-data/tunnelsats/` will be ignored.
 
 ### 2. Are manual configuration files picked up automatically?
 Yes. The TunnelSats daemon handles dynamic reloading:
-- **On App Startup:** The app reads the most recently modified `.conf` file in the `data/` folder and establishes the connection.
+- **On App Startup:** The app reads the most recently modified `.conf` file in the `tunnelsats-data/` folder and establishes the connection.
 - **On Demand:** Pressing **"Reconcile"** in the UI instructs the daemon to instantly rescan the folder and apply your configuration without restarting the container.
 
 > [!WARNING]
