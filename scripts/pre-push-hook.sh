@@ -18,6 +18,14 @@ if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
                 echo -e "\033[0;31m[ERROR]\033[0m Promotion failed. Push aborted."
                 exit 1
             fi
+            
+            # Check for newly pinned digests
+            if ! git diff --quiet; then
+                git commit -am "chore(release): auto-pin SHA256 digest index via promote hook"
+                echo -e "\033[1;33m[NOTICE]\033[0m Promotion committed new SHA256 immutable digest pins. The current push has been aborted to allow Git to recalculate the new HEAD."
+                echo -e "         \033[0;32mPlease run 'git push' again.\033[0m"
+                exit 1
+            fi
             ;;
         * ) 
             echo -e "\033[0;34m[INFO]\033[0m Skipping promotion. Push proceeding..."
