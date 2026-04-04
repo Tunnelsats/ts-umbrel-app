@@ -1,7 +1,7 @@
 #!/bin/bash
 # TunnelSats Unified Synchronization & Workflow
 # Standardized RSync deployment for Umbrel 1.x
-# NO EXPERIMENTS. NO SYMLINKS. Strictly following umbrel-apps standards.
+# NO EXPERIMENTS. Canonical compose lives under tunnelsats/ for app-store parity.
 
 set -euo pipefail
 
@@ -41,11 +41,6 @@ run_node() {
         "${REPO_ROOT}/tunnelsats" \
         umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/
     
-    log_info "Synchronizing docker-compose.yml separately to match project root logic..."
-    ${SSH_PREFIX}scp -o StrictHostKeyChecking=accept-new \
-        "${REPO_ROOT}/docker-compose.yml" \
-        umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/tunnelsats/docker-compose.yml
-
     log_info "Restarting tunnelsats via Umbrel manager..."
     ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} \
         "umbreld client apps.restart.mutate --appId tunnelsats" || log_error "Manager failed to restart tunnelsats (registry desync). Try manual reboot."
@@ -67,7 +62,7 @@ run_version() {
     NEW_VERSION="$1"
     log_info "Updating version to ${NEW_VERSION}..."
     sed -i "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
-    sed -i "s/ts-umbrel-app:v.*/ts-umbrel-app:v${NEW_VERSION}/" "${REPO_ROOT}/docker-compose.yml"
+    sed -E -i "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
 }
 
 # Ensure argument exists

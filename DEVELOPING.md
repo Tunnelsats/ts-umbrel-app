@@ -13,8 +13,8 @@ This document explains the repository structure and workflow for the TunnelSats 
 
 ## Single Source of Truth
 
-*   **Docker Compose**: The canonical `docker-compose.yml` is located in the **ROOT** of the repository. 
-*   **Symlink**: To maintain Umbrel's directory structure requirements, `tunnelsats/docker-compose.yml` is a **Symbolic Link** to the root file. **Editing either file updates both.**
+*   **Docker Compose**: The canonical `docker-compose.yml` is located in `tunnelsats/docker-compose.yml`.
+*   **Root Convenience Link**: The root `docker-compose.yml` is a symlink to `tunnelsats/docker-compose.yml` for local tooling compatibility.
 
 ## Synchronization Workflow
 
