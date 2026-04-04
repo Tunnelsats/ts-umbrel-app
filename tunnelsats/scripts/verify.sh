@@ -46,15 +46,16 @@ run_node_check() {
 }
 
 run_dataplane() {
-    if [ "$LEAN" = false ]; then
-        echo -e "${BLUE}=== TunnelSats Dataplane Verification ===${NC}"
-    fi
-
-    # Metadata discovery
+    # 1. Metadata discovery
     VPN_IP=""
+    VPN_HOST=""
+    VPN_PORT=""
     for p in "${META_PATHS[@]}"; do
         if [ -f "$p" ] && command -v jq &> /dev/null; then
             RAW_VAL=$(jq -r '(.vpn_ip // .vpnIP // .wgEndpoint // empty)' "$p" 2>/dev/null || true)
+            VPN_HOST=$(jq -r '(.vpn_host // .serverDomain // empty)' "$p" 2>/dev/null || true)
+            VPN_PORT=$(jq -r '(.vpn_port // .vpnPort // empty)' "$p" 2>/dev/null || true)
+            
             if [ -n "$RAW_VAL" ]; then
                 DOMAIN="${RAW_VAL%%:*}"
                 if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,26 +64,72 @@ run_dataplane() {
                     VPN_IP=$(getent hosts "$DOMAIN" | awk '{ print $1 }' | head -n 1 || true)
                 fi
             fi
-            [ -n "$VPN_IP" ] && break
+            [ -n "$VPN_IP" ] && [ -n "$VPN_PORT" ] && break
         fi
     done
 
-    if [ -z "$VPN_IP" ]; then
+    if [ -z "$VPN_IP" ] || [ -z "$VPN_PORT" ]; then
         log_error "No active VPN metadata found."
         return 1
     fi
 
-    # Outbound Tunnel Verification (Independent of lightning node presence)
-    # Use TunnelSats container for curl (guaranteed presence) via the VPN interface
-    OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
-    if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
-        echo -e "Outbound Tunnel: ${GREEN}PASS${NC} (Verified via $VPN_IP)"
-    else
-        echo -e "Outbound Tunnel: ${RED}FAIL${NC} (Leak/Timeout: $OUTBOUND)"
-        return 1
+    # Fallback host display
+    [ -z "$VPN_HOST" ] && VPN_HOST="$VPN_IP"
+
+    if [ "$LEAN" = false ]; then
+        echo -e "${BLUE}=== TunnelSats Dataplane Verification ===${NC}"
+        echo -e "${YELLOW}Target: ${NC}${VPN_HOST} (${VPN_IP}) : ${VPN_PORT}"
+        echo -e "----------------------------------------------------------------"
     fi
 
-    if [ "$LEAN" = false ]; then echo "Verification Complete."; fi
+    FAILED_TESTS=0
+    check_result() {
+        if [ $1 -eq 0 ]; then
+            echo -e "${GREEN}PASS${NC} ($2)"
+        else
+            echo -e "${RED}FAIL${NC} ($2)"
+            FAILED_TESTS=$((FAILED_TESTS + 1))
+        fi
+    }
+
+    # 2. Home IP 
+    echo -ne "${YELLOW}[0/3] Discovering Home IP...                   ${NC} "
+    HOME_IP=$(curl -sL --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+    if [ "$HOME_IP" != "TIMEOUT" ]; then
+        check_result 0 "${HOME_IP}"
+    else
+        check_result 1 "Failed to resolve Home IP"
+    fi
+
+    # 3. Outbound Tunnel Verification
+    echo -ne "${YELLOW}[1/3] Testing Outbound Tunnel Alignment...     ${NC} "
+    OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+    if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
+        check_result 0 "Verified via $VPN_IP"
+    else
+        check_result 1 "Leak/Timeout (Got: $OUTBOUND)"
+    fi
+
+    # 4. Inbound IP Test
+    echo -ne "${YELLOW}[2/3] Testing Inbound Port (via IP)...         ${NC} "
+    if timeout 5s bash -c "true > /dev/tcp/${VPN_IP}/${VPN_PORT}" 2>/dev/null; then
+        check_result 0 "Connected to ${VPN_IP}:${VPN_PORT}"
+    else
+        check_result 1 "Connection Refused/Timeout"
+    fi
+
+    # 5. Inbound Hostname Test
+    echo -ne "${YELLOW}[3/3] Testing Inbound Port (via Hostname)...   ${NC} "
+    if timeout 5s bash -c "true > /dev/tcp/${VPN_HOST}/${VPN_PORT}" 2>/dev/null; then
+        check_result 0 "Connected to ${VPN_HOST}:${VPN_PORT}"
+    else
+        check_result 1 "DNS Failure or Connection Refused"
+    fi
+
+    echo -e "----------------------------------------------------------------"
+    if [ $FAILED_TESTS -gt 0 ]; then
+        return 1
+    fi
 }
 
 case "${1:-dataplane}" in
