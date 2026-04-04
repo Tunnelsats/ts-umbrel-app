@@ -22,7 +22,7 @@ This document explains the repository structure and workflow for the TunnelSats 
 Always verify your changes on a live Umbrel node before submitting to the monorepo:
 ```bash
 # Sync local dev to Umbrel node and restart
-umbrel@umbrel:~/umbrel/app-data/tunnelsats$ rsync -av --delete tunnelsats/ umbrel@umbrel.local:~/umbrel/app-data/tunnelsats/
+dev@env:~/ts-umbrel-app$ rsync -av --delete tunnelsats/ umbrel@umbrel.local:~/umbrel/app-data/tunnelsats/
 ```
 
 ### 2. Multi-Repo Release Automation (`promote`)
