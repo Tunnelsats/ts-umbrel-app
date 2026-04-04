@@ -60,6 +60,10 @@ run_vendor() {
 run_version() {
     if [ "$#" -lt 1 ]; then log_error "Version argument required"; return 1; fi
     NEW_VERSION="$1"
+    if [[ "$NEW_VERSION" =~ [^a-zA-Z0-9._-] ]]; then
+        log_error "Invalid version string: $NEW_VERSION (only alphanumeric, '.', '_', '-' allowed)"
+        return 1
+    fi
     log_info "Updating version to ${NEW_VERSION}..."
     sed "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml" > "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
     sed -E "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"

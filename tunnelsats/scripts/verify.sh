@@ -136,7 +136,10 @@ run_dataplane() {
     fi
 }
 
-case "${1:-dataplane}" in
+COMMAND="${1:-dataplane}"
+if [ "$COMMAND" = "--lean" ]; then COMMAND="dataplane"; fi
+
+case "$COMMAND" in
     node) run_node_check ;;
     dataplane) run_dataplane ;;
     *) usage ;;
