@@ -34,8 +34,8 @@ run_node_check() {
     # Simplified login/state check logic from verify_install.sh
     if ! command -v docker &> /dev/null; then log_error "Docker not found"; return 1; fi
     
-    if ! docker ps &> /dev/null; then
-        log_error "Permission denied. App state verification requires sudo."
+    if ! DOCKER_ERR=$(docker ps 2>&1); then
+        log_error "Docker access failed: $DOCKER_ERR"
         return 1
     fi
 
@@ -112,15 +112,18 @@ run_dataplane() {
 
     # 3. Outbound Tunnel Verification
     echo -ne "${YELLOW}[1/3] Testing Outbound Tunnel Alignment...     ${NC} "
-    if docker exec tunnelsats true 2>/dev/null; then
+    EXEC_ERR=$(docker exec tunnelsats true 2>&1 || true)
+    if [ -z "$EXEC_ERR" ]; then
         OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
         if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
             check_result 0 "Verified via $VPN_IP"
         else
             check_result 1 "Leak/Timeout (Got: $OUTBOUND)"
         fi
-    else
+    elif echo "$EXEC_ERR" | grep -qi "permission denied"; then
         echo -e "${BLUE}SKIPPED${NC} (Requires sudo)"
+    else
+        check_result 1 "Container not found or not running"
     fi
 
     # 4. Inbound IP Test
