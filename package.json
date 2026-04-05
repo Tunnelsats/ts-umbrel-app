@@ -1,7 +1,8 @@
 {
   "scripts": {
     "test": "jest",
-    "build:css": "tailwindcss -i web/css/input.css -o web/dist/tailwind.css --minify"
+    "build:css": "tailwindcss -i web/css/input.css -o web/dist/tailwind.css --minify",
+    "promote": "bash scripts/sync.sh promote"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.27",
