@@ -26,7 +26,10 @@ if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
             # Check for newly pinned digests
             if ! git diff --quiet -- tunnelsats/docker-compose.yml; then
                 git add tunnelsats/docker-compose.yml
-                git commit -m "chore(release): auto-pin SHA256 digest index via promote hook"
+                if ! git commit -m "chore(release): auto-pin SHA256 digest index via promote hook" -- tunnelsats/docker-compose.yml; then
+                    echo -e "\033[0;31m[ERROR]\033[0m Failed to commit digest changes (check GPG config, pre-commit hooks, or git identity)."
+                    exit 1
+                fi
                 echo -e "\033[1;33m[NOTICE]\033[0m Promotion committed new SHA256 immutable digest pins. The current push has been aborted to allow Git to recalculate the new HEAD."
                 echo -e "         \033[0;32mPlease run 'git push' again.\033[0m"
                 exit 1
