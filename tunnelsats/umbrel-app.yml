@@ -9,6 +9,7 @@ description: >-
 
 
   Features include:
+  
 
   - Targeted Routing: Specifically tunnels Lightning (LND/CLN) traffic ONLY.
   - NWC Auto-Renewals: Hands-off subscription management via Nostr Wallet Connect.
