@@ -1,6 +1,6 @@
 manifestVersion: 1.1
 id: tunnelsats
-category: networking
+category: bitcoin
 name: Tunnel⚡Sats
 version: "3.1.0"
 tagline: Secure, Lightning-only VPN routing for your LND and CLN node.
