@@ -28,3 +28,4 @@ PR_DESCRIPTION*.md
 deploy_to_umbrel*.sh
 test_container.sh
 data/tunnelsats_live.conf
+tunnelsats/gallery/source/*

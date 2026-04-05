@@ -12,5 +12,8 @@
   },
   "jest": {
     "testEnvironment": "jsdom"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
   }
 }
