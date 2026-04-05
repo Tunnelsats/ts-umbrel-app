@@ -40,10 +40,20 @@ run_node() {
         -e "ssh -o StrictHostKeyChecking=accept-new" \
         "${REPO_ROOT}/tunnelsats" \
         umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${REPO_HASH}/
+        
+    # 2. COMMUNITY STORE RSYNC: Mirror changes to the Community Store hash to prevent testing split-brain
+    COMMUNITY_HASH="tunnelsats-ts-umbrel-app-github-574636e7"
+    if ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} "[ -d /home/umbrel/umbrel/app-stores/${COMMUNITY_HASH} ]"; then
+        log_info "Synchronizing to Community Store hash..."
+        ${SSH_PREFIX}rsync -av --delete --exclude=".gitkeep" \
+            -e "ssh -o StrictHostKeyChecking=accept-new" \
+            "${REPO_ROOT}/tunnelsats" \
+            umbrel@${UMBREL_HOST}:/home/umbrel/umbrel/app-stores/${COMMUNITY_HASH}/ || true
+    fi
     
     log_info "Restarting tunnelsats via Umbrel manager..."
     ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} \
-        "umbreld client apps.restart.mutate --appId tunnelsats" || log_error "Manager failed to restart tunnelsats (registry desync). Try manual reboot."
+        "umbreld client apps.restart.mutate --appId tunnelsats 2>/dev/null" || echo -e "  -> App not currently installed or running; skipping restart."
 }
 
 run_monorepo() {
@@ -78,7 +88,7 @@ run_promote() {
     log_info "Promoting version: v${VERSION}"
     
     # 2. Polling Docker Hub for authoritative Digest Index
-    IMAGE="tunnelsats/ts-umbrel-app:v${VERSION}"
+    IMAGE="tunnelsats/ts-umbrel-app:${VERSION}"
     log_info "Polling Docker Hub for $IMAGE multi-arch index digest..."
     DIGEST=$(docker buildx imagetools inspect "$IMAGE" | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
     
@@ -89,7 +99,7 @@ run_promote() {
     log_info "Discovered Digest: ${DIGEST}"
     
     # 3. Pin local Source of Truth
-    sed -E "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#ts-umbrel-app:${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
     log_info "Local docker-compose.yml successfully pinned."
     
     # 4. Monorepo Injection & Path Realignment
@@ -102,11 +112,31 @@ run_promote() {
     log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
     rsync -av --delete --exclude=".gitkeep" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
     
-    # 5. Hybrid Pathing Strip
+    # 5. Hybrid Pathing Strip & Linter Cleaning for Monorepo
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
-    sed -E "s@https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/(master|main)/tunnelsats/@@g" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
-    log_info "Manifest URLs stripped for CDN compatibility."
     
+    # Standard URL stripping
+    sed -E "s@https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/(master|main)/tunnelsats/@@g" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    
+    # ❌ Remove trailing period from tagline
+    sed -E 's/^(tagline:.*)\.$/\1/' "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    
+    # ❌ Inject submitter and submission PR URL
+    # Replace the website line with website + submitter + submission
+    sed -E 's/^(website:.*)/\1\nsubmitter: Tunnelsats\nsubmission: https:\/\/github.com\/getumbrel\/umbrel-apps\/pull\/4919/' "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    
+    # ❌ Clear releaseNotes (handle potentially multi-line blocks)
+    # This removes all lines from releaseNotes: until developer: and replaces with releaseNotes: ""
+    sed -i '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d } }' "${TARGET_MANIFEST}"
+    sed -i 's/^releaseNotes:.*/releaseNotes: ""/' "${TARGET_MANIFEST}"
+    
+    # ⚠️ Clear icon and gallery as per Umbrel team requirements for new apps
+    sed -i 's/^icon:.*/icon: ""/' "${TARGET_MANIFEST}"
+    # For gallery, we replace the block with an empty array []
+    sed -i '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d } }' "${TARGET_MANIFEST}"
+    sed -i 's/^gallery:.*/gallery: []/' "${TARGET_MANIFEST}"
+    
+    log_info "Applying linter-mandated field clearing for monorepo..."
     log_info "Promotion complete. You can now commit the changes in ${UMBREL_APPS_DIR}."
 }
 
