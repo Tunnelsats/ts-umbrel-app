@@ -13,12 +13,14 @@ NC='\033[0m'
 
 LEAN=false
 if [[ "$*" == *"--lean"* ]]; then LEAN=true; fi
+ALLOW_SKIP=false
+if [[ "$*" == *"--allow-skip"* ]]; then ALLOW_SKIP=true; fi
 
 log_info() { if [ "$LEAN" = false ]; then echo -e "${GREEN}[INFO]${NC} $1"; fi; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 usage() {
-    echo "Usage: $0 [node|dataplane] [--lean]"
+    echo "Usage: $0 [node|dataplane] [--lean] [--allow-skip]"
     exit 1
 }
 
@@ -92,6 +94,7 @@ run_dataplane() {
     fi
 
     FAILED_TESTS=0
+    SKIPPED_TESTS=0
     check_result() {
         if [ $1 -eq 0 ]; then
             echo -e "${GREEN}PASS${NC} ($2)"
@@ -99,6 +102,10 @@ run_dataplane() {
             echo -e "${RED}FAIL${NC} ($2)"
             FAILED_TESTS=$((FAILED_TESTS + 1))
         fi
+    }
+    check_skipped() {
+        echo -e "${BLUE}SKIPPED${NC} ($1)"
+        SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
     }
 
     # 2. Home IP 
@@ -121,7 +128,7 @@ run_dataplane() {
             check_result 1 "Leak/Timeout (Got: $OUTBOUND)"
         fi
     elif echo "$EXEC_ERR" | grep -qi "permission denied"; then
-        echo -e "${BLUE}SKIPPED${NC} (Requires sudo)"
+        check_skipped "Requires sudo"
     else
         check_result 1 "Container not found or not running"
     fi
@@ -143,13 +150,19 @@ run_dataplane() {
     fi
 
     echo -e "----------------------------------------------------------------"
-    if [ $FAILED_TESTS -gt 0 ]; then
+    if [ $FAILED_TESTS -gt 0 ] || { [ "$ALLOW_SKIP" = false ] && [ $SKIPPED_TESTS -gt 0 ]; }; then
         return 1
     fi
 }
 
-COMMAND="${1:-dataplane}"
-if [ "$COMMAND" = "--lean" ]; then COMMAND="dataplane"; fi
+COMMAND="dataplane"
+for arg in "$@"; do
+    case "$arg" in
+        node|dataplane) COMMAND="$arg" ;;
+        --lean|--allow-skip) ;;
+        *) usage ;;
+    esac
+done
 
 case "$COMMAND" in
     node) run_node_check ;;

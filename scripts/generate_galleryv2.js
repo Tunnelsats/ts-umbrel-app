@@ -141,4 +141,7 @@ async function processGallery() {
     console.log('Gallery generation complete!');
 }
 
-processGallery().catch(console.error);
+processGallery().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});
