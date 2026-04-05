@@ -2,18 +2,25 @@ const sharp = require('sharp');
 const fs = require('fs/promises');
 const path = require('path');
 
+// --- CANVAS & LAYOUT ---
 const WIDTH = 1920;
 const HEIGHT = 1200;
-
-// --- NEW LAYOUT CONSTANTS ---
 const PADDING_LEFT = 150;
 const PADDING_TOP = 220; // Top position for the Headline
 const SUBLINE_START_Y = 550; // Vertical start for the Sublines (left aligned)
+const SUBLINE_LINE_HEIGHT = 55;
+const IMAGE_Y_OFFSET = -20; // Extra vertical adjustment for the screenshot
 
-const SHADOW_BLUR = 30;
-const SHADOW_OFFSET_Y = 25;
+// --- STYLING ---
 const FONT_SIZE_HEADLINE = 80;
 const FONT_SIZE_SUBLINE = 42;
+const CORNER_RADIUS = 24;
+const SHADOW_BLUR = 30;
+const SHADOW_OFFSET_Y = 25;
+const SHADOW_COLOR = 'rgba(0,0,0,0.5)';
+const TEXT_COLOR_SECONDARY = '#94A3B8';
+const BG_COLOR_START = '#0B0F19';
+const BG_COLOR_END = '#1A2235';
 
 const slides = [
     {
@@ -63,7 +70,7 @@ async function processGallery() {
         // 1. Read and resize screenshot
         const ssTargetSize = 800;
         const rectSvg = Buffer.from(
-            `<svg width="${ssTargetSize}" height="${ssTargetSize}"><rect x="0" y="0" width="${ssTargetSize}" height="${ssTargetSize}" rx="24" ry="24"/></svg>`
+            `<svg width="${ssTargetSize}" height="${ssTargetSize}"><rect x="0" y="0" width="${ssTargetSize}" height="${ssTargetSize}" rx="${CORNER_RADIUS}" ry="${CORNER_RADIUS}"/></svg>`
         );
 
         const screenshotBuffer = await fs.readFile(inputPath);
@@ -81,7 +88,7 @@ async function processGallery() {
          <filter id="blur">
            <feGaussianBlur stdDeviation="${SHADOW_BLUR}"/>
          </filter>
-         <rect x="${shadowMargin}" y="${shadowMargin}" width="${ssTargetSize}" height="${ssTargetSize}" rx="24" ry="24" fill="rgba(0,0,0,0.5)" filter="url(#blur)"/>
+         <rect x="${shadowMargin}" y="${shadowMargin}" width="${ssTargetSize}" height="${ssTargetSize}" rx="${CORNER_RADIUS}" ry="${CORNER_RADIUS}" fill="${SHADOW_COLOR}" filter="url(#blur)"/>
        </svg>`
         );
         const shadowBuffer = await sharp(shadowSvg).png().toBuffer();
@@ -91,8 +98,8 @@ async function processGallery() {
       <svg width="${WIDTH}" height="${HEIGHT}" xmlns="http://www.w3.org/2000/svg">
         <defs>
           <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#0B0F19" />
-            <stop offset="100%" stop-color="#1A2235" />
+            <stop offset="0%" stop-color="${BG_COLOR_START}" />
+            <stop offset="100%" stop-color="${BG_COLOR_END}" />
           </linearGradient>
         </defs>
         <rect width="${WIDTH}" height="${HEIGHT}" fill="url(#bgGrad)" />
@@ -103,7 +110,7 @@ async function processGallery() {
           </text>
           
           ${slide.sublines.map((line, idx) => `
-            <text x="${PADDING_LEFT}" y="${SUBLINE_START_Y + (idx * 55)}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="${FONT_SIZE_SUBLINE}" font-weight="400" fill="#94A3B8" letter-spacing="-0.5">
+            <text x="${PADDING_LEFT}" y="${SUBLINE_START_Y + (idx * SUBLINE_LINE_HEIGHT)}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="${FONT_SIZE_SUBLINE}" font-weight="400" fill="${TEXT_COLOR_SECONDARY}" letter-spacing="-0.5">
               ${line}
             </text>
           `).join('')}
@@ -113,7 +120,7 @@ async function processGallery() {
 
         const imgX = WIDTH - PADDING_LEFT - ssTargetSize;
         const availableHeightBelowHeader = HEIGHT - PADDING_TOP;
-        const imgY = PADDING_TOP + (availableHeightBelowHeader / 2) - (ssTargetSize / 2) - 20;
+        const imgY = PADDING_TOP + (availableHeightBelowHeader / 2) - (ssTargetSize / 2) + IMAGE_Y_OFFSET;
 
         await sharp(bgSvg)
             .composite([
