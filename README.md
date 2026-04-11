@@ -27,6 +27,17 @@ By establishing a secure WireGuard tunnel to one of our global servers, your nod
 
 ---
 
+## 📦 Installation via Community App Store
+
+While we wait for the official merge into the Umbrel App Store (coming in umbrelOS >= 1.6.1), you can install the app today via our Community Store:
+
+1. Open your Umbrel dashboard and go to the **App Store**.
+2. Click the **three dots** in the top right corner and select **Community App Stores**.
+3. Add our repository URL: `https://github.com/Tunnelsats/ts-umbrel-app`
+4. Install the **TunnelSats** app from the newly added community store.
+
+---
+
 ## 🛠 Architecture & Dataplane
 
 Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
