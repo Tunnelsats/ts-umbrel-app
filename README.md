@@ -81,7 +81,7 @@ cd web && npm test
 ```bash
 sudo ~/umbrel/app-data/tunnelsats/scripts/verify.sh 
 === TunnelSats Dataplane Verification ===
-Target: us3.tunnelsats.com (178.156.167.202) : 23217
+Target: us3.tunnelsats.com (178.156.167.202) : 12345
 ----------------------------------------------------------------
 [0/3] Discovering Home IP...                    PASS (123.456.789.101)
 [1/3] Testing Outbound Tunnel Alignment...      PASS (Verified via 178.156.167.202)
