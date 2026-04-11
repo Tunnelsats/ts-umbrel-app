@@ -12,7 +12,7 @@
 
 # TunnelSats for Umbrel
 
-This repository contains the containerized version of [TunnelSats](https://tunnelsats.com/) optimized for [umbrelOS](https://github.com/getumbrel/umbrel) (fully compatible with active versions including 0.5.x up to 1.2.x+). It will be officially included in the native Umbrel App Store starting from **umbrelOS 1.6.1** ☂️. 
+This repository contains the containerized version of [TunnelSats](https://tunnelsats.com/) optimized for [umbrelOS](https://github.com/getumbrel/umbrel) (fully compatible with both current and future versions). It is currently under review for the official native Umbrel App Store ☂️. 
 
 ## ⚡ What it Solves
 Running a Lightning Network node over Tor ensures privacy but introduces high latency and routing reliability issues. Conversely, running on Clearnet exposes your home IP address. 
@@ -29,7 +29,7 @@ By establishing a secure WireGuard tunnel to one of our global servers, your nod
 
 ## 📦 Installation via Community App Store
 
-While we wait for the official merge into the Umbrel App Store (which will coincide with the umbrelOS 1.6.1 release) - Appreciate the upvote [here](https://github.com/getumbrel/umbrel-apps/pull/4919) - you can install the app today on your current umbrelOS version via our Community Store:
+While we await review for the official Umbrel App Store - Appreciate the upvote [here](https://github.com/getumbrel/umbrel-apps/pull/4919) - you can securely install the app today on any umbrelOS version via our Community Store:
 
 1. Open your Umbrel dashboard and go to the **App Store**.
 2. Click the **three dots** in the top right corner and select **Community App Stores**.
