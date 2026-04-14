@@ -1052,7 +1052,7 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
             data = res.json()
             if isinstance(data, dict):
                 return data
-    except Exception as e:
+    except requests.RequestException as e:
         app.logger.error(f"Failed to fetch subscription status for {wg_public_key}: {e}")
     return None
 
