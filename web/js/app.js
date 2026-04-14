@@ -1538,7 +1538,7 @@ async function importConfig() {
             if (data.is_expired) {
                 setTimeout(() => {
                     switchTab('renew');
-                    setImportMessage("Subscription expired. Please renew below.", 'error');
+                    showToast("Subscription expired. Please renew below.", 'error');
                 }, 1500);
             } else {
                 setTimeout(() => switchTab('import'), 1500);

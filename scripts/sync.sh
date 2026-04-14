@@ -117,7 +117,7 @@ run_promote() {
     if [ -z "$VERSION" ]; then log_error "Could not extract version"; return 1; fi
     log_info "Promoting version: v${VERSION}"
 
-    IMAGE="tunnelsats/ts-umbrel-app:${VERSION}"
+    IMAGE="tunnelsats/ts-umbrel-app:v${VERSION}"
     log_info "Polling Docker Hub for $IMAGE multi-arch index digest..."
     DIGEST=$(docker buildx imagetools inspect "$IMAGE" | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
 
@@ -127,7 +127,7 @@ run_promote() {
     fi
     log_info "Discovered Digest: ${DIGEST}"
 
-    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#ts-umbrel-app:${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
     log_info "Local docker-compose.yml pinned."
 
     UMBREL_APPS_DIR="${UMBREL_APPS_DIR:-${REPO_ROOT}/../umbrel-apps}"
@@ -147,8 +147,8 @@ run_promote() {
     # Remove trailing period from tagline
     sed -E 's/^(tagline:.*)\.$/\1/' "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
 
-    # Inject submitter and submission PR URL (defaulting to the latest master PR if not provided)
-    SUBMISSION_URL="${SUBMISSION_URL:-https://github.com/getumbrel/umbrel-apps/pull/4919}"
+    # Inject submitter and submission PR URL (if provided)
+    SUBMISSION_URL="${SUBMISSION_URL:-}"
     sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${SUBMISSION_URL}@" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
 
     # Clear releaseNotes
