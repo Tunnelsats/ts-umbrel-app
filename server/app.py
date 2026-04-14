@@ -1011,6 +1011,20 @@ def serve_static(path):
 
 # --- API PROXY ROUTES ---
 
+def _is_timestamp_expired(timestamp_str: str) -> bool:
+    """Checks if a given ISO timestamp string is in the past."""
+    if not timestamp_str:
+        return False
+    try:
+        # Normalize 'Z' to offset-aware format
+        expiry_dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        return expiry_dt < datetime.now(timezone.utc)
+    except (ValueError, TypeError) as e:
+        logging.error(f"Failed to parse timestamp {timestamp_str}: {e}")
+        return False
+
 def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     """Fetch subscription status from the TunnelSats Public API."""
     try:
@@ -1424,39 +1438,23 @@ def upload_config():
     if not wg_public_key:
         return jsonify({"success": False, "error": "Unable to derive public key from provided PrivateKey."}), 400
 
-    # Fetch authoritative status from Public API
-    status_info = _fetch_subscription_status(wg_public_key)
+    confirm = payload.get("confirm", False)
+
+    # Fetch authoritative status from Public API (unless already confirmed)
+    # This prevents a redundant 10s wait on retries.
+    status_info = _fetch_subscription_status(wg_public_key) if not confirm else None
     is_expired = False
     if status_info:
         # Check if the API explicitly says disabled or if expiration is past
-        expiry_str = status_info.get("expiry")
-        if status_info.get("status") == "disabled":
+        if status_info.get("status") == "disabled" or _is_timestamp_expired(status_info.get("expiry")):
             is_expired = True
-        elif expiry_str:
-            try:
-                expiry_dt = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
-                if expiry_dt.tzinfo is None:
-                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
-                if expiry_dt < datetime.now(timezone.utc):
-                    is_expired = True
-            except ValueError:
-                pass
 
     # If authoritative check fails or is missing, fall back to parsing comments (less reliable but safe)
     parsed = _parse_config_comments(config_text)
     if not is_expired and status_info is None:
-        expires_at_parsed = parsed.get("expiresAt", "")
-        if expires_at_parsed:
-            try:
-                expiry_parsed_dt = datetime.fromisoformat(expires_at_parsed.replace("Z", "+00:00"))
-                if expiry_parsed_dt.tzinfo is None:
-                    expiry_parsed_dt = expiry_parsed_dt.replace(tzinfo=timezone.utc)
-                if expiry_parsed_dt < datetime.now(timezone.utc):
-                    is_expired = True
-            except ValueError:
-                pass
+        if _is_timestamp_expired(parsed.get("expiresAt")):
+            is_expired = True
 
-    confirm = payload.get("confirm", False)
     server_domain = (status_info.get("server_domain") if status_info else None) or parsed.get("serverDomain", "")
     server_id = _server_id_from_domain(server_domain)
     expires_at = (status_info.get("expiry") if status_info else None) or parsed.get("expiresAt", "")

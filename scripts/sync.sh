@@ -148,8 +148,11 @@ run_promote() {
     sed -E 's/^(tagline:.*)\.$/\1/' "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
 
     # Inject submitter and submission PR URL (if provided)
-    SUBMISSION_URL="${SUBMISSION_URL:-}"
-    sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${SUBMISSION_URL}@" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    if grep -qE "^submitter:" "${TARGET_MANIFEST}"; then
+        log_info "submitter/submission already present, skipping injection."
+    elif [ -n "$SUBMISSION_URL" ]; then
+        sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${SUBMISSION_URL}@" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
+    fi
 
     # Clear releaseNotes
     sed -e '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d } }' \

@@ -620,6 +620,7 @@ class TestDataplaneAndRegressionFixes:
         mock_run.return_value = mock_proc
 
         config_text = (
+            "# Valid Until: 2023-01-01T00:00:00Z\n"
             "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
             "[Peer]\nPublicKey = server==\nEndpoint = de2.tunnelsats.com:51820\n"
         )
