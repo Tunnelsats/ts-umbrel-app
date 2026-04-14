@@ -74,7 +74,7 @@ run_node() {
     log_info "Injecting (rm → up → cp → restart)..."
     REMOTE_CMD="docker rm -f ${APP_ID} 2>/dev/null || true && \
                 APP_DATA_DIR=${UMBREL_APP_DATA} docker compose -f ${UMBREL_COMPOSE} up -d && \
-                sleep 2 && \
+                for i in \$(seq 1 10); do [ \"\$(docker inspect -f '{{.State.Running}}' ${APP_ID} 2>/dev/null)\" = \"true\" ] && break; sleep 1; done && \
                 docker cp /home/umbrel/dev-patch/server/. ${APP_ID}:/app/server/ && \
                 docker cp /home/umbrel/dev-patch/web/. ${APP_ID}:/app/web/ && \
                 docker cp /home/umbrel/dev-patch/scripts/. ${APP_ID}:/app/scripts/ && \
