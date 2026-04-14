@@ -1444,7 +1444,7 @@ def upload_config():
 
     # If authoritative check fails or is missing, fall back to parsing comments (less reliable but safe)
     parsed = _parse_config_comments(config_text)
-    if not is_expired:
+    if not is_expired and status_info is None:
         expires_at_parsed = parsed.get("expiresAt", "")
         if expires_at_parsed:
             try:
@@ -1457,9 +1457,9 @@ def upload_config():
                 pass
 
     confirm = payload.get("confirm", False)
-    server_domain = status_info.get("server_domain") if status_info else parsed.get("serverDomain", "")
+    server_domain = (status_info.get("server_domain") if status_info else None) or parsed.get("serverDomain", "")
     server_id = _server_id_from_domain(server_domain)
-    expires_at = status_info.get("expiry") if status_info else parsed.get("expiresAt", "")
+    expires_at = (status_info.get("expiry") if status_info else None) or parsed.get("expiresAt", "")
     vpn_port = parsed.get("vpnPort", 0)
     if not vpn_port:
         vpn_port = _port_from_endpoint(parsed.get("wgEndpoint", ""))
