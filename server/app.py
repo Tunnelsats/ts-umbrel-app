@@ -1439,10 +1439,19 @@ def upload_config():
         return jsonify({"success": False, "error": "Unable to derive public key from provided PrivateKey."}), 400
 
     confirm = payload.get("confirm", False)
+    # Use client-passed metadata if available (prevents double API calls while maintaining SOT)
+    passed_meta = payload.get("meta")
 
-    # Fetch authoritative status from Public API (unless already confirmed)
-    # This prevents a redundant 10s wait on retries.
-    status_info = _fetch_subscription_status(wg_public_key) if not confirm else None
+    status_info = None
+    if not confirm:
+        status_info = _fetch_subscription_status(wg_public_key)
+    elif passed_meta:
+        # Reconstruct status_info from passed metadata to preserve SOT
+        status_info = {
+            "server_domain": passed_meta.get("serverDomain"),
+            "expiry": passed_meta.get("expiresAt")
+        }
+
     is_expired = False
     if status_info:
         # Check if the API explicitly says disabled or if expiration is past
