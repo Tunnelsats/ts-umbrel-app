@@ -1135,6 +1135,14 @@ async function claimSubscription(mode) {
 }
 
 // Removed Dataplane Reconcile Logic
+let cachedAppShell = null;
+function getAppShell() {
+    if (!cachedAppShell) {
+        cachedAppShell = document.getElementById('app-shell') || document.body;
+    }
+    return cachedAppShell;
+}
+
 async function confirmRestartModal(nodeType) {
     return new Promise((resolve) => {
         const existingModal = document.getElementById('restart-confirmation-modal');

@@ -1040,7 +1040,7 @@ def _is_timestamp_expired(timestamp_str: str) -> bool:
             expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
         return expiry_dt < datetime.now(timezone.utc)
     except (ValueError, TypeError) as e:
-        logging.error(f"Failed to parse timestamp {timestamp_str}: {e}")
+        logging.debug(f"Failed to parse timestamp {timestamp_str}: {e}")
         return False
 
 def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
