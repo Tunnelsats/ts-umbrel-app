@@ -93,9 +93,37 @@ run_monorepo() {
 }
 
 run_vendor() {
-    log_info "Updating vendor assets..."
-    # Placeholder for vendor logic
-    echo "[INFO] Vendor check finished."
+    log_info "Updating localized vendor assets..."
+    MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
+    
+    if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; exit 1; fi
+    if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; exit 1; fi
+
+    FORCE="false"
+    if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
+
+    # Read assets from JSON
+    jq -c '.assets[]' "$MANIFEST" | while read -r asset; do
+        NAME=$(echo "$asset" | jq -r '.name')
+        URL=$(echo "$asset" | jq -r '.source_url')
+        LOCAL_PATH=$(echo "$asset" | jq -r '.local_path')
+        FULL_PATH="${REPO_ROOT}/${LOCAL_PATH}"
+
+        # Ensure directory exists
+        mkdir -p "$(dirname "$FULL_PATH")"
+
+        if [ "$FORCE" = "true" ] || [ ! -f "$FULL_PATH" ]; then
+            log_info "   ⬇️  Downloading ${NAME} from remote sources..."
+            if curl -L -s --fail --show-error "$URL" -o "$FULL_PATH"; then
+                log_info "   ✅  Localized ${NAME} to ${LOCAL_PATH}"
+            else
+                log_error "  ❌  Failed to download ${NAME}"
+            fi
+        else
+            log_info "   💎  ${NAME} is already localized."
+        fi
+    done
+    log_info "Vendor asset check finished."
 }
 
 run_version() {
@@ -176,7 +204,7 @@ if [ "$#" -lt 1 ]; then usage; fi
 case "${1}" in
     node) run_node ;;
     monorepo) run_monorepo ;;
-    vendor) run_vendor ;;
+    vendor) shift; run_vendor "$@" ;;
     version) shift; run_version "$@" ;;
     promote) run_promote ;;
     *) usage ;;

@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "last_updated": "2026-03-27",
+  "version": "1.0.1",
+  "last_updated": "2026-04-14",
   "assets": [
     {
       "name": "globe.gl",
@@ -13,6 +13,42 @@
       "version": "1.0.0",
       "source_url": "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js",
       "local_path": "web/vendor/qrcode.min.js"
+    },
+    {
+      "name": "inter-400",
+      "version": "4.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-400.woff2",
+      "local_path": "web/vendor/fonts/inter-400.woff2"
+    },
+    {
+      "name": "inter-500",
+      "version": "4.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-500.woff2",
+      "local_path": "web/vendor/fonts/inter-500.woff2"
+    },
+    {
+      "name": "inter-600",
+      "version": "4.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-600.woff2",
+      "local_path": "web/vendor/fonts/inter-600.woff2"
+    },
+    {
+      "name": "inter-700",
+      "version": "4.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-700.woff2",
+      "local_path": "web/vendor/fonts/inter-700.woff2"
+    },
+    {
+      "name": "earth-dark",
+      "version": "1.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/img/earth-dark.jpg",
+      "local_path": "web/vendor/img/earth-dark.jpg"
+    },
+    {
+      "name": "earth-topology",
+      "version": "1.0.0",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/img/earth-topology.png",
+      "local_path": "web/vendor/img/earth-topology.png"
     }
   ]
 }
