@@ -749,7 +749,7 @@ def _get_wireguard_state(interface_name: str = WG_INTERFACE_NAME) -> Tuple[str, 
         if latest_handshake_epoch <= 0:
             continue
 
-        if (now_epoch - latest_handshake_epoch) <= WG_HANDSHAKE_MAX_AGE_SECONDS:
+        if 0 <= (now_epoch - latest_handshake_epoch) <= WG_HANDSHAKE_MAX_AGE_SECONDS:
             wg_status = "Connected"
             break
 
