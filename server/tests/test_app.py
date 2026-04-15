@@ -41,6 +41,128 @@ def test_status_endpoint(client):
     assert 'wg_status' in data
 
 
+@patch('app.time.time', return_value=1_000_000)
+@patch('app.docker_api', return_value=[])
+@patch('app.subprocess.check_output')
+def test_local_status_reports_disconnected_when_latest_handshake_is_zero(mock_check_output, _mock_docker_api, _mock_time, client):
+    def check_output_side_effect(cmd, **kwargs):
+        if cmd == ["wg", "show", "tunnelsatsv2"]:
+            return (
+                b"interface: tunnelsatsv2\n"
+                b"  public key: localPubKey123\n"
+                b"peer: remotePeerKey123\n"
+            )
+        if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+            return b"remotePeerKey123\t0\n"
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_check_output.side_effect = check_output_side_effect
+
+    res = client.get('/api/local/status')
+    assert res.status_code == 200
+    data = json.loads(res.data)
+    assert data['wg_status'] == 'Disconnected'
+    assert data['vpn_active'] is False
+    assert data['wg_pubkey'] == 'localPubKey123'
+
+
+@patch('app.time.time', return_value=1_000_000)
+@patch('app.docker_api', return_value=[])
+@patch('app.subprocess.check_output')
+def test_local_status_reports_disconnected_when_latest_handshake_is_stale(mock_check_output, _mock_docker_api, _mock_time, client):
+    def check_output_side_effect(cmd, **kwargs):
+        if cmd == ["wg", "show", "tunnelsatsv2"]:
+            return (
+                b"interface: tunnelsatsv2\n"
+                b"  public key: localPubKey123\n"
+                b"peer: remotePeerKey123\n"
+            )
+        if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+            return b"remotePeerKey123\t999819\n"
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_check_output.side_effect = check_output_side_effect
+
+    res = client.get('/api/local/status')
+    assert res.status_code == 200
+    data = json.loads(res.data)
+    assert data['wg_status'] == 'Disconnected'
+    assert data['vpn_active'] is False
+
+
+@patch('app.time.time', return_value=1_000_000)
+@patch('app.docker_api', return_value=[])
+@patch('app.subprocess.check_output')
+def test_local_status_reports_connected_when_latest_handshake_is_recent(mock_check_output, _mock_docker_api, _mock_time, client):
+    def check_output_side_effect(cmd, **kwargs):
+        if cmd == ["wg", "show", "tunnelsatsv2"]:
+            return (
+                b"interface: tunnelsatsv2\n"
+                b"  public key: localPubKey123\n"
+                b"peer: remotePeerKey123\n"
+            )
+        if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+            return b"remotePeerKey123\t999950\n"
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_check_output.side_effect = check_output_side_effect
+
+    res = client.get('/api/local/status')
+    assert res.status_code == 200
+    data = json.loads(res.data)
+    assert data['wg_status'] == 'Connected'
+    assert data['vpn_active'] is True
+
+
+@patch('app.time.time', return_value=1_000_000)
+@patch('app.docker_api', return_value=[])
+@patch('app.subprocess.check_output')
+def test_local_status_reports_connected_when_latest_handshake_is_exactly_threshold(mock_check_output, _mock_docker_api, _mock_time, client):
+    def check_output_side_effect(cmd, **kwargs):
+        if cmd == ["wg", "show", "tunnelsatsv2"]:
+            return (
+                b"interface: tunnelsatsv2\n"
+                b"  public key: localPubKey123\n"
+                b"peer: remotePeerKey123\n"
+            )
+        if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+            return b"remotePeerKey123\t999820\n"
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_check_output.side_effect = check_output_side_effect
+
+    res = client.get('/api/local/status')
+    assert res.status_code == 200
+    data = json.loads(res.data)
+    assert data['wg_status'] == 'Connected'
+    assert data['vpn_active'] is True
+
+
+@patch('app.time.time', return_value=1_000_000)
+@patch('app.docker_api', return_value=[])
+@patch('app.subprocess.check_output')
+def test_local_status_reports_disconnected_when_latest_handshakes_query_fails(mock_check_output, _mock_docker_api, _mock_time, client):
+    def check_output_side_effect(cmd, **kwargs):
+        if cmd == ["wg", "show", "tunnelsatsv2"]:
+            return (
+                b"interface: tunnelsatsv2\n"
+                b"  public key: localPubKey123\n"
+                b"peer: remotePeerKey123\n"
+            )
+        if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output=b"")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_check_output.side_effect = check_output_side_effect
+
+    res = client.get('/api/local/status')
+    assert res.status_code == 200
+    data = json.loads(res.data)
+    assert data['wg_status'] == 'Disconnected'
+    assert data['vpn_active'] is False
+    assert data['wg_pubkey'] == 'localPubKey123'
+
+
 def test_security_headers_present(client):
     """Test that security headers (CSP, X-Frame-Options) are present on all responses."""
     res = client.get('/')
@@ -1643,7 +1765,20 @@ class TestFullE2E_Workflow:
         assert res.status_code == 200
 
         # 5. Status Check
-        mock_subprocess.return_value = b"interface: tunnelsatsv2\n  public key: pubKey123\n  private key: (hidden)\n  listening port: 51820\n"
+        def mock_wg_show_side_effect(cmd, **kwargs):
+            if cmd == ["wg", "show", "tunnelsatsv2"]:
+                return (
+                    b"interface: tunnelsatsv2\n"
+                    b"  public key: pubKey123\n"
+                    b"  private key: (hidden)\n"
+                    b"  listening port: 51820\n"
+                    b"peer: peerPubKey123\n"
+                )
+            if cmd == ["wg", "show", "tunnelsatsv2", "latest-handshakes"]:
+                return f"peerPubKey123\t{int(time.time())}\n".encode('utf-8')
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        mock_subprocess.side_effect = mock_wg_show_side_effect
         
         res = client.get('/api/local/status')
         assert res.status_code == 200
