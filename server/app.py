@@ -714,7 +714,8 @@ def _get_wireguard_state(interface_name: str = WG_INTERFACE_NAME) -> Tuple[str, 
 
     try:
         output = subprocess.check_output(["wg", "show", interface_name], stderr=subprocess.STDOUT).decode("utf-8")
-    except Exception:
+    except Exception as exc:
+        app.logger.warning(f"Failed to run 'wg show {interface_name}': {exc}")
         return wg_status, wg_pubkey
 
     if f"interface: {interface_name}" not in output:
