@@ -713,9 +713,16 @@ def _get_wireguard_state(interface_name: str = WG_INTERFACE_NAME) -> Tuple[str, 
     wg_pubkey = ""
 
     try:
-        output = subprocess.check_output(["wg", "show", interface_name], stderr=subprocess.STDOUT).decode("utf-8")
+        output = subprocess.check_output(
+            ["wg", "show", interface_name],
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        ).decode("utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        app.logger.debug(f"WireGuard state check info (expected failure): {exc}")
+        return wg_status, wg_pubkey
     except Exception as exc:
-        app.logger.warning(f"Failed to run 'wg show {interface_name}': {exc}")
+        app.logger.warning(f"Unexpected error running 'wg show {interface_name}': {exc}")
         return wg_status, wg_pubkey
 
     if f"interface: {interface_name}" not in output:
@@ -730,9 +737,13 @@ def _get_wireguard_state(interface_name: str = WG_INTERFACE_NAME) -> Tuple[str, 
         handshakes_output = subprocess.check_output(
             ["wg", "show", interface_name, "latest-handshakes"],
             stderr=subprocess.STDOUT,
+            timeout=5,
         ).decode("utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        app.logger.debug(f"WireGuard latest-handshakes info (expected failure): {exc}")
+        return wg_status, wg_pubkey
     except Exception as exc:
-        app.logger.warning(f"Failed to read WireGuard latest-handshakes: {exc}")
+        app.logger.warning(f"Unexpected error reading WireGuard latest-handshakes: {exc}")
         return wg_status, wg_pubkey
 
     now_epoch = int(time.time())
