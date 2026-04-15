@@ -6,11 +6,19 @@ import pytest
 import json
 import stat
 import tempfile
+import time
 from unittest.mock import patch, MagicMock
+import requests
 from app import app
 import app as app_module
 
 # --- Fixtures ---
+
+@pytest.fixture(autouse=True)
+def clear_subscription_cache():
+    """Ensure the server-side subscription cache is cleared between every test to prevent isolation leaks."""
+    app_module._SUBSCRIPTION_CACHE.clear()
+    yield
 
 @pytest.fixture
 def client():
@@ -543,8 +551,9 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 200
 
+    @patch('app.requests.post', side_effect=requests.RequestException("No network in tests"))
     @patch('app.subprocess.run')
-    def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, client, data_dir):
+    def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, mock_post, client, data_dir):
         old_conf = data_dir / 'tunnelsats-old.conf'
         old_conf.write_text('[Interface]\nPrivateKey=old\n')
         target_conf = data_dir / 'tunnelsats.conf'
@@ -557,7 +566,7 @@ class TestDataplaneAndRegressionFixes:
 
         config_text = (
             "# Port Forwarding: 35825\n"
-            "# Valid Until: 2026-04-05T10:30:00.000Z\n"
+            "# Valid Until: 2030-04-05T10:30:00.000Z\n"
             "[Interface]\n"
             "PrivateKey = clientPrivateKeyBase64==\n"
             "\n"
@@ -575,7 +584,7 @@ class TestDataplaneAndRegressionFixes:
         assert payload["message"] == "Configuration saved and parsed."
         assert payload["meta"]["serverId"] == "de2"
         assert payload["meta"]["wgPublicKey"] == "derivedPubKeyBase64=="
-        assert payload["meta"]["expiresAt"] == "2026-04-05T10:30:00.000Z"
+        assert payload["meta"]["expiresAt"] == "2030-04-05T10:30:00.000Z"
         assert payload["meta"]["vpnPort"] == 35825
 
         assert os.path.exists(str(old_conf) + '.bak')
@@ -588,7 +597,7 @@ class TestDataplaneAndRegressionFixes:
             meta = json.load(fp)
         assert meta["serverId"] == "de2"
         assert meta["wgPublicKey"] == "derivedPubKeyBase64=="
-        assert meta["expiresAt"] == "2026-04-05T10:30:00.000Z"
+        assert meta["expiresAt"] == "2030-04-05T10:30:00.000Z"
         assert meta["vpnPort"] == 35825
 
         mock_run.assert_called_once_with(
@@ -600,8 +609,160 @@ class TestDataplaneAndRegressionFixes:
             timeout=5,
         )
 
+    @patch('app.requests.post')
     @patch('app.subprocess.run')
-    def test_upload_config_does_not_duplicate_existing_keepalive(self, mock_run, client, data_dir):
+    def test_upload_config_authoritative_sync_expired_blocks_persistence(self, mock_run, mock_post, client, data_dir):
+        """If the API says it is expired, persistence should be blocked unless confirm=true."""
+        # 1. API says EXPIRED
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "expiry": "2023-01-01T00:00:00Z", # Past
+            "status": "disabled",
+            "server_domain": "de2.tunnelsats.com"
+        }
+        mock_post.return_value = mock_resp
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "# Valid Until: 2023-01-01T00:00:00Z\n"
+            "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
+            "[Peer]\nPublicKey = server==\nEndpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        # 2. Upload WITHOUT confirm
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 200 # We return 200 but with is_expired=True and no persistence message
+        payload = json.loads(res.data)
+        assert payload["is_expired"] is True
+        assert "Configuration saved" not in payload.get("message", "")
+        
+        # Verify NO file was written
+        assert not os.path.exists(data_dir / "tunnelsats.conf")
+
+        # 3. Upload WITH confirm
+        res = client.post('/api/local/upload-config', json={"config": config_text, "confirm": True})
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["success"] is True
+        assert "Configuration saved" in payload["message"]
+        
+        # Verify file WAS written
+        assert os.path.exists(data_dir / "tunnelsats.conf")
+        assert (data_dir / app_module.META_FILE).exists()
+        with open(data_dir / app_module.META_FILE) as f:
+            meta = json.load(f)
+            assert meta["expiresAt"] == "2023-01-01T00:00:00Z"
+
+    @patch('app.requests.post')
+    @patch('app.subprocess.run')
+    def test_upload_config_authoritative_sync_active_persists_immediately(self, mock_run, mock_post, client, data_dir):
+        """If the API says it is ACTIVE, it should persist immediately even without confirm=true."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "expiry": "2100-01-01T00:00:00Z", # Future
+            "status": "enabled",
+            "server_domain": "au1.tunnelsats.com"
+        }
+        mock_post.return_value = mock_resp
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
+            "[Peer]\nPublicKey = server==\nEndpoint = au1.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["success"] is True
+        assert payload["is_expired"] is False
+        assert os.path.exists(data_dir / "tunnelsats.conf")
+
+    @patch('app.requests.post')
+    @patch('app.subprocess.run')
+    def test_upload_config_expired_requires_literal_true_confirmation(self, mock_run, mock_post, client, data_dir):
+        """Only JSON boolean true should bypass expired warning persistence guard."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "expiry": "2023-01-01T00:00:00Z",
+            "status": "disabled",
+            "server_domain": "de2.tunnelsats.com"
+        }
+        mock_post.return_value = mock_resp
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
+            "[Peer]\nPublicKey = server==\nEndpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text, "confirm": "false"})
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["success"] is True
+        assert payload["warning"] == "Expired"
+        assert payload["is_expired"] is True
+        assert not os.path.exists(data_dir / "tunnelsats.conf")
+
+    @patch('app.requests.post')
+    @patch('app.subprocess.run')
+    def test_upload_config_ignores_cached_expired_state_and_refetches(self, mock_run, mock_post, client, data_dir):
+        """Cached expired/disabled entries should not gate a fresh authoritative re-check."""
+        app_module._SUBSCRIPTION_CACHE["derivedPubKeyBase64=="] = (
+            time.time(),
+            {
+                "expiry": "2023-01-01T00:00:00Z",
+                "status": "disabled",
+                "server_domain": "de2.tunnelsats.com",
+            },
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "expiry": "2100-01-01T00:00:00Z",
+            "status": "enabled",
+            "server_domain": "au1.tunnelsats.com"
+        }
+        mock_post.return_value = mock_resp
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
+            "[Peer]\nPublicKey = server==\nEndpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["success"] is True
+        assert payload["is_expired"] is False
+        assert payload["meta"]["expiresAt"] == "2100-01-01T00:00:00Z"
+        assert os.path.exists(data_dir / "tunnelsats.conf")
+        assert mock_post.call_count == 1
+
+    @patch('app.requests.post', side_effect=requests.RequestException("No network in tests"))
+    @patch('app.subprocess.run')
+    def test_upload_config_does_not_duplicate_existing_keepalive(self, mock_run, mock_post, client, data_dir):
         mock_proc = MagicMock()
         mock_proc.stdout = 'derivedPubKeyBase64==\n'
         mock_proc.returncode = 0

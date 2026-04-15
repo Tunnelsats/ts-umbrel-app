@@ -22,7 +22,7 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.1.0"
+APP_VERSION = "v3.1.1rc"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -1011,6 +1011,69 @@ def serve_static(path):
 
 # --- API PROXY ROUTES ---
 
+# Short-lived server-side cache for subscription status checks to avoid redundant
+# 10s API timeouts on retries while maintaining authoritative Source of Truth (SOT).
+_SUBSCRIPTION_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
+SUBSCRIPTION_CACHE_TTL = 600  # 10 minutes
+
+def _status_info_is_disabled_or_expired(info: Dict[str, Any]) -> bool:
+    """True when subscription state indicates an expired/disabled entitlement."""
+    if not isinstance(info, dict):
+        return False
+    status = str(info.get("status", "")).lower()
+    return status == "disabled" or _is_timestamp_expired(info.get("expiry"))
+
+def _fetch_subscription_status_cached(wg_public_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch subscription status with a short-lived internal cache."""
+    now = time.time()
+    if wg_public_key in _SUBSCRIPTION_CACHE:
+        cache_time, info = _SUBSCRIPTION_CACHE[wg_public_key]
+        if now - cache_time < SUBSCRIPTION_CACHE_TTL:
+            # Never reuse volatile disabled/expired status entries from cache.
+            if info and _status_info_is_disabled_or_expired(info):
+                _SUBSCRIPTION_CACHE.pop(wg_public_key, None)
+            else:
+                return info
+
+    info = _fetch_subscription_status(wg_public_key)
+    if info and not _status_info_is_disabled_or_expired(info):
+        _SUBSCRIPTION_CACHE[wg_public_key] = (now, info)
+    elif not info:
+        # Negative Caching: Cache failures for 1 minute to avoid repeated 10s timeouts on retries.
+        # We store this by setting the cache timestamp to be close to expiration (1 minute left).
+        _SUBSCRIPTION_CACHE[wg_public_key] = (now - SUBSCRIPTION_CACHE_TTL + 60, None)
+    else:
+        _SUBSCRIPTION_CACHE.pop(wg_public_key, None)
+    return info
+
+def _is_timestamp_expired(timestamp_str: str) -> bool:
+    """Checks if a given ISO timestamp string is in the past."""
+    if not timestamp_str:
+        return False
+    try:
+        # Normalize 'Z' to offset-aware format
+        expiry_dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        return expiry_dt < datetime.now(timezone.utc)
+    except (ValueError, TypeError) as e:
+        app.logger.debug(f"Failed to parse timestamp {timestamp_str}: {e}")
+        return False
+
+def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch subscription status from the TunnelSats Public API."""
+    try:
+        url = f"{TUNNELSATS_API_URL}/subscription/status"
+        res = requests.post(url, json={"wgPublicKey": wg_public_key}, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, dict):
+                return data
+    except requests.RequestException as e:
+        app.logger.error(f"Failed to fetch subscription status for {wg_public_key}: {e}")
+    return None
+
+
 @app.route("/api/servers", methods=["GET"])
 def get_servers():
     proxy_res = proxy_request("GET", "servers")
@@ -1410,12 +1473,26 @@ def upload_config():
     if not wg_public_key:
         return jsonify({"success": False, "error": "Unable to derive public key from provided PrivateKey."}), 400
 
-    config_text = _ensure_peer_persistent_keepalive(config_text, keepalive=25)
+    # Only an explicit JSON boolean true counts as confirmation.
+    confirm = payload.get("confirm") is True
+    # Always attempt authoritative status check via cache.
+    # This prevents redundant 10s waits on confirmation retries while keeping SOT in the backend.
+    status_info = _fetch_subscription_status_cached(wg_public_key)
+    is_expired = False
+    if status_info:
+        # Check if the API explicitly says disabled or if expiration is past
+        if status_info.get("status") == "disabled" or _is_timestamp_expired(status_info.get("expiry")):
+            is_expired = True
 
+    # If authoritative check fails or is missing, fall back to parsing comments (less reliable but safe)
     parsed = _parse_config_comments(config_text)
-    server_domain = parsed.get("serverDomain", "")
+    if not is_expired and status_info is None:
+        if _is_timestamp_expired(parsed.get("expiresAt")):
+            is_expired = True
+
+    server_domain = (status_info.get("server_domain") if status_info else None) or parsed.get("serverDomain", "")
     server_id = _server_id_from_domain(server_domain)
-    expires_at = parsed.get("expiresAt", "")
+    expires_at = (status_info.get("expiry") if status_info else None) or parsed.get("expiresAt", "")
     vpn_port = parsed.get("vpnPort", 0)
     if not vpn_port:
         vpn_port = _port_from_endpoint(parsed.get("wgEndpoint", ""))
@@ -1428,7 +1505,27 @@ def upload_config():
         "expiresAt": expires_at,
         "vpnPort": vpn_port,
         "importedAt": datetime.now(timezone.utc).isoformat(),
+        "isExpired": is_expired,
     }
+
+    # If it is expired and NOT confirmed, stop here and return a warning
+    if is_expired and not confirm:
+        return jsonify(
+            {
+                "success": True,
+                "warning": "Expired",
+                "is_expired": True,
+                "meta": {
+                    "serverId": server_id,
+                    "serverDomain": server_domain,
+                    "wgPublicKey": wg_public_key,
+                    "expiresAt": expires_at,
+                    "vpnPort": vpn_port,
+                },
+            }
+        )
+
+    config_text = _ensure_peer_persistent_keepalive(config_text, keepalive=25)
 
     if not _persist_tunnelsats_config_and_meta(config_text, meta):
         return jsonify({"success": False, "error": "Failed to save configuration on disk."}), 500
@@ -1437,6 +1534,7 @@ def upload_config():
         {
             "success": True,
             "message": "Configuration saved and parsed.",
+            "is_expired": is_expired,
             "meta": {
                 "serverId": server_id,
                 "wgPublicKey": wg_public_key,

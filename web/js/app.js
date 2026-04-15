@@ -100,9 +100,9 @@ async function mockFetch(url) {
 function initGlobe() {
     const container = document.getElementById('globe-container');
     if (!container || myGlobe) return;
-    
+
     // Immediate synchronous guard to prevent race conditions during concurrent bootstrap
-    myGlobe = "initializing"; 
+    myGlobe = "initializing";
     globeInitAttempts += 1;
 
     // Purge any existing elements (redundant but safe)
@@ -198,10 +198,10 @@ function updateGlobeMarker(forcedCoords = null) {
         }]);
 
         // Smooth camera transitions to the new location
-        myGlobe.pointOfView({ 
-            lat: coords.lat, 
-            lng: coords.lng, 
-            altitude: 2.2 
+        myGlobe.pointOfView({
+            lat: coords.lat,
+            lng: coords.lng,
+            altitude: 2.2
         }, 2000);
     } else {
         myGlobe.pointsData([]);
@@ -268,9 +268,9 @@ function showToast(message, type = 'success') {
     };
 
     toast.className = `flex items-center space-x-3 px-6 py-4 rounded-xl border-l-4 shadow-2xl transition-all duration-500 transform translate-y-10 opacity-0 pointer-events-auto ${colors[type] || colors.info}`;
-    
+
     // Securely add icon and message
-    const iconSvg = type === 'error' 
+    const iconSvg = type === 'error'
         ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
         : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
 
@@ -279,7 +279,7 @@ function showToast(message, type = 'success') {
     msgSpan.className = 'font-bold text-sm text-gray-200';
     msgSpan.textContent = message;
     toast.appendChild(msgSpan);
-    
+
     container.appendChild(toast);
 
     // Animate in
@@ -310,19 +310,19 @@ async function copyToClipboard(text, label) {
     try {
         const textArea = document.createElement("textarea");
         textArea.value = text;
-        
+
         // Ensure textarea is not visible but part of DOM
         textArea.style.position = "fixed";
         textArea.style.left = "-9999px";
         textArea.style.top = "0";
         document.body.appendChild(textArea);
-        
+
         textArea.focus();
         textArea.select();
-        
+
         const successful = document.execCommand('copy');
         document.body.removeChild(textArea);
-        
+
         if (successful) {
             showToast(`${label} copied to clipboard!`, 'success');
         } else {
@@ -362,7 +362,7 @@ async function fetchPricing() {
                 currentSatsPerDollar = data.sats / BASE_PRICE_USD;
             }
         }
-    } catch(e) {
+    } catch (e) {
         console.warn("Could not fetch BTC price from LNBits", e);
     }
     renderDurations();
@@ -372,43 +372,43 @@ function calculatePrice(months) {
     const discount = DISCOUNTS[months] || 0;
     const grossUsd = BASE_PRICE_USD * months;
     const amountUsd = grossUsd * (1 - discount);
-    
+
     let satsStr = "";
     if (currentSatsPerDollar) {
         const amountSats = Math.floor(amountUsd * currentSatsPerDollar);
         satsStr = ` (${amountSats.toLocaleString()} sats)`;
     }
-    
+
     return { amountUsd, satsStr, discount };
 }
 
 function renderDurations() {
     const durations = [1, 3, 6, 12];
     const lists = ['buy-duration', 'renew-duration'];
-    
+
     lists.forEach(mode => {
         const listEl = document.getElementById(`${mode}-list`);
         if (!listEl) return;
         listEl.innerHTML = "";
-        
+
         const currentSelect = document.getElementById(`${mode}-select`);
         const currentValue = currentSelect ? currentSelect.value : "1";
         const labelEl = document.getElementById(`${mode}-label`);
-        
+
         durations.forEach((months) => {
             const { amountUsd, satsStr, discount } = calculatePrice(months);
             const discountPercent = discount * 100;
             const discountStr = discount > 0 ? ` (${discountPercent}% off)` : "";
             const monthStr = months === 1 ? "1 Month" : `${months} Months`;
             const label = `${monthStr}${discountStr} - $${amountUsd.toFixed(2).replace(/\.00$/, '')}${satsStr}`;
-            
+
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'w-full text-left px-4 py-3 text-white hover:bg-gray-700 transition-colors border-b border-gray-700/50 hover:pl-6 block';
             btn.textContent = label;
             btn.addEventListener('click', () => selectOption(mode, String(months), label));
             listEl.appendChild(btn);
-            
+
             if (String(months) === currentValue && labelEl) {
                 labelEl.textContent = label;
             }
@@ -542,7 +542,7 @@ function switchTab(tabId) {
     ['buy', 'renew'].forEach(mode => {
         const box = document.getElementById(`invoice-box-${mode}`);
         const btnCreate = document.getElementById(`btn-create-${mode}`);
-        
+
         if (activePaymentHash && tabId === mode && purchaseMode === mode) {
             // Restore active invoice UI and resume polling
             if (box) box.classList.remove('hidden');
@@ -575,7 +575,7 @@ function switchTab(tabId) {
                 lookupId = sDomain;
             }
             let serverStr = lookupId || 'Not found';
-            
+
             if (lookupId && lookupId !== 'unknown' && tsServers) {
                 const sId = lookupId.split('.')[0];
                 const prefix = sId.replace(/[0-9]/g, '');
@@ -612,7 +612,7 @@ async function fetchStatus() {
         const clnDetected = data.cln_detected === true;
         const lndRouting = data.lnd_routing_active === true;
         const clnRouting = data.cln_routing_active === true;
-        
+
         const hasNode = lndDetected || clnDetected;
         const routingActive = lndRouting || clnRouting;
 
@@ -668,7 +668,7 @@ async function fetchStatus() {
             else if (data.target_impl === "cln") nodeText = "Core-Lightning";
             else if (data.lnd_detected) nodeText = "LND (Unconfigured)";
             else if (data.cln_detected) nodeText = "Core-Lightning (Unconfigured)";
-            
+
             boxNodeEl.replaceChildren(document.createTextNode(nodeText));
         }
 
@@ -795,7 +795,7 @@ async function fetchServers() {
         const res = await fetch('/api/servers');
         const data = await res.json();
         const servers = Array.isArray(data) ? data : (data.servers || []);
-        
+
         tsServers = servers;
 
         const selBuyList = document.getElementById('buy-server-list');
@@ -896,7 +896,7 @@ async function createSub(mode) {
             endpoint = '/api/subscription/renew';
             const wgPublicKey = document.getElementById('renew-pubkey').value;
             const renewServerId = document.getElementById('renew-server').value;
-            
+
             payload = { duration };
             // Avoid sending placeholders so backend autofill can kick in if needed
             if (wgPublicKey && wgPublicKey !== 'Not found' && wgPublicKey !== 'Error loading') {
@@ -1059,7 +1059,7 @@ async function claimSubscription(mode) {
 
         const invoiceBox = document.getElementById(`invoice-box-${mode}`);
         invoiceBox.replaceChildren();
-        
+
         let data;
         try {
             data = await res.json();
@@ -1135,6 +1135,14 @@ async function claimSubscription(mode) {
 }
 
 // Removed Dataplane Reconcile Logic
+let cachedAppShell = null;
+function getAppShell() {
+    if (!cachedAppShell) {
+        cachedAppShell = document.getElementById('app-shell') || document.body;
+    }
+    return cachedAppShell;
+}
+
 async function confirmRestartModal(nodeType) {
     return new Promise((resolve) => {
         const existingModal = document.getElementById('restart-confirmation-modal');
@@ -1144,11 +1152,11 @@ async function confirmRestartModal(nodeType) {
 
         const overlay = document.createElement('div');
         overlay.id = 'restart-confirmation-modal';
-        overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm transition-opacity duration-300';
+        overlay.className = 'absolute inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm transition-opacity duration-300';
 
         const panel = document.createElement('div');
         panel.className = 'w-full max-w-md rounded-2xl border border-gray-700/50 bg-gray-950 p-8 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transform transition-all duration-300 scale-95 opacity-0';
-        
+
         // Modal Content
         const title = document.createElement('h3');
         title.className = 'text-xl font-bold text-white flex items-center gap-3 mb-4';
@@ -1192,7 +1200,7 @@ async function confirmRestartModal(nodeType) {
         actions.append(cancelBtn, confirmBtn);
         panel.append(title, body, actions);
         overlay.appendChild(panel);
-        document.body.appendChild(overlay);
+        getAppShell().appendChild(overlay);
 
         // Animate in
         setTimeout(() => {
@@ -1204,11 +1212,11 @@ async function confirmRestartModal(nodeType) {
         const complete = (choice) => {
             if (settled) return;
             settled = true;
-            
+
             // Animate out
             panel.classList.add('scale-95', 'opacity-0');
             overlay.classList.add('opacity-0');
-            
+
             setTimeout(() => {
                 overlay.remove();
                 resolve(choice);
@@ -1227,7 +1235,7 @@ async function confirmRestartModal(nodeType) {
 
 async function configureNode() {
     const selectedNodeType = (document.getElementById('node-type-selected') || {}).value || 'lnd';
-    
+
     // Warn user about restart
     const confirmed = await confirmRestartModal(selectedNodeType);
     if (!confirmed) return;
@@ -1307,7 +1315,7 @@ function confirmOverwriteImport() {
 
         const overlay = document.createElement('div');
         overlay.id = 'import-overwrite-modal';
-        overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4';
+        overlay.className = 'absolute inset-0 z-50 flex items-center justify-center bg-black/70 px-4';
 
         const panel = document.createElement('div');
         panel.className = 'w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 p-6 shadow-2xl';
@@ -1336,7 +1344,7 @@ function confirmOverwriteImport() {
         actions.append(cancelBtn, confirmBtn);
         panel.append(title, body, actions);
         overlay.appendChild(panel);
-        document.body.appendChild(overlay);
+        getAppShell().appendChild(overlay);
 
         let settled = false;
         const complete = (choice) => {
@@ -1352,6 +1360,107 @@ function confirmOverwriteImport() {
             if (event.target === overlay) {
                 complete(false);
             }
+        });
+
+        confirmBtn.focus();
+    });
+}
+
+function confirmExpiredImport(meta) {
+    return new Promise((resolve) => {
+        const existingModal = document.getElementById('import-expired-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const overlay = document.createElement('div');
+        overlay.id = 'import-expired-modal';
+        overlay.className = 'absolute inset-0 z-50 flex items-center justify-center bg-black/70 px-4';
+
+        const panel = document.createElement('div');
+        panel.className = 'w-full max-w-lg rounded-xl border border-red-900/50 bg-gray-900 p-6 shadow-2xl';
+
+        const title = document.createElement('div');
+        title.className = 'flex items-center gap-3 text-red-500 mb-4';
+
+        const iconSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        iconSvg.setAttribute('class', 'w-6 h-6');
+        iconSvg.setAttribute('fill', 'none');
+        iconSvg.setAttribute('stroke', 'currentColor');
+        iconSvg.setAttribute('viewBox', '0 0 24 24');
+        const iconPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        iconPath.setAttribute('stroke-linecap', 'round');
+        iconPath.setAttribute('stroke-linejoin', 'round');
+        iconPath.setAttribute('stroke-width', '2');
+        iconPath.setAttribute('d', 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z');
+        iconSvg.appendChild(iconPath);
+
+        const titleText = document.createElement('h3');
+        titleText.className = 'text-lg font-bold';
+        titleText.textContent = 'Expired Configuration Detected';
+
+        title.appendChild(iconSvg);
+        title.appendChild(titleText);
+
+        const body = document.createElement('div');
+        body.className = 'space-y-4';
+
+        const desc = document.createElement('p');
+        desc.className = 'text-sm text-gray-300 leading-relaxed';
+        desc.textContent = "The subscription for this configuration has expired. You can still import it and proceed directly to the renewal section to extend it.";
+
+        const details = document.createElement('div');
+        details.className = 'bg-black/40 border border-gray-800 rounded-lg p-4 space-y-3 font-mono text-xs';
+
+        const addRow = (label, value, valueClass, isVertical = false) => {
+            const row = document.createElement('div');
+            row.className = isVertical ? 'flex flex-col gap-1' : 'flex justify-between border-b border-gray-800 pb-2';
+            const labelEl = document.createElement('span');
+            labelEl.className = 'text-gray-500 uppercase';
+            labelEl.textContent = label;
+            const valueEl = document.createElement('span');
+            valueEl.className = valueClass;
+            valueEl.textContent = value || 'N/A';
+            row.appendChild(labelEl);
+            row.appendChild(valueEl);
+            details.appendChild(row);
+        };
+
+        addRow('Subdomain', meta.serverDomain, 'text-white');
+        addRow('Expiration', meta.expiresAt, 'text-red-400');
+        addRow('WG Public Key', meta.wgPublicKey, 'text-gray-400 break-all', true);
+
+        const actions = document.createElement('div');
+        actions.className = 'mt-8 flex justify-end gap-3';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'rounded-lg border border-gray-600 px-4 py-2 text-sm font-semibold text-gray-200 hover:bg-gray-800';
+        cancelBtn.textContent = 'Abort';
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'rounded-lg bg-tsyellow px-4 py-2 text-sm font-bold text-black hover:bg-yellow-400 transition-colors shadow-lg shadow-yellow-500/10';
+        confirmBtn.textContent = 'Continue & Renew';
+
+        actions.append(cancelBtn, confirmBtn);
+        body.append(desc, details, actions);
+        panel.append(title, body);
+        overlay.appendChild(panel);
+        getAppShell().appendChild(overlay);
+
+        let settled = false;
+        const complete = (choice) => {
+            if (settled) return;
+            settled = true;
+            overlay.remove();
+            resolve(choice);
+        };
+
+        cancelBtn.addEventListener('click', () => complete(false));
+        confirmBtn.addEventListener('click', () => complete(true));
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) complete(false);
         });
 
         confirmBtn.focus();
@@ -1404,16 +1513,44 @@ async function importConfig() {
     setImportMessage("Importing...", 'info');
 
     try {
-        const res = await fetch('/api/local/upload-config', {
+        let res = await fetch('/api/local/upload-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config })
         });
 
-        const data = await res.json();
+        let data = await res.json();
+
+        // Authoritative sync: Handle expired config warning
+        if (data.success && data.warning === 'Expired' && data.is_expired) {
+            const confirmed = await confirmExpiredImport(data.meta);
+            if (!confirmed) {
+                setImportMessage("Import cancelled.", 'info');
+                return;
+            }
+
+            // Retry with confirm=true
+            setImportMessage("Saving expired config...", 'info');
+            res = await fetch('/api/local/upload-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ config, confirm: true })
+            });
+            data = await res.json();
+        }
+
         if (res.ok && data.success !== false) {
             setImportMessage(data.message || "Configuration saved and parsed.", 'success');
-            setTimeout(() => switchTab('import'), 1500);
+
+            // If it was an expired config, move to renew tab after a short delay
+            if (data.is_expired) {
+                setTimeout(() => {
+                    switchTab('renew');
+                    showToast("Subscription expired. Please consider to renew.", 'error');
+                }, 1500);
+            } else {
+                setTimeout(() => switchTab('import'), 1500);
+            }
         } else {
             setImportMessage(data.error || "Import failed.", 'error');
         }
