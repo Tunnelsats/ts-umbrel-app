@@ -89,6 +89,7 @@ def test_local_status_reports_disconnected_when_latest_handshake_is_stale(mock_c
     data = json.loads(res.data)
     assert data['wg_status'] == 'Disconnected'
     assert data['vpn_active'] is False
+    assert data['wg_pubkey'] == 'localPubKey123'
 
 
 @patch('app.time.time', return_value=1_000_000)
