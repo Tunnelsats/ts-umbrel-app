@@ -97,6 +97,8 @@ LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.c
 LND_CONTAINER_PATTERN = r"^lightning[_-]lnd[_-]\d+$"
 LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
 CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"
+WG_INTERFACE_NAME = "tunnelsatsv2"
+WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -706,6 +708,65 @@ def _derive_wg_public_key(private_key):
         return ""
 
 
+def _get_wireguard_state(interface_name: str = WG_INTERFACE_NAME) -> Tuple[str, str]:
+    wg_status = "Disconnected"
+    wg_pubkey = ""
+
+    try:
+        output = subprocess.check_output(
+            ["wg", "show", interface_name],
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        ).decode("utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        app.logger.debug(f"WireGuard state check info (expected failure): {exc}")
+        return wg_status, wg_pubkey
+    except Exception as exc:
+        app.logger.warning(f"Unexpected error running 'wg show {interface_name}': {exc}")
+        return wg_status, wg_pubkey
+
+    if f"interface: {interface_name}" not in output:
+        return wg_status, wg_pubkey
+
+    for line in output.splitlines():
+        if line.strip().startswith("public key:"):
+            wg_pubkey = line.split(":", 1)[1].strip()
+            break
+
+    try:
+        handshakes_output = subprocess.check_output(
+            ["wg", "show", interface_name, "latest-handshakes"],
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        ).decode("utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        app.logger.debug(f"WireGuard latest-handshakes info (expected failure): {exc}")
+        return wg_status, wg_pubkey
+    except Exception as exc:
+        app.logger.warning(f"Unexpected error reading WireGuard latest-handshakes: {exc}")
+        return wg_status, wg_pubkey
+
+    now_epoch = int(time.time())
+    for line in handshakes_output.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+
+        try:
+            latest_handshake_epoch = int(parts[-1])
+        except ValueError:
+            continue
+
+        if latest_handshake_epoch <= 0:
+            continue
+
+        if 0 <= (now_epoch - latest_handshake_epoch) <= WG_HANDSHAKE_MAX_AGE_SECONDS:
+            wg_status = "Connected"
+            break
+
+    return wg_status, wg_pubkey
+
+
 def _server_id_from_domain(server_domain):
     server_domain = str(server_domain or "").strip()
     if not server_domain:
@@ -1308,17 +1369,7 @@ def renew_subscription():
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
     app.logger.debug("Action Request: Fetching local status")
-    wg_status = "Disconnected"
-    wg_pubkey = ""
-    try:
-        output = subprocess.check_output(["wg", "show", "tunnelsatsv2"], stderr=subprocess.STDOUT).decode("utf-8")
-        if "interface: tunnelsatsv2" in output:
-            wg_status = "Connected"
-            for line in output.split("\n"):
-                if line.strip().startswith("public key:"):
-                    wg_pubkey = line.split(":", 1)[1].strip()
-    except Exception:
-        pass
+    wg_status, wg_pubkey = _get_wireguard_state()
 
     configs = []
     if os.path.exists(DATA_DIR):
@@ -1363,7 +1414,7 @@ def local_status():
     try:
         # Source of Truth: the live interface state. 
         # check=False in subprocess.run is more robust than check_output if "ip" is missing.
-        res = subprocess.run(["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"], 
+        res = subprocess.run(["ip", "-4", "addr", "show", "dev", WG_INTERFACE_NAME], 
                              capture_output=True, text=True, timeout=2)
         if res.returncode == 0:
             if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout):
