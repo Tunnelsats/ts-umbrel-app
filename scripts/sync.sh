@@ -141,7 +141,8 @@ run_promote() {
 
     log_info "Pinning image digest in monorepo docker-compose.yml..."
     TARGET_COMPOSE="${UMBREL_APPS_DIR}/tunnelsats/docker-compose.yml"
-    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${TARGET_COMPOSE}" > "${TARGET_COMPOSE}.tmp" && mv "${TARGET_COMPOSE}.tmp" "${TARGET_COMPOSE}"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" "${TARGET_COMPOSE}" > "${TARGET_COMPOSE}.tmp" && mv "${TARGET_COMPOSE}.tmp" "${TARGET_COMPOSE}"
+    log_info "Monorepo docker-compose.yml pinned to ${VERSION#v}@${DIGEST}."
 
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
 
