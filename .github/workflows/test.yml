@@ -38,9 +38,10 @@ jobs:
           chmod +x scripts/test.sh
           ./scripts/test.sh entrypoint
 
-      - name: Build and Start Tunnelsats
+      - name: Build locally and Start Tunnelsats
         run: |
-          docker compose build tunnelsats
+          IMAGE=$(grep -E "image: tunnelsats/ts-umbrel-app" docker-compose.yml | awk '{print $2}')
+          docker build -t $IMAGE .
           docker compose up -d tunnelsats
 
       - name: Assert Container Starts Successfully
