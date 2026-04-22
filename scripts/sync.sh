@@ -118,9 +118,9 @@ run_promote() {
 
     VERSION="${VERSION:-$(grep "^version: " "${REPO_ROOT}/tunnelsats/umbrel-app.yml" | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)}"
     if [ -z "$VERSION" ]; then log_error "Could not extract version"; return 1; fi
-    log_info "Promoting version: v${VERSION}"
+    log_info "Promoting version: ${VERSION}"
 
-    IMAGE="tunnelsats/ts-umbrel-app:v${VERSION}"
+    IMAGE="tunnelsats/ts-umbrel-app:${VERSION}"
     log_info "Polling Docker Hub for $IMAGE multi-arch index digest..."
     DIGEST=$(docker buildx imagetools inspect "$IMAGE" | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
 
@@ -130,9 +130,6 @@ run_promote() {
     fi
     log_info "Discovered Digest: ${DIGEST}"
 
-    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
-    log_info "Local docker-compose.yml pinned."
-
     UMBREL_APPS_DIR="${UMBREL_APPS_DIR:-${REPO_ROOT}/../umbrel-apps}"
     if [ ! -d "$UMBREL_APPS_DIR" ]; then
         log_error "Umbrel Apps store repo not found at ${UMBREL_APPS_DIR}. Set UMBREL_APPS_DIR manually."
@@ -141,6 +138,11 @@ run_promote() {
 
     log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
     rsync -av --delete --exclude=".gitkeep" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
+
+    log_info "Pinning image digest in monorepo docker-compose.yml..."
+    TARGET_COMPOSE="${UMBREL_APPS_DIR}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" "${TARGET_COMPOSE}" > "${TARGET_COMPOSE}.tmp" && mv "${TARGET_COMPOSE}.tmp" "${TARGET_COMPOSE}"
+    log_info "Monorepo docker-compose.yml pinned to ${VERSION#v}@${DIGEST}."
 
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
 
