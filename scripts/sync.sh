@@ -118,9 +118,9 @@ run_promote() {
 
     VERSION="${VERSION:-$(grep "^version: " "${REPO_ROOT}/tunnelsats/umbrel-app.yml" | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)}"
     if [ -z "$VERSION" ]; then log_error "Could not extract version"; return 1; fi
-    log_info "Promoting version: v${VERSION}"
+    log_info "Promoting version: ${VERSION}"
 
-    IMAGE="tunnelsats/ts-umbrel-app:v${VERSION}"
+    IMAGE="tunnelsats/ts-umbrel-app:${VERSION}"
     log_info "Polling Docker Hub for $IMAGE multi-arch index digest..."
     DIGEST=$(docker buildx imagetools inspect "$IMAGE" | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
 
