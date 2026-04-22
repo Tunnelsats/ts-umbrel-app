@@ -100,7 +100,7 @@ run_vendor() {
 
 run_version() {
     if [ "$#" -lt 1 ]; then log_error "Version argument required"; return 1; fi
-    NEW_VERSION="$1"
+    NEW_VERSION="${1#v}"
     if [[ "$NEW_VERSION" =~ [^a-zA-Z0-9._-] ]]; then
         log_error "Invalid version string: $NEW_VERSION (only alphanumeric, '.', '_', '-' allowed)"
         return 1
