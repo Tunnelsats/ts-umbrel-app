@@ -38,11 +38,23 @@ jobs:
           chmod +x scripts/test.sh
           ./scripts/test.sh entrypoint
 
-      - name: Build locally and Start Tunnelsats
-        run: |
-          IMAGE=$(grep -E "image: tunnelsats/ts-umbrel-app" docker-compose.yml | awk '{print $2}')
-          docker build -t $IMAGE .
-          docker compose up -d tunnelsats
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Image Tag
+        run: echo "IMAGE=$(grep -E 'image: tunnelsats/ts-umbrel-app' docker-compose.yml | awk '{print $2}')" >> $GITHUB_ENV
+
+      - name: Build Docker Image with Cache
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start Tunnelsats
+        run: docker compose up -d tunnelsats
 
       - name: Assert Container Starts Successfully
         run: |
