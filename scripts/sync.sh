@@ -150,7 +150,7 @@ run_promote() {
     # Inject submitter and submission PR URL (if provided)
     if grep -qE "^submitter:" "${TARGET_MANIFEST}"; then
         log_info "submitter/submission already present, skipping injection."
-    elif [ -n "$SUBMISSION_URL" ]; then
+    elif [ -n "${SUBMISSION_URL:-}" ]; then
         sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${SUBMISSION_URL}@" "${TARGET_MANIFEST}" > "${TARGET_MANIFEST}.tmp" && mv "${TARGET_MANIFEST}.tmp" "${TARGET_MANIFEST}"
     fi
 
