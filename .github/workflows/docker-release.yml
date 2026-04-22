@@ -52,8 +52,11 @@ jobs:
           
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "IS_NEW_VERSION=false" >> $GITHUB_OUTPUT
-          else
+          elif gh release view "v${VERSION}" 2>&1 | grep -q "release not found\|Could not resolve"; then
             echo "IS_NEW_VERSION=true" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Failed to query GitHub releases (API error or rate limit). Aborting to avoid overwriting existing tags."
+            exit 1
           fi
 
       - name: Extract metadata (tags, labels)
