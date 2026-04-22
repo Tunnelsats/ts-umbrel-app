@@ -107,7 +107,7 @@ run_version() {
     fi
     log_info "Updating version to ${NEW_VERSION}..."
     sed "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml" > "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
-    sed -E "s#(ts-umbrel-app:v)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
 }
 
 run_promote() {
