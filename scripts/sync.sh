@@ -130,9 +130,6 @@ run_promote() {
     fi
     log_info "Discovered Digest: ${DIGEST}"
 
-    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
-    log_info "Local docker-compose.yml pinned."
-
     UMBREL_APPS_DIR="${UMBREL_APPS_DIR:-${REPO_ROOT}/../umbrel-apps}"
     if [ ! -d "$UMBREL_APPS_DIR" ]; then
         log_error "Umbrel Apps store repo not found at ${UMBREL_APPS_DIR}. Set UMBREL_APPS_DIR manually."
@@ -141,6 +138,10 @@ run_promote() {
 
     log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
     rsync -av --delete --exclude=".gitkeep" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
+
+    log_info "Pinning image digest in monorepo docker-compose.yml..."
+    TARGET_COMPOSE="${UMBREL_APPS_DIR}/tunnelsats/docker-compose.yml"
+    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION}@${DIGEST}#" "${TARGET_COMPOSE}" > "${TARGET_COMPOSE}.tmp" && mv "${TARGET_COMPOSE}.tmp" "${TARGET_COMPOSE}"
 
     TARGET_MANIFEST="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
 
