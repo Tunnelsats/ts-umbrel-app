@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - master
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - master
@@ -14,7 +12,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     
     steps:
       - name: Checkout Code
@@ -34,6 +32,26 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract Version
+        id: extract_version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep "^version: " tunnelsats/umbrel-app.yml | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract version from tunnelsats/umbrel-app.yml"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+          echo "MAJOR_MINOR=$MAJOR_MINOR" >> $GITHUB_OUTPUT
+          
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "IS_NEW_VERSION=false" >> $GITHUB_OUTPUT
+          else
+            echo "IS_NEW_VERSION=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v5
@@ -43,8 +61,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.extract_version.outputs.VERSION }},enable=${{ steps.extract_version.outputs.IS_NEW_VERSION == 'true' }}
+            type=raw,value=${{ steps.extract_version.outputs.MAJOR_MINOR }},enable=${{ steps.extract_version.outputs.IS_NEW_VERSION == 'true' }}
 
       - name: Build and Push
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v5
@@ -58,3 +76,21 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: github.event_name != 'pull_request' && steps.extract_version.outputs.IS_NEW_VERSION == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.extract_version.outputs.VERSION }}"
+          echo "Creating new release v${VERSION}..."
+          gh release create "v${VERSION}" \
+            --title "Release v${VERSION}" \
+            --target ${{ github.sha }} \
+            --generate-notes || {
+              if gh release view "v${VERSION}" >/dev/null 2>&1; then
+                echo "Release v${VERSION} already exists, skipping."
+              else
+                exit 1
+              fi
+            }
