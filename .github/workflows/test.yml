@@ -47,7 +47,7 @@ jobs:
           echo "IMAGE=$(grep -E 'image: tunnelsats/ts-umbrel-app' docker-compose.yml | awk '{print $2}')" >> $GITHUB_OUTPUT
 
       - name: Build Docker Image with Cache
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
