@@ -17,6 +17,17 @@ DOCKER_TARGET_IP="10.9.9.9"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 
+# k3s mode: set K3S_MODE=true to bypass Docker networking and use Kubernetes Services instead
+K3S_MODE="${K3S_MODE:-false}"
+LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
+CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
+CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
+K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
+K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+K8S_API_URL="https://kubernetes.default.svc"
+
 API_PID=""
 LAST_RECONCILE_EPOCH=0
 
@@ -54,8 +65,11 @@ write_state() {
     local tmp
     tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
 
+    local dataplane_mode
+    dataplane_mode="$([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "docker-full-parity")"
+
     if jq -n \
-        --arg dataplane_mode "docker-full-parity" \
+        --arg dataplane_mode "${dataplane_mode}" \
         --arg target_container "${TARGET_CONTAINER_NAME:-}" \
         --arg target_ip "${DOCKER_TARGET_IP:-}" \
         --arg target_impl "${TARGET_IMPL:-}" \
@@ -126,6 +140,15 @@ docker_api_with_code() {
     fi
 }
 
+k8s_api() {
+    local path="$1"
+    local token
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
+    curl -sf --cacert "${K8S_SA_CA_PATH}" \
+        -H "Authorization: Bearer ${token}" \
+        "${K8S_API_URL}${path}"
+}
+
 read_wg_config_path() {
     local -a files=()
     # Use ls -1t for flat (non-recursive), time-ordered discovery.
@@ -155,10 +178,55 @@ extract_forwarding_port() {
     echo "${port}"
 }
 
+detect_k3s_target() {
+    TARGET_CONTAINER_ID=""
+    TARGET_CONTAINER_NAME=""
+    TARGET_IMPL=""
+
+    local svc_name svc_fqdn svc_ip
+
+    if [ -n "${LND_K8S_SERVICE}" ]; then
+        svc_name="${LND_K8S_SERVICE}"
+        svc_fqdn="${svc_name}.${K8S_NAMESPACE}.svc.cluster.local"
+        svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
+        [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
+        if [ -n "${svc_ip}" ]; then
+            TARGET_IMPL="lnd"
+            TARGET_CONTAINER_NAME="${svc_name}"
+            DOCKER_TARGET_IP="${svc_ip}"
+            LN_TARGET_PORT="9735"
+            log INFO "k3s: Detected LND service ${svc_name} at ${svc_ip}"
+            return 0
+        fi
+        log WARN "k3s: Could not resolve LND service ${svc_fqdn}"
+    fi
+
+    if [ -n "${CLN_K8S_SERVICE}" ]; then
+        svc_name="${CLN_K8S_SERVICE}"
+        svc_fqdn="${svc_name}.${K8S_NAMESPACE}.svc.cluster.local"
+        svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
+        [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
+        if [ -n "${svc_ip}" ]; then
+            TARGET_IMPL="cln"
+            TARGET_CONTAINER_NAME="${svc_name}"
+            DOCKER_TARGET_IP="${svc_ip}"
+            LN_TARGET_PORT="9736"
+            log INFO "k3s: Detected CLN service ${svc_name} at ${svc_ip}"
+            return 0
+        fi
+        log WARN "k3s: Could not resolve CLN service ${svc_fqdn}"
+    fi
+
+    LAST_ERROR="k3s: No LND/CLN service resolved (LND_K8S_SERVICE=${LND_K8S_SERVICE:-}, CLN_K8S_SERVICE=${CLN_K8S_SERVICE:-})"
+    return 1
+}
+
 detect_lightning_container() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+
+    [[ "${K3S_MODE}" == "true" ]] && { detect_k3s_target; return; }
 
     local containers
     containers=$(docker_api "GET" "/containers/json?all=0") || return 1
@@ -207,6 +275,7 @@ detect_lightning_container() {
 }
 
 ensure_docker_network() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
     local response body code
     response=$(docker_api_with_code "GET" "/networks/${DOCKER_NETWORK_NAME}") || true
     body="${response%HTTPSTATUS:*}"
@@ -236,6 +305,10 @@ ensure_docker_network() {
 }
 
 resolve_bridge_name() {
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        BRIDGE_NAME=""
+        return 0
+    fi
     local net
     net=$(docker_api "GET" "/networks/${DOCKER_NETWORK_NAME}") || return 1
 
@@ -250,6 +323,7 @@ resolve_bridge_name() {
 }
 
 ensure_container_attached() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
     local inspect
     inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || return 1
 
@@ -351,40 +425,65 @@ ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
     
-    # Priority 32500: Local-to-Local bypass.
-    # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
-    if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
-        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1; then
-            if ! ip rule show pref 32500 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
-                LAST_ERROR="Failed to add local-to-local bypass rule for ${DOCKER_NETWORK_SUBNET}"
-                return 1
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # k3s mode: route per-service-IP through WireGuard instead of a bridge subnet.
+        # Priority 32500: prevent the service IP from routing to itself via table 51820.
+        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${DOCKER_TARGET_IP} lookup main"; then
+            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1; then
+                if ! ip rule show pref 32500 | grep -q "from ${DOCKER_TARGET_IP}"; then
+                    LAST_ERROR="k3s: Failed to add local-bypass rule for ${DOCKER_TARGET_IP}"
+                    return 1
+                fi
             fi
+            changed=1
         fi
-        changed=1
-    fi
+        # Priority 32764: route responses FROM the Lightning service IP back through WireGuard.
+        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} lookup 51820"; then
+            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
+                if ! ip rule show pref 32764 | grep -q "from ${DOCKER_TARGET_IP}"; then
+                    LAST_ERROR="k3s: Failed to add policy routing rule for ${DOCKER_TARGET_IP}"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
+    else
+        # Docker mode: subnet-based rules for the bridge network.
+        # Priority 32500: Local-to-Local bypass.
+        # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
+        if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
+            if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1; then
+                if ! ip rule show pref 32500 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                    LAST_ERROR="Failed to add local-to-local bypass rule for ${DOCKER_NETWORK_SUBNET}"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
 
-    if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
-        if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 pref 32764 >/dev/null 2>&1; then
-            if ! ip rule show pref 32764 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
-                LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
-                return 1
+        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
+            if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 pref 32764 >/dev/null 2>&1; then
+                if ! ip rule show pref 32764 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                    LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
+                    return 1
+                fi
             fi
+            changed=1
         fi
-        changed=1
-    fi
 
-    # Ensure the tunnelsats bridge gateway itself (10.9.9.1) is also routed through the tunnel 
-    # to prevent outbound leaks from this container during diagnostics (e.g. curl ifconfig.me)
-    local bridge_gw
-    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
-    if ! ip rule show | grep -qE "from ${bridge_gw//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
-        if ! ip rule add from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1; then
-            if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
-                LAST_ERROR="Failed to add policy routing rule for bridge gateway ${bridge_gw}"
-                return 1
+        # Ensure the tunnelsats bridge gateway itself (10.9.9.1) is also routed through the tunnel
+        # to prevent outbound leaks from this container during diagnostics (e.g. curl ifconfig.me)
+        local bridge_gw
+        bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+        if ! ip rule show | grep -qE "from ${bridge_gw//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
+            if ! ip rule add from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1; then
+                if ! ip rule show pref 32763 | grep -q "from ${bridge_gw}"; then
+                    LAST_ERROR="Failed to add policy routing rule for bridge gateway ${bridge_gw}"
+                    return 1
+                fi
             fi
+            changed=1
         fi
-        changed=1
     fi
 
     if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
@@ -482,41 +581,75 @@ ensure_nat_forward_rules() {
         fi
     fi
 
-    forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-    if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
-        log INFO "Syncing FORWARD inbound rules"
-        remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-        if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
-            -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
-            LAST_ERROR="Failed to add FORWARD inbound rule"
-            return 1
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # k3s mode: use conntrack for established flows + allow all inbound from WireGuard interface.
+        # No bridge interface to reference; iptables matches by connection state and WG interface.
+        forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
+        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-m conntrack"; then
+            log INFO "Syncing FORWARD inbound rules (k3s)"
+            remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
+            if ! iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED \
+                -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
+                LAST_ERROR="k3s: Failed to add FORWARD inbound rule"
+                return 1
+            fi
+            changed=1
         fi
-        changed=1
-    fi
 
-    forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-    if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${BRIDGE_NAME}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
-        log INFO "Syncing FORWARD outbound rules"
-        remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-        if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
-            -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
-            LAST_ERROR="Failed to add FORWARD outbound rule"
-            return 1
+        forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
+        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+            log INFO "Syncing FORWARD outbound rules (k3s)"
+            remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+            if ! iptables -I FORWARD 2 -i "${WG_IFACE}" \
+                -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
+                LAST_ERROR="k3s: Failed to add FORWARD outbound rule"
+                return 1
+            fi
+            changed=1
         fi
-        changed=1
+    else
+        # Docker mode: bridge-interface FORWARD rules.
+        forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
+        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+            log INFO "Syncing FORWARD inbound rules"
+            remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
+            if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+                -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
+                LAST_ERROR="Failed to add FORWARD inbound rule"
+                return 1
+            fi
+            changed=1
+        fi
+
+        forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
+        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${BRIDGE_NAME}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+            log INFO "Syncing FORWARD outbound rules"
+            remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+            if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+                -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
+                LAST_ERROR="Failed to add FORWARD outbound rule"
+                return 1
+            fi
+            changed=1
+        fi
     fi
 
     NAT_CHANGED="${changed}"
 
     # Verify MASQUERADE positioning to ensure deterministic routing priority (Grep ID 3033104618)
     # Check if the exact rule exists at position 1 (first entry in POSTROUTING)
-    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${DOCKER_NETWORK_SUBNET}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        local masq_src="${DOCKER_TARGET_IP}"
+    else
+        local masq_src="${DOCKER_NETWORK_SUBNET}"
+    fi
+    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${masq_src}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
         log INFO "Rule rotation: TunnelSats MASQUERADE is not at position 1. Re-positioning for ${WG_IFACE}..."
-        
+
         # Deterministic cleanup before re-insertion at position 1 (Grep ID 3033104618)
         remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
-        
-        if ! iptables -t nat -I POSTROUTING 1 -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
+
+        if ! iptables -t nat -I POSTROUTING 1 -s "${masq_src}" -o "${WG_IFACE}" -m comment --comment "tunnelsats-masq" -j MASQUERADE; then
             LAST_ERROR="Failed to add/re-position MASQUERADE rule for ${WG_IFACE}"
             return 1
         fi
@@ -531,6 +664,42 @@ ensure_nat_forward_rules() {
 rules_are_synced() {
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # 1. IP Rule check (per-service-IP routing)
+        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} lookup 51820"; then
+            log WARN "rules_are_synced: k3s IP rule FAIL"
+            return 1
+        fi
+
+        # 2. NAT PREROUTING check (DNAT)
+        if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}"; then
+            log WARN "rules_are_synced: NAT rule FAIL"
+            return 1
+        fi
+
+        # 3. FORWARD Inbound check (conntrack)
+        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-m conntrack"; then
+            log WARN "rules_are_synced: k3s FORWARD in FAIL"
+            return 1
+        fi
+
+        # 4. FORWARD Outbound check (WG interface)
+        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${WG_IFACE}"; then
+            log WARN "rules_are_synced: k3s FORWARD out FAIL"
+            return 1
+        fi
+
+        # 5. MASQUERADE check
+        if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+            log WARN "rules_are_synced: MASQUERADE rule FAIL"
+            return 1
+        fi
+
+        return 0
+    fi
+
+    # Docker mode checks
 
     # 1. IP Rule check (Subnet routing)
     if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
@@ -599,18 +768,24 @@ cleanup_dataplane() {
 
     local max_attempts=10
     local attempt=0
-    # Remove local bypass rule (pref 32500)
-    ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
 
-    # Remove bridge gateway tunnel rule (pref 32763)
-    local bridge_gw
-    bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
-    ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+    else
+        # Remove local bypass rule (pref 32500)
+        ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
 
-    while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
-        ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
-        attempt=$((attempt + 1))
-    done
+        # Remove bridge gateway tunnel rule (pref 32763)
+        local bridge_gw
+        bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+        ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
+        while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
+            ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
+            attempt=$((attempt + 1))
+        done
+    fi
 
     ip route flush table 51820 >/dev/null 2>&1 || true
 
@@ -667,7 +842,7 @@ reconcile_once() {
 
     log INFO "reconcile_start reason=${reason}"
 
-    if [ ! -S "${DOCKER_SOCK}" ]; then
+    if [[ "${K3S_MODE}" != "true" ]] && [ ! -S "${DOCKER_SOCK}" ]; then
         LAST_ERROR="Docker socket unavailable"
         write_state
         if [ -n "${request_id}" ]; then
@@ -677,7 +852,7 @@ reconcile_once() {
     fi
 
     if ! detect_lightning_container; then
-        LAST_ERROR="No running LND/CLN container detected"
+        LAST_ERROR="${LAST_ERROR:-No running LND/CLN container detected}"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
@@ -702,7 +877,7 @@ reconcile_once() {
     fi
 
     if ! resolve_bridge_name; then
-        LAST_ERROR="Failed to resolve docker bridge interface"
+        LAST_ERROR="Failed to resolve docker bridge interface (not applicable in k3s mode)"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
@@ -825,7 +1000,7 @@ main_loop() {
 
 trap cleanup SIGTERM SIGINT
 
-echo "Starting Tunnelsats v3 (Umbrel App)..."
+echo "Starting Tunnelsats v3 (mode: $([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "umbrel"))..."
 log INFO "Starting internal dashboard server on port 9739"
 python3 /app/server/app.py &
 API_PID=$!

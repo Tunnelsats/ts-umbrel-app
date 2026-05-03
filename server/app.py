@@ -100,6 +100,14 @@ CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 
+# k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
+K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
+K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
+LND_K8S_POD_SELECTOR = os.environ.get("LND_K8S_POD_SELECTOR", "app=lnd")
+CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
+K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
     ip_network("10.0.0.0/8"),
@@ -821,9 +829,72 @@ def docker_api_post(path):
         return False
 
 
+def k8s_list_pods():
+    """Fetch running pods from k8s API and normalize to a Docker-compatible container list."""
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+        resp.raise_for_status()
+        containers = []
+        for pod in resp.json().get("items", []):
+            meta = pod.get("metadata", {})
+            status = pod.get("status", {})
+            if status.get("phase") != "Running":
+                continue
+            pod_name = meta.get("name", "")
+            pod_ip = status.get("podIP", "")
+            containers.append({
+                "Names": [f"/{pod_name}"],
+                "Id": meta.get("uid", pod_name),
+                "NetworkSettings": {"Networks": {"k8s": {"IPAddress": pod_ip}}},
+            })
+        return containers
+    except Exception as exc:
+        app.logger.warning(f"k8s pod listing failed: {exc}")
+        return None
+
+
+def k8s_get_pod_name(label_selector):
+    """Return the name of the first Running pod matching label_selector."""
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods?labelSelector={label_selector}"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+        resp.raise_for_status()
+        for pod in resp.json().get("items", []):
+            if pod.get("status", {}).get("phase") == "Running":
+                return pod["metadata"]["name"]
+    except Exception as exc:
+        app.logger.warning(f"k8s pod lookup failed (selector={label_selector}): {exc}")
+    return None
+
+
+def k8s_delete_pod(pod_name):
+    """Delete a pod by name; the owning Deployment will recreate it."""
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods/{pod_name}"
+        resp = requests.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
+        return resp.status_code in (200, 202)
+    except Exception as exc:
+        app.logger.warning(f"k8s pod deletion failed ({pod_name}): {exc}")
+        return False
+
+
+def list_containers():
+    """Return the running container/pod list for the active mode."""
+    if K3S_MODE:
+        return k8s_list_pods()
+    return docker_api("/containers/json?all=0")
+
+
 def container_ip_by_match(pattern, containers=None):
     if containers is None:
-        containers = docker_api("/containers/json?all=0")
+        containers = list_containers()
     if not containers:
         return ""
 
@@ -852,7 +923,7 @@ def container_ip_by_match(pattern, containers=None):
 
 def container_ids_by_match(pattern, containers=None):
     if containers is None:
-        containers = docker_api("/containers/json?all=0")
+        containers = list_containers()
     if not containers:
         return []
 
@@ -873,6 +944,18 @@ def container_id_by_match(pattern):
 
 
 def restart_container_by_pattern(pattern, is_lnd=False):
+    if K3S_MODE:
+        selector = LND_K8S_POD_SELECTOR if is_lnd else CLN_K8S_POD_SELECTOR
+        app.logger.info(f"k3s: Triggering pod restart (selector={selector})")
+        pod_name = k8s_get_pod_name(selector)
+        if not pod_name:
+            app.logger.error(f"k3s: No Running pod found for selector {selector}")
+            return False
+        app.logger.info(f"k3s: Deleting pod {pod_name} (Deployment will recreate it)")
+        result = k8s_delete_pod(pod_name)
+        app.logger.info(f"k3s: Pod deletion {'successful' if result else 'failed'}")
+        return result
+
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
     if is_lnd:
         app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
