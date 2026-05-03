@@ -20,7 +20,7 @@ COPY scripts/ /app/scripts/
 COPY web/ /app/web/
 COPY server/ /app/server/
 COPY tunnelsats/umbrel-app.yml /app/
-RUN chmod +x /app/scripts/*.sh
+RUN sed -i 's/\r//' /app/scripts/*.sh && chmod +x /app/scripts/*.sh
 
 ENV WG_CONF_PATH="/data/tunnelsats*.conf"
 

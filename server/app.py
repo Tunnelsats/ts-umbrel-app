@@ -103,6 +103,8 @@ WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
 K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
+LND_K8S_NAMESPACE = os.environ.get("LND_K8S_NAMESPACE", K8S_NAMESPACE)
+CLN_K8S_NAMESPACE = os.environ.get("CLN_K8S_NAMESPACE", K8S_NAMESPACE)
 LND_K8S_POD_SELECTOR = os.environ.get("LND_K8S_POD_SELECTOR", "app=lnd")
 CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
 K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -856,32 +858,34 @@ def k8s_list_pods():
         return None
 
 
-def k8s_get_pod_name(label_selector):
+def k8s_get_pod_name(label_selector, namespace=None):
     """Return the name of the first Running pod matching label_selector."""
+    ns = namespace or K8S_NAMESPACE
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
-        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods?labelSelector={label_selector}"
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={label_selector}"
         resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
         resp.raise_for_status()
         for pod in resp.json().get("items", []):
             if pod.get("status", {}).get("phase") == "Running":
                 return pod["metadata"]["name"]
     except Exception as exc:
-        app.logger.warning(f"k8s pod lookup failed (selector={label_selector}): {exc}")
+        app.logger.warning(f"k8s pod lookup failed (selector={label_selector}, ns={ns}): {exc}")
     return None
 
 
-def k8s_delete_pod(pod_name):
+def k8s_delete_pod(pod_name, namespace=None):
     """Delete a pod by name; the owning Deployment will recreate it."""
+    ns = namespace or K8S_NAMESPACE
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
-        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods/{pod_name}"
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{pod_name}"
         resp = requests.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
         return resp.status_code in (200, 202)
     except Exception as exc:
-        app.logger.warning(f"k8s pod deletion failed ({pod_name}): {exc}")
+        app.logger.warning(f"k8s pod deletion failed ({pod_name}, ns={ns}): {exc}")
         return False
 
 
@@ -890,6 +894,20 @@ def list_containers():
     if K3S_MODE:
         return k8s_list_pods()
     return docker_api("/containers/json?all=0")
+
+
+def lnd_exists():
+    """Return True if an LND container/pod is reachable in the current mode."""
+    if K3S_MODE:
+        return bool(k8s_get_pod_name(LND_K8S_POD_SELECTOR, namespace=LND_K8S_NAMESPACE))
+    return bool(container_ids_by_match(LND_CONTAINER_PATTERN))
+
+
+def cln_exists():
+    """Return True if a CLN container/pod is reachable in the current mode."""
+    if K3S_MODE:
+        return bool(k8s_get_pod_name(CLN_K8S_POD_SELECTOR, namespace=CLN_K8S_NAMESPACE))
+    return bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
 
 
 def container_ip_by_match(pattern, containers=None):
@@ -946,13 +964,14 @@ def container_id_by_match(pattern):
 def restart_container_by_pattern(pattern, is_lnd=False):
     if K3S_MODE:
         selector = LND_K8S_POD_SELECTOR if is_lnd else CLN_K8S_POD_SELECTOR
-        app.logger.info(f"k3s: Triggering pod restart (selector={selector})")
-        pod_name = k8s_get_pod_name(selector)
+        ns = LND_K8S_NAMESPACE if is_lnd else CLN_K8S_NAMESPACE
+        app.logger.info(f"k3s: Triggering pod restart (selector={selector}, ns={ns})")
+        pod_name = k8s_get_pod_name(selector, namespace=ns)
         if not pod_name:
-            app.logger.error(f"k3s: No Running pod found for selector {selector}")
+            app.logger.error(f"k3s: No Running pod found for selector {selector} in ns={ns}")
             return False
         app.logger.info(f"k3s: Deleting pod {pod_name} (Deployment will recreate it)")
-        result = k8s_delete_pod(pod_name)
+        result = k8s_delete_pod(pod_name, namespace=ns)
         app.logger.info(f"k3s: Pod deletion {'successful' if result else 'failed'}")
         return result
 
@@ -1461,14 +1480,32 @@ def local_status():
                 configs.append(fname)
 
     dataplane = read_dataplane_state()
-    containers = docker_api("/containers/json?all=0") or []
-    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
-    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
+
+    if K3S_MODE:
+        import socket
+        def _resolve_svc(svc_env, ns):
+            name = os.environ.get(svc_env, "")
+            if not name:
+                return ""
+            for fqdn in (f"{name}.{ns}.svc.cluster.local", name):
+                try:
+                    return socket.gethostbyname(fqdn)
+                except OSError:
+                    pass
+            return ""
+        lnd_ip = _resolve_svc("LND_K8S_SERVICE", LND_K8S_NAMESPACE)
+        cln_ip = _resolve_svc("CLN_K8S_SERVICE", CLN_K8S_NAMESPACE)
+        lnd_detected = lnd_exists()
+        cln_detected = cln_exists()
+    else:
+        containers = docker_api("/containers/json?all=0") or []
+        lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
+        cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
+        lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
+        cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
 
     # Granular state detection
     vpn_active = (wg_status == "Connected")
-    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
-    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
@@ -1776,7 +1813,7 @@ def configure_node():
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
-        if not container_ids_by_match(LND_CONTAINER_PATTERN):
+        if not lnd_exists():
             app.logger.warning("LND container not found. Skipping configuration.")
             return jsonify({
                 "success": False, 
@@ -1813,7 +1850,7 @@ def configure_node():
         )
 
     # CLN target
-    if not container_ids_by_match(CLN_CONTAINER_PATTERN):
+    if not cln_exists():
         app.logger.warning("CLN container not found. Skipping configuration.")
         return jsonify({
             "success": False, 
@@ -1855,8 +1892,8 @@ def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
-    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
-    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
+    lnd_detected = lnd_exists()
+    cln_detected = cln_exists()
 
     lnd_processed, lnd_changed = comment_out_config_lines(
         LND_CONFIG_PATH,

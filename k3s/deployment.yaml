@@ -38,12 +38,18 @@ spec:
             # Set to your LND Service name (used for routing + config injection)
             - name: LND_K8S_SERVICE
               value: "lnd"
+            # Namespace where LND runs — omit this if LND is in the same namespace as tunnelsats.
+            # Uncomment and set if they differ:
+            # - name: LND_K8S_NAMESPACE
+            #   value: "bitcoin-lab"
             # Label selector used to find (and restart) the LND pod
             - name: LND_K8S_POD_SELECTOR
               value: "app=lnd"
             # Uncomment to support Core-Lightning instead of / in addition to LND:
             # - name: CLN_K8S_SERVICE
             #   value: "cln"
+            # - name: CLN_K8S_NAMESPACE
+            #   value: "default"
             # - name: CLN_K8S_POD_SELECTOR
             #   value: "app=cln"
           ports:
@@ -55,6 +61,8 @@ spec:
               mountPath: /data
             - name: lnd-data
               mountPath: /lightning-data/lnd
+              # subPath: lnd   # ← uncomment if your PVC root has a "lnd/" subdirectory
+              #                #   (i.e. lnd.conf lives at <pvc-root>/lnd/lnd.conf)
             # Uncomment if using CLN:
             # - name: cln-data
             #   mountPath: /lightning-data/cln

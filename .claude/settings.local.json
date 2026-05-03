@@ -3,7 +3,8 @@
     "allow": [
       "Bash(gh repo *)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "Bash(bash -n C:/Users/mmzgc/dev/ts-umbrel-app/scripts/entrypoint.sh)"
     ]
   }
 }

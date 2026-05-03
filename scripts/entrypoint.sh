@@ -22,6 +22,10 @@ K3S_MODE="${K3S_MODE:-false}"
 LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
 CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
 K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+# Namespace where LND/CLN live — defaults to the same namespace as tunnelsats,
+# but must be set explicitly when they run in a different namespace.
+LND_K8S_NAMESPACE="${LND_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
+CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
 LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
 CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -187,15 +191,27 @@ detect_k3s_target() {
 
     if [ -n "${LND_K8S_SERVICE}" ]; then
         svc_name="${LND_K8S_SERVICE}"
-        svc_fqdn="${svc_name}.${K8S_NAMESPACE}.svc.cluster.local"
+        svc_fqdn="${svc_name}.${LND_K8S_NAMESPACE}.svc.cluster.local"
         svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
         [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
         if [ -n "${svc_ip}" ]; then
             TARGET_IMPL="lnd"
             TARGET_CONTAINER_NAME="${svc_name}"
-            DOCKER_TARGET_IP="${svc_ip}"
             LN_TARGET_PORT="9735"
-            log INFO "k3s: Detected LND service ${svc_name} at ${svc_ip}"
+            log INFO "k3s: Detected LND service ${svc_fqdn} at ClusterIP ${svc_ip}"
+            # Use the actual pod IP for DNAT and policy routing to avoid asymmetric
+            # routing caused by kube-proxy's double NAT through the ClusterIP.
+            local pod_ip
+            pod_ip=$(k8s_api "/api/v1/namespaces/${LND_K8S_NAMESPACE}/pods?labelSelector=${LND_K8S_POD_SELECTOR}" 2>/dev/null \
+                | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
+                | head -n1 || true)
+            if [ -n "${pod_ip}" ]; then
+                DOCKER_TARGET_IP="${pod_ip}"
+                log INFO "k3s: Using LND pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
+            else
+                DOCKER_TARGET_IP="${svc_ip}"
+                log WARN "k3s: Could not resolve LND pod IP, falling back to ClusterIP ${svc_ip}"
+            fi
             return 0
         fi
         log WARN "k3s: Could not resolve LND service ${svc_fqdn}"
@@ -203,15 +219,25 @@ detect_k3s_target() {
 
     if [ -n "${CLN_K8S_SERVICE}" ]; then
         svc_name="${CLN_K8S_SERVICE}"
-        svc_fqdn="${svc_name}.${K8S_NAMESPACE}.svc.cluster.local"
+        svc_fqdn="${svc_name}.${CLN_K8S_NAMESPACE}.svc.cluster.local"
         svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
         [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
         if [ -n "${svc_ip}" ]; then
             TARGET_IMPL="cln"
             TARGET_CONTAINER_NAME="${svc_name}"
-            DOCKER_TARGET_IP="${svc_ip}"
             LN_TARGET_PORT="9736"
-            log INFO "k3s: Detected CLN service ${svc_name} at ${svc_ip}"
+            log INFO "k3s: Detected CLN service ${svc_fqdn} at ClusterIP ${svc_ip}"
+            local pod_ip
+            pod_ip=$(k8s_api "/api/v1/namespaces/${CLN_K8S_NAMESPACE}/pods?labelSelector=${CLN_K8S_POD_SELECTOR}" 2>/dev/null \
+                | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
+                | head -n1 || true)
+            if [ -n "${pod_ip}" ]; then
+                DOCKER_TARGET_IP="${pod_ip}"
+                log INFO "k3s: Using CLN pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
+            else
+                DOCKER_TARGET_IP="${svc_ip}"
+                log WARN "k3s: Could not resolve CLN pod IP, falling back to ClusterIP ${svc_ip}"
+            fi
             return 0
         fi
         log WARN "k3s: Could not resolve CLN service ${svc_fqdn}"
@@ -426,22 +452,23 @@ ensure_policy_routing() {
     POLICY_CHANGED="0"
     
     if [[ "${K3S_MODE}" == "true" ]]; then
-        # k3s mode: route per-service-IP through WireGuard instead of a bridge subnet.
-        # Priority 32500: prevent the service IP from routing to itself via table 51820.
-        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${DOCKER_TARGET_IP} lookup main"; then
-            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1; then
-                if ! ip rule show pref 32500 | grep -q "from ${DOCKER_TARGET_IP}"; then
-                    LAST_ERROR="k3s: Failed to add local-bypass rule for ${DOCKER_TARGET_IP}"
-                    return 1
-                fi
-            fi
-            changed=1
-        fi
-        # Priority 32764: route responses FROM the Lightning service IP back through WireGuard.
-        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} lookup 51820"; then
-            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
-                if ! ip rule show pref 32764 | grep -q "from ${DOCKER_TARGET_IP}"; then
-                    LAST_ERROR="k3s: Failed to add policy routing rule for ${DOCKER_TARGET_IP}"
+        # k3s mode: fwmark-based routing so ONLY replies to WireGuard-originated connections
+        # are sent back through the tunnel. IP-source rules (from <pod-ip> lookup 51820) route
+        # ALL traffic from the LND pod through WG, which breaks thunderhub/lndg and causes
+        # chacha20poly1305 auth failures on LND's own outbound P2P connections.
+        # The mangle rules added in ensure_nat_forward_rules() mark incoming WG packets in
+        # FORWARD (after DNAT) and save the mark to conntrack; CONNMARK --restore-mark in
+        # PREROUTING then tags reply packets from LND so they take the fwmark routing path.
+
+        # Remove any legacy IP-source rules left by a previous deployment.
+        ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+
+        # Single fwmark rule: only packets carrying fwmark 51820 go through table 51820.
+        if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
+            if ! ip rule add fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1; then
+                if ! ip rule show pref 32764 | grep -q "fwmark"; then
+                    LAST_ERROR="k3s: Failed to add fwmark policy routing rule"
                     return 1
                 fi
             fi
@@ -607,6 +634,46 @@ ensure_nat_forward_rules() {
             fi
             changed=1
         fi
+
+        # Mangle rules for conntrack fwmark routing.
+        # PREROUTING --restore-mark: on all packets, restore any conntrack-saved mark.
+        #   This causes LND reply packets to inherit fwmark 51820 from their conntrack entry,
+        #   which triggers the "fwmark 51820 lookup 51820" policy rule → routes back via WG.
+        # FORWARD --set-mark / --save-mark: fired AFTER DNAT, only for WG-ingress packets.
+        #   Marks and saves to conntrack so the restore-mark works for replies.
+        local conn_restore_count conn_mark_count conn_save_count
+        conn_restore_count=$(iptables -t mangle -S PREROUTING | grep -c "tunnelsats-conn-restore" || true)
+        if [ "${conn_restore_count}" -ne 1 ]; then
+            log INFO "Syncing mangle CONNMARK restore rule (k3s)"
+            remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+            if ! iptables -t mangle -A PREROUTING -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark; then
+                LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
+                return 1
+            fi
+            changed=1
+        fi
+
+        conn_mark_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-wg-mark" || true)
+        if [ "${conn_mark_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-wg-mark" | grep -qF -- "-i ${WG_IFACE}"; then
+            log INFO "Syncing mangle MARK set-mark rule (k3s)"
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-wg-mark" -j MARK --set-mark 51820; then
+                LAST_ERROR="k3s: Failed to add MARK set-mark rule"
+                return 1
+            fi
+            changed=1
+        fi
+
+        conn_save_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-conn-save" || true)
+        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF -- "-i ${WG_IFACE}"; then
+            log INFO "Syncing mangle CONNMARK save-mark rule (k3s)"
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --save-mark; then
+                LAST_ERROR="k3s: Failed to add CONNMARK save-mark rule"
+                return 1
+            fi
+            changed=1
+        fi
     else
         # Docker mode: bridge-interface FORWARD rules.
         forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
@@ -666,9 +733,15 @@ rules_are_synced() {
     local internal_match_port="${FORWARDING_PORT}"
 
     if [[ "${K3S_MODE}" == "true" ]]; then
-        # 1. IP Rule check (per-service-IP routing)
-        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} lookup 51820"; then
-            log WARN "rules_are_synced: k3s IP rule FAIL"
+        # 1. fwmark policy routing rule
+        if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
+            log WARN "rules_are_synced: k3s fwmark rule FAIL"
+            return 1
+        fi
+
+        # 1b. mangle CONNMARK restore rule (needed for reply routing)
+        if ! iptables -t mangle -S PREROUTING | grep -qF "tunnelsats-conn-restore"; then
+            log WARN "rules_are_synced: k3s mangle conn-restore FAIL"
             return 1
         fi
 
@@ -770,8 +843,13 @@ cleanup_dataplane() {
     local attempt=0
 
     if [[ "${K3S_MODE}" == "true" ]]; then
+        ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
+        # Also remove any legacy IP-source rules from older deployments.
         ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
         ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
     else
         # Remove local bypass rule (pref 32500)
         ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
