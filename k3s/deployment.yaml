@@ -21,8 +21,8 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: tunnelsats
-          image: tunnelsats/ts-umbrel-app:3.1.1
-          imagePullPolicy: IfNotPresent
+          image: tunnelsats/ts-umbrel-app:k3s-dev
+          imagePullPolicy: Always
           securityContext:
             capabilities:
               add:

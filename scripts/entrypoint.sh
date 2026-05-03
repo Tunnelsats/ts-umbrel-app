@@ -460,9 +460,18 @@ ensure_policy_routing() {
         # FORWARD (after DNAT) and save the mark to conntrack; CONNMARK --restore-mark in
         # PREROUTING then tags reply packets from LND so they take the fwmark routing path.
 
-        # Remove any legacy IP-source rules left by a previous deployment.
-        ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
-        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        # Remove ALL IP-source rules at our reserved priorities — not just for the
+        # current pod IP. LND pod IP can change across restarts; if the old tunnelsats
+        # pod was SIGKILL'd, cleanup never ran and stale rules for the old IP remain.
+        local _pref _line _spec
+        for _pref in 32500 32763 32764; do
+            while IFS= read -r _line; do
+                [[ -z "${_line}" ]] && continue
+                _spec=$(echo "${_line}" | sed 's/^[0-9]*:[[:space:]]*//')
+                [[ -z "${_spec}" ]] && continue
+                ip rule del ${_spec} >/dev/null 2>&1 || true
+            done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" || true)
+        done
 
         # Single fwmark rule: only packets carrying fwmark 51820 go through table 51820.
         if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
@@ -636,40 +645,41 @@ ensure_nat_forward_rules() {
         fi
 
         # Mangle rules for conntrack fwmark routing.
-        # PREROUTING --restore-mark: on all packets, restore any conntrack-saved mark.
-        #   This causes LND reply packets to inherit fwmark 51820 from their conntrack entry,
-        #   which triggers the "fwmark 51820 lookup 51820" policy rule → routes back via WG.
-        # FORWARD --set-mark / --save-mark: fired AFTER DNAT, only for WG-ingress packets.
-        #   Marks and saves to conntrack so the restore-mark works for replies.
-        local conn_restore_count conn_mark_count conn_save_count
+        #
+        # FORWARD CONNMARK --set-mark: fires AFTER DNAT for packets arriving on tunnelsatsv2
+        #   (WG peer→LND direction). Writes mark 51820 directly into the conntrack entry.
+        #   IMPORTANT: must NOT use MARK --set-mark here — that sets the packet mark (nfmark)
+        #   which has bit 14 (0x4000) set (51820 = 0xca6c). kube-proxy's POSTROUTING rule
+        #   "--mark 0x4000/0x4000 -j MASQUERADE" would then masquerade the src to the cni0
+        #   bridge IP (10.42.0.1), breaking the Lightning Noise handshake. CONNMARK --set-mark
+        #   writes only to the conntrack mark, which kube-proxy does not inspect.
+        #
+        # PREROUTING --restore-mark (! -i tunnelsatsv2): copies the conntrack mark to the
+        #   packet mark ONLY for packets arriving on NON-WG interfaces — i.e. LND's replies
+        #   leaving via CNI. This is the critical exclusion: without it, subsequent WG-ingress
+        #   packets in the same TCP connection would also get fwmark 51820 restored and be
+        #   re-routed back through tunnelsatsv2 in a loop instead of being forwarded to LND.
+        local conn_restore_count conn_save_count
         conn_restore_count=$(iptables -t mangle -S PREROUTING | grep -c "tunnelsats-conn-restore" || true)
-        if [ "${conn_restore_count}" -ne 1 ]; then
+        if [ "${conn_restore_count}" -ne 1 ] || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}"; then
             log INFO "Syncing mangle CONNMARK restore rule (k3s)"
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            if ! iptables -t mangle -A PREROUTING -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark; then
+            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark; then
                 LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
                 return 1
             fi
             changed=1
         fi
 
-        conn_mark_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-wg-mark" || true)
-        if [ "${conn_mark_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-wg-mark" | grep -qF -- "-i ${WG_IFACE}"; then
-            log INFO "Syncing mangle MARK set-mark rule (k3s)"
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-wg-mark" -j MARK --set-mark 51820; then
-                LAST_ERROR="k3s: Failed to add MARK set-mark rule"
-                return 1
-            fi
-            changed=1
-        fi
+        # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
 
         conn_save_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-conn-save" || true)
-        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF -- "-i ${WG_IFACE}"; then
-            log INFO "Syncing mangle CONNMARK save-mark rule (k3s)"
+        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF "CONNMARK --set-mark"; then
+            log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --save-mark; then
-                LAST_ERROR="k3s: Failed to add CONNMARK save-mark rule"
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 51820; then
+                LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
                 return 1
             fi
             changed=1
@@ -739,9 +749,9 @@ rules_are_synced() {
             return 1
         fi
 
-        # 1b. mangle CONNMARK restore rule (needed for reply routing)
-        if ! iptables -t mangle -S PREROUTING | grep -qF "tunnelsats-conn-restore"; then
-            log WARN "rules_are_synced: k3s mangle conn-restore FAIL"
+        # 1b. mangle CONNMARK restore rule — must have ! -i tunnelsatsv2 to avoid routing loop
+        if ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}"; then
+            log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
             return 1
         fi
 
