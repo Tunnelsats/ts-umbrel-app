@@ -148,7 +148,7 @@ k8s_api() {
     local path="$1"
     local token
     token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
-    curl -sf --cacert "${K8S_SA_CA_PATH}" \
+    curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
         -H "Authorization: Bearer ${token}" \
         "${K8S_API_URL}${path}"
 }
@@ -659,12 +659,16 @@ ensure_nat_forward_rules() {
         #   leaving via CNI. This is the critical exclusion: without it, subsequent WG-ingress
         #   packets in the same TCP connection would also get fwmark 51820 restored and be
         #   re-routed back through tunnelsatsv2 in a loop instead of being forwarded to LND.
+        # --mask 0xca6c (51820) constrains both set and restore operations to ONLY the bits
+        # that encode our fwmark, leaving all other conntrack/nfmark bits untouched. Without
+        # the mask, CONNMARK would copy/overwrite the full 32-bit mark, clobbering bits used
+        # by other netfilter consumers in the cluster (Cilium, Calico, tc qdiscs).
         local conn_restore_count conn_save_count
         conn_restore_count=$(iptables -t mangle -S PREROUTING | grep -c "tunnelsats-conn-restore" || true)
-        if [ "${conn_restore_count}" -ne 1 ] || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}"; then
+        if [ "${conn_restore_count}" -ne 1 ] || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
             log INFO "Syncing mangle CONNMARK restore rule (k3s)"
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark; then
+            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
                 return 1
             fi
@@ -675,10 +679,10 @@ ensure_nat_forward_rules() {
         remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
 
         conn_save_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-conn-save" || true)
-        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF "CONNMARK --set-mark"; then
+        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qiE "0xca6c/0xca6c"; then
             log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 51820; then
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
                 return 1
             fi
@@ -750,7 +754,9 @@ rules_are_synced() {
         fi
 
         # 1b. mangle CONNMARK restore rule — must have ! -i tunnelsatsv2 to avoid routing loop
-        if ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}"; then
+        #     AND --mask 0xca6c so we don't clobber other consumers' mark bits.
+        if ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" \
+            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
             log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
             return 1
         fi

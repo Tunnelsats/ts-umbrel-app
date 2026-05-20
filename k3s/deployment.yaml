@@ -6,6 +6,10 @@ metadata:
     app: tunnelsats
 spec:
   replicas: 1
+  # hostNetwork + fixed host port 9739 cannot tolerate the default RollingUpdate
+  # (old + new pod briefly coexist and the new pod fails to bind the host port).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: tunnelsats
