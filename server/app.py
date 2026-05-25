@@ -1318,14 +1318,18 @@ def _update_local_metadata(
             app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
             return False
 
-        if wg_pubkey and meta.get("wgPublicKey") != wg_pubkey:
+        active_pubkey = meta.get("wgPublicKey")
+        if wg_pubkey and active_pubkey and active_pubkey != wg_pubkey:
             app.logger.warning(
-                f"Metadata sync skipped: active wgPublicKey '{meta.get('wgPublicKey')}' "
+                f"Metadata sync skipped: active wgPublicKey '{active_pubkey}' "
                 f"does not match expected '{wg_pubkey}'."
             )
             return False
 
         changed = False
+        if wg_pubkey and not active_pubkey:
+            meta["wgPublicKey"] = wg_pubkey
+            changed = True
         # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
         _new_expiry = subscription_data.get("newExpiry")
         new_expiry = _new_expiry if _new_expiry is not None else subscription_data.get("expiresAt")
