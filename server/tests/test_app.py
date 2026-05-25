@@ -1859,9 +1859,15 @@ def test_claim_subscription_invalid_config(client, data_dir):
 class TestLazySubscriptionSync:
     @pytest.fixture(autouse=True)
     def setup_sync_test(self):
-        # Clear the global last sync dictionary before/after each test
-        if hasattr(app_module, '_last_subscription_sync_time'):
-            app_module._last_subscription_sync_time.clear()
+        # Clear the global next sync dictionary before/after each test
+        if hasattr(app_module, '_next_subscription_sync_time'):
+            app_module._next_subscription_sync_time.clear()
+
+    def _wait_for_sync_thread(self):
+        import threading
+        for t in threading.enumerate():
+            if t.name.startswith("sync_worker_"):
+                t.join(timeout=2.0)
 
     @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
     @patch('app._fetch_subscription_status')
@@ -1890,9 +1896,8 @@ class TestLazySubscriptionSync:
         data = json.loads(res.data)
         assert data["expires_at"] == "2026-05-04T19:06:14.000Z"
 
-        # Give the background thread a moment to run and write
-        # (Since it's a simple, fast local file write, 100ms is more than enough)
-        time.sleep(0.1)
+        # Wait for the background thread to finish
+        self._wait_for_sync_thread()
 
         # The metadata file on disk should now be updated
         with open(meta_path, 'r') as f:
@@ -1929,7 +1934,7 @@ class TestLazySubscriptionSync:
         client.get('/api/local/status')
 
         # Wait for threads
-        time.sleep(0.1)
+        self._wait_for_sync_thread()
 
         # Upstream API should only have been called once due to the cache
         assert mock_fetch_status.call_count == 1
@@ -1953,7 +1958,7 @@ class TestLazySubscriptionSync:
         mock_fetch_status.return_value = None
 
         client.get('/api/local/status')
-        time.sleep(0.1)
+        self._wait_for_sync_thread()
         
         # Verify first call made
         assert mock_fetch_status.call_count == 1
@@ -1961,7 +1966,7 @@ class TestLazySubscriptionSync:
         # Request again at 1000000 + 1800 (30 mins later). It should NOT call API again yet
         mock_time.return_value = 1000000.0 + 1800.0
         client.get('/api/local/status')
-        time.sleep(0.1)
+        self._wait_for_sync_thread()
         assert mock_fetch_status.call_count == 1
 
         # Request at 1000000 + 3601 (1 hour and 1 second later). It SHOULD retry
@@ -1972,7 +1977,7 @@ class TestLazySubscriptionSync:
             "status": "enabled"
         }
         client.get('/api/local/status')
-        time.sleep(0.1)
+        self._wait_for_sync_thread()
         assert mock_fetch_status.call_count == 2
 
         with open(meta_path, 'r') as f:
