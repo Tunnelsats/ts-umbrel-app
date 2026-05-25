@@ -1312,7 +1312,7 @@ def _update_local_metadata(
                 meta = json.load(fp)
         except (IOError, json.JSONDecodeError) as exc:
             app.logger.warning(f"Failed to read metadata for sync: {exc}")
-            raise
+            return False
 
         if not isinstance(meta, dict):
             app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
@@ -1323,7 +1323,7 @@ def _update_local_metadata(
                 f"Metadata sync skipped: active wgPublicKey '{meta.get('wgPublicKey')}' "
                 f"does not match expected '{wg_pubkey}'."
             )
-            return True
+            return False
 
         changed = False
         # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
@@ -1344,7 +1344,7 @@ def _update_local_metadata(
                 return True
             except (IOError, OSError) as exc:
                 app.logger.error(f"Failed to write synchronized metadata: {exc}")
-                raise
+                return False
         
         return True
 
