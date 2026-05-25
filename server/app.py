@@ -1185,7 +1185,7 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
             if status_info and isinstance(status_info, dict):
                 expiry = status_info.get("expiry")
                 if expiry:
-                    success = _update_local_metadata({"expiresAt": expiry})
+                    success = _update_local_metadata({"expiresAt": expiry}, wg_pubkey=pubkey)
                     if success:
                         app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
                     else:
@@ -1288,7 +1288,11 @@ def check_subscription(paymentHash):
         return jsonify({"error": str(exc)}), 500
 
 
-def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Optional[str] = None) -> bool:
+def _update_local_metadata(
+    subscription_data: Dict[str, Any],
+    payment_hash: Optional[str] = None,
+    wg_pubkey: Optional[str] = None
+) -> bool:
     """
     Update tunnelsats-meta.json with latest subscription data (e.g. after renewal).
     Only updates fields that are present in subscription_data.
@@ -1308,11 +1312,18 @@ def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Opti
                 meta = json.load(fp)
         except (IOError, json.JSONDecodeError) as exc:
             app.logger.warning(f"Failed to read metadata for sync: {exc}")
-            return False
+            raise
 
         if not isinstance(meta, dict):
             app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
             return False
+
+        if wg_pubkey and meta.get("wgPublicKey") != wg_pubkey:
+            app.logger.warning(
+                f"Metadata sync skipped: active wgPublicKey '{meta.get('wgPublicKey')}' "
+                f"does not match expected '{wg_pubkey}'."
+            )
+            return True
 
         changed = False
         # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
@@ -1333,7 +1344,7 @@ def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Opti
                 return True
             except (IOError, OSError) as exc:
                 app.logger.error(f"Failed to write synchronized metadata: {exc}")
-                return False
+                raise
         
         return True
 
