@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import uuid
+import threading
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
@@ -1135,6 +1136,55 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+_last_subscription_sync_lock = threading.Lock()
+_last_subscription_sync_time: Dict[str, float] = {}
+
+def _trigger_lazy_subscription_sync(wg_pubkey: str):
+    """
+    Triggers an asynchronous sync of the subscription status from the public API
+    if the last check was more than 24 hours ago.
+    """
+    if not wg_pubkey or wg_pubkey == "Not available":
+        return
+
+    now = time.time()
+    with _last_subscription_sync_lock:
+        last_sync = _last_subscription_sync_time.get(wg_pubkey, 0.0)
+        # 24 hours = 86400 seconds
+        if now - last_sync < 86400:
+            return
+        # Mark sync as triggered immediately to prevent concurrent duplicate threads
+        _last_subscription_sync_time[wg_pubkey] = now
+
+    def _sync_worker(pubkey):
+        app.logger.info(f"Starting lazy background subscription status sync for pubkey: {pubkey}")
+        try:
+            # Fetch directly from public API bypassing cache to get absolute truth
+            status_info = _fetch_subscription_status(pubkey)
+            if status_info and isinstance(status_info, dict):
+                expiry = status_info.get("expiry")
+                if expiry:
+                    updated = _update_local_metadata({"expiresAt": expiry})
+                    if updated:
+                        app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
+                    else:
+                        app.logger.debug("Background subscription sync completed, no changes needed")
+                else:
+                    app.logger.warning("Background subscription sync: API response missing 'expiry' field")
+            else:
+                app.logger.warning("Background subscription sync: Failed to fetch status from public API")
+                # On failure, let's reset the last sync time to retry in 1 hour instead of waiting 24 hours
+                with _last_subscription_sync_lock:
+                    _last_subscription_sync_time[pubkey] = time.time() - 86400 + 3600
+        except Exception as e:
+            app.logger.error(f"Error in background subscription sync worker: {e}")
+            with _last_subscription_sync_lock:
+                _last_subscription_sync_time[pubkey] = time.time() - 86400 + 3600
+
+    thread = threading.Thread(target=_sync_worker, args=(wg_pubkey,), daemon=True)
+    thread.start()
+
+
 @app.route("/api/servers", methods=["GET"])
 def get_servers():
     proxy_res = proxy_request("GET", "servers")
@@ -1370,6 +1420,8 @@ def renew_subscription():
 def local_status():
     app.logger.debug("Action Request: Fetching local status")
     wg_status, wg_pubkey = _get_wireguard_state()
+    if wg_pubkey:
+        _trigger_lazy_subscription_sync(wg_pubkey)
 
     configs = []
     if os.path.exists(DATA_DIR):
