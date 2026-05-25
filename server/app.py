@@ -1185,11 +1185,13 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
             if status_info and isinstance(status_info, dict):
                 expiry = status_info.get("expiry")
                 if expiry:
-                    updated = _update_local_metadata({"expiresAt": expiry})
-                    if updated:
+                    success = _update_local_metadata({"expiresAt": expiry})
+                    if success:
                         app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
                     else:
-                        app.logger.debug("Background subscription sync completed, no changes needed")
+                        app.logger.warning("Background subscription sync: Failed to update local metadata")
+                        with _subscription_sync_lock:
+                            _next_subscription_sync_time[pubkey] = time.time() + RETRY_INTERVAL_SECONDS
                 else:
                     app.logger.warning("Background subscription sync: API response missing 'expiry' field")
                     with _subscription_sync_lock:
@@ -1331,8 +1333,9 @@ def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Opti
                 return True
             except (IOError, OSError) as exc:
                 app.logger.error(f"Failed to write synchronized metadata: {exc}")
+                return False
         
-        return False
+        return True
 
 
 @app.route("/api/subscription/claim", methods=["POST"])
