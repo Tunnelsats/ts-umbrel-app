@@ -1164,10 +1164,9 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
 
     now = time.time()
     with _subscription_sync_lock:
-        # Evict entries where the last sync attempt was more than 48 hours ago
         stale_keys = [
             k for k, t in _next_subscription_sync_time.items()
-            if now - (t - SYNC_INTERVAL_SECONDS) > EVICTION_INTERVAL_SECONDS
+            if now - t > EVICTION_INTERVAL_SECONDS
         ]
         for k in stale_keys:
             _next_subscription_sync_time.pop(k, None)
