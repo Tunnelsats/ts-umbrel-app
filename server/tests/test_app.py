@@ -1854,3 +1854,133 @@ def test_claim_subscription_invalid_config(client, data_dir):
         data = json.loads(res.data)
         assert data["success"] is False
         assert "Invalid upstream payload" in data["error"]
+
+
+class TestLazySubscriptionSync:
+    @pytest.fixture(autouse=True)
+    def setup_sync_test(self):
+        # Clear the global next sync dictionary before/after each test
+        if hasattr(app_module, '_next_subscription_sync_time'):
+            app_module._next_subscription_sync_time.clear()
+
+    def _wait_for_sync_thread(self):
+        import threading
+        for t in threading.enumerate():
+            if t.name.startswith("sync_worker_"):
+                t.join(timeout=2.0)
+
+    @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
+    @patch('app._fetch_subscription_status')
+    def test_local_status_triggers_lazy_subscription_sync(self, mock_fetch_status, _mock_wg_state, client, data_dir):
+        # Setup metadata file
+        meta_path = os.path.join(data_dir, app_module.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({
+                "serverDomain": "au1.tunnelsats.com",
+                "expiresAt": "2026-05-04T19:06:14.000Z",
+                "wgPublicKey": "pubKey123"
+            }, f)
+
+        # Mock the upstream API status response with simulated latency
+        def mock_fetch_with_latency(*args, **kwargs):
+            time.sleep(0.05)
+            return {
+                "expiry": "2026-06-04T19:06:14.000Z",
+                "status": "enabled"
+            }
+        mock_fetch_status.side_effect = mock_fetch_with_latency
+
+        # First request to status endpoint should return old expiry immediately but trigger sync
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data["expires_at"] == "2026-05-04T19:06:14.000Z"
+
+        # Wait for the background thread to finish
+        self._wait_for_sync_thread()
+
+        # The metadata file on disk should now be updated
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+            assert meta["expiresAt"] == "2026-06-04T19:06:14.000Z"
+
+        # Second request to status endpoint should now return the new expiry
+        res = client.get('/api/local/status')
+        assert res.status_code == 200
+        data = json.loads(res.data)
+        assert data["expires_at"] == "2026-06-04T19:06:14.000Z"
+        
+        # Upstream API should only have been called once
+        mock_fetch_status.assert_called_once_with('pubKey123')
+
+    @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
+    @patch('app._fetch_subscription_status')
+    def test_lazy_subscription_sync_is_throttled(self, mock_fetch_status, _mock_wg_state, client, data_dir):
+        # Setup metadata
+        meta_path = os.path.join(data_dir, app_module.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({
+                "expiresAt": "2026-05-04T19:06:14.000Z",
+                "wgPublicKey": "pubKey123"
+            }, f)
+
+        mock_fetch_status.return_value = {
+            "expiry": "2026-06-04T19:06:14.000Z",
+            "status": "enabled"
+        }
+
+        # Make two rapid requests
+        client.get('/api/local/status')
+        client.get('/api/local/status')
+
+        # Wait for threads
+        self._wait_for_sync_thread()
+
+        # Upstream API should only have been called once due to the cache
+        assert mock_fetch_status.call_count == 1
+
+    @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
+    @patch('app._fetch_subscription_status')
+    @patch('app.time.time')
+    def test_lazy_subscription_sync_retries_on_failure(self, mock_time, mock_fetch_status, _mock_wg_state, client, data_dir):
+        # Start at time 1000000
+        mock_time.return_value = 1000000.0
+
+        # Setup metadata
+        meta_path = os.path.join(data_dir, app_module.META_FILE)
+        with open(meta_path, 'w') as f:
+            json.dump({
+                "expiresAt": "2026-05-04T19:06:14.000Z",
+                "wgPublicKey": "pubKey123"
+            }, f)
+
+        # First attempt: API fails
+        mock_fetch_status.return_value = None
+
+        client.get('/api/local/status')
+        self._wait_for_sync_thread()
+        
+        # Verify first call made
+        assert mock_fetch_status.call_count == 1
+
+        # Request again at 1000000 + 1800 (30 mins later). It should NOT call API again yet
+        mock_time.return_value = 1000000.0 + 1800.0
+        client.get('/api/local/status')
+        self._wait_for_sync_thread()
+        assert mock_fetch_status.call_count == 1
+
+        # Request at 1000000 + 3601 (1 hour and 1 second later). It SHOULD retry
+        mock_time.return_value = 1000000.0 + 3601.0
+        # This time API succeeds
+        mock_fetch_status.return_value = {
+            "expiry": "2026-06-04T19:06:14.000Z",
+            "status": "enabled"
+        }
+        client.get('/api/local/status')
+        self._wait_for_sync_thread()
+        assert mock_fetch_status.call_count == 2
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+            assert meta["expiresAt"] == "2026-06-04T19:06:14.000Z"
+
