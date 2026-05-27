@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import uuid
+import threading
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
@@ -109,6 +110,7 @@ LND_K8S_POD_SELECTOR = os.environ.get("LND_K8S_POD_SELECTOR", "app=lnd")
 CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
 K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+_metadata_lock = threading.Lock()
 
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
@@ -602,39 +604,48 @@ def _write_file_secure(path, content):
 
 def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
     """Saves the WG config and metadata to disk using atomic writes and automatic .bak rotation."""
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        backup_existing_wireguard_configs()
-        conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
-        meta_path = os.path.join(DATA_DIR, META_FILE)
-        _write_file_secure(conf_path, config_text)
-        _write_file_secure(meta_path, json.dumps(meta, indent=2))
-        return True
-    except (IOError, OSError) as exc:
-        app.logger.error(f"Failed to persist tunnelsats.conf and metadata: {exc}")
-        return False
-
-
-def _set_restart_pending(meta_path, meta, key, is_pending):
-    has_key = key in meta
-    current_pending = bool(meta.get(key))
-
-    if is_pending:
-        if has_key and current_pending:
+    with _metadata_lock:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            backup_existing_wireguard_configs()
+            conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
+            meta_path = os.path.join(DATA_DIR, META_FILE)
+            _write_file_secure(conf_path, config_text)
+            _write_file_secure(meta_path, json.dumps(meta, indent=2))
             return True
-        meta[key] = True
-    else:
-        if not has_key:
+        except (IOError, OSError) as exc:
+            app.logger.error(f"Failed to persist tunnelsats.conf and metadata: {exc}")
+            return False
+
+
+def _set_restart_pending(meta_path, _ignored_meta, key, is_pending):
+    with _metadata_lock:
+        if not os.path.exists(meta_path):
+            return False
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, OSError, json.JSONDecodeError):
+            return False
+
+        has_key = key in meta
+        current_pending = bool(meta.get(key))
+
+        if is_pending:
+            if has_key and current_pending:
+                return True
+            meta[key] = True
+        else:
+            if not has_key:
+                return True
+            meta.pop(key, None)
+
+        try:
+            _write_file_secure(meta_path, json.dumps(meta, indent=2))
             return True
-        meta.pop(key, None)
-
-    try:
-        _write_file_secure(meta_path, json.dumps(meta, indent=2))
-    except (IOError, OSError) as exc:
-        app.logger.warning(f"Failed to persist restart-pending state for {key}: {exc}")
-        return False
-
-    return True
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to persist restart-pending state for {key}: {exc}")
+            return False
 
 
 def _has_required_wireguard_blocks(config_text):
@@ -1237,6 +1248,73 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+_subscription_sync_lock = threading.Lock()
+_next_subscription_sync_time: Dict[str, float] = {}
+
+SYNC_INTERVAL_SECONDS = 86400  # 24 hours
+RETRY_INTERVAL_SECONDS = 3600  # 1 hour
+EVICTION_INTERVAL_SECONDS = 172800  # 48 hours
+
+def _trigger_lazy_subscription_sync(wg_pubkey: str):
+    """
+    Triggers an asynchronous sync of the subscription status from the public API
+    if the next allowed sync time has passed.
+    """
+    if not wg_pubkey or wg_pubkey == "Not available":
+        return
+
+    now = time.time()
+    with _subscription_sync_lock:
+        stale_keys = [
+            k for k, t in _next_subscription_sync_time.items()
+            if now - t > EVICTION_INTERVAL_SECONDS
+        ]
+        for k in stale_keys:
+            _next_subscription_sync_time.pop(k, None)
+
+        next_sync = _next_subscription_sync_time.get(wg_pubkey, 0.0)
+        if now < next_sync:
+            return
+        # Prevent concurrent duplicate threads by immediately pushing the next sync time
+        _next_subscription_sync_time[wg_pubkey] = now + SYNC_INTERVAL_SECONDS
+
+    def _sync_worker(pubkey):
+        app.logger.info(f"Starting lazy background subscription status sync for pubkey: {pubkey}")
+        try:
+            # Fetch directly from public API bypassing cache to get absolute truth
+            status_info = _fetch_subscription_status(pubkey)
+            if status_info and isinstance(status_info, dict):
+                expiry = status_info.get("expiry")
+                if expiry:
+                    success = _update_local_metadata({"expiresAt": expiry}, wg_pubkey=pubkey)
+                    if success:
+                        app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
+                    else:
+                        app.logger.warning("Background subscription sync: Failed to update local metadata")
+                        with _subscription_sync_lock:
+                            _next_subscription_sync_time[pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+                else:
+                    app.logger.warning("Background subscription sync: API response missing 'expiry' field")
+                    with _subscription_sync_lock:
+                        _next_subscription_sync_time[pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+            else:
+                app.logger.warning("Background subscription sync: Failed to fetch status from public API")
+                with _subscription_sync_lock:
+                    _next_subscription_sync_time[pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+        except Exception as e:
+            app.logger.error(f"Error in background subscription sync worker: {e}")
+            with _subscription_sync_lock:
+                _next_subscription_sync_time[pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+
+    thread = threading.Thread(
+        target=_sync_worker,
+        args=(wg_pubkey,),
+        name=f"sync_worker_{wg_pubkey}",
+        daemon=True
+    )
+    thread.start()
+
+
 @app.route("/api/servers", methods=["GET"])
 def get_servers():
     proxy_res = proxy_request("GET", "servers")
@@ -1311,52 +1389,69 @@ def check_subscription(paymentHash):
         return jsonify({"error": str(exc)}), 500
 
 
-def _update_local_metadata(subscription_data: Dict[str, Any], payment_hash: Optional[str] = None) -> bool:
+def _update_local_metadata(
+    subscription_data: Dict[str, Any],
+    payment_hash: Optional[str] = None,
+    wg_pubkey: Optional[str] = None
+) -> bool:
     """
     Update tunnelsats-meta.json with latest subscription data (e.g. after renewal).
     Only updates fields that are present in subscription_data.
     """
-    meta_path = os.path.join(DATA_DIR, META_FILE)
-    if not os.path.exists(meta_path):
-        app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
-        return False
-
     if not isinstance(subscription_data, dict):
         app.logger.warning("Metadata sync skipped: subscription payload is not a JSON object.")
         return False
 
-    try:
-        with open(meta_path, "r", encoding="utf-8") as fp:
-            meta = json.load(fp)
-    except (IOError, json.JSONDecodeError) as exc:
-        app.logger.warning(f"Failed to read metadata for sync: {exc}")
-        return False
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if not os.path.exists(meta_path):
+            app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
+            return False
 
-    if not isinstance(meta, dict):
-        app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
-        return False
-
-    changed = False
-    # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
-    _new_expiry = subscription_data.get("newExpiry")
-    new_expiry = _new_expiry if _new_expiry is not None else subscription_data.get("expiresAt")
-    
-    if new_expiry and meta.get("expiresAt") != new_expiry:
-        meta["expiresAt"] = new_expiry
-        changed = True
-
-    if payment_hash and meta.get("paymentHash") != payment_hash:
-        meta["paymentHash"] = payment_hash
-        changed = True
-
-    if changed:
         try:
-            _write_file_secure(meta_path, json.dumps(meta, indent=2))
-            return True
-        except (IOError, OSError) as exc:
-            app.logger.error(f"Failed to write synchronized metadata: {exc}")
-    
-    return False
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read metadata for sync: {exc}")
+            return False
+
+        if not isinstance(meta, dict):
+            app.logger.warning("Metadata sync skipped: metadata file is not a JSON object.")
+            return False
+
+        active_pubkey = meta.get("wgPublicKey")
+        if wg_pubkey and active_pubkey and active_pubkey != wg_pubkey:
+            app.logger.warning(
+                f"Metadata sync skipped: active wgPublicKey '{active_pubkey}' "
+                f"does not match expected '{wg_pubkey}'."
+            )
+            return False
+
+        changed = False
+        if wg_pubkey and not active_pubkey:
+            meta["wgPublicKey"] = wg_pubkey
+            changed = True
+        # Prefer renewal-specific newExpiry; fall back to expiresAt for standard subscription payloads.
+        _new_expiry = subscription_data.get("newExpiry")
+        new_expiry = _new_expiry if _new_expiry is not None else subscription_data.get("expiresAt")
+        
+        if new_expiry and meta.get("expiresAt") != new_expiry:
+            meta["expiresAt"] = new_expiry
+            changed = True
+
+        if payment_hash and meta.get("paymentHash") != payment_hash:
+            meta["paymentHash"] = payment_hash
+            changed = True
+
+        if changed:
+            try:
+                _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                return True
+            except (IOError, OSError) as exc:
+                app.logger.error(f"Failed to write synchronized metadata: {exc}")
+                return False
+        
+        return True
 
 
 @app.route("/api/subscription/claim", methods=["POST"])
@@ -1449,16 +1544,17 @@ def renew_subscription():
     if not isinstance(payload, dict):
         payload = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fp:
-                meta = json.load(fp)
-                if not payload.get("serverId") and "serverId" in meta:
-                    payload["serverId"] = meta["serverId"]
-                if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
-                    payload["wgPublicKey"] = meta["wgPublicKey"]
-        except (IOError, json.JSONDecodeError) as exc:
-            app.logger.warning(f"Failed to read metadata for renew autofill: {exc}")
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                    if not payload.get("serverId") and "serverId" in meta:
+                        payload["serverId"] = meta["serverId"]
+                    if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
+                        payload["wgPublicKey"] = meta["wgPublicKey"]
+            except (IOError, json.JSONDecodeError) as exc:
+                app.logger.warning(f"Failed to read metadata for renew autofill: {exc}")
 
     app.logger.info("Initiating renewal upstream...")
     res = proxy_request("POST", "subscription/renew", payload)
@@ -1472,6 +1568,8 @@ def renew_subscription():
 def local_status():
     app.logger.debug("Action Request: Fetching local status")
     wg_status, wg_pubkey = _get_wireguard_state()
+    if wg_pubkey:
+        _trigger_lazy_subscription_sync(wg_pubkey)
 
     configs = []
     if os.path.exists(DATA_DIR):
@@ -1547,16 +1645,17 @@ def local_status():
     expires_at = ""
     vpn_port = ""
     meta_path = os.path.join(DATA_DIR, META_FILE)
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fp:
-                meta = json.load(fp)
-                server_domain = meta.get("serverDomain", "")
-                expires_at = meta.get("expiresAt", "")
-                vpn_port = meta.get("vpnPort", "")
-        except (IOError, OSError, json.JSONDecodeError) as exc:
-            app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
-            pass
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                    server_domain = meta.get("serverDomain", "")
+                    expires_at = meta.get("expiresAt", "")
+                    vpn_port = meta.get("vpnPort", "")
+            except (IOError, OSError, json.JSONDecodeError) as exc:
+                app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
+                pass
 
     # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
@@ -1770,14 +1869,15 @@ def reconcile_status(request_id):
 def get_metadata():
     meta_data = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fp:
-                meta_data = json.load(fp)
-                meta_data.pop("presharedKey", None)
-                meta_data.pop("paymentHash", None)
-        except (json.JSONDecodeError, IOError) as exc:
-            app.logger.error(f"Error reading metadata file {meta_path}: {exc}")
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta_data = json.load(fp)
+                    meta_data.pop("presharedKey", None)
+                    meta_data.pop("paymentHash", None)
+            except (json.JSONDecodeError, IOError) as exc:
+                app.logger.error(f"Error reading metadata file {meta_path}: {exc}")
     return jsonify(meta_data)
 
 
@@ -1791,14 +1891,15 @@ def configure_node():
         return jsonify({"success": False, "error": "Invalid nodeType. Use 'lnd' or 'cln'."}), 400
 
     meta_path = os.path.join(DATA_DIR, META_FILE)
-    if not os.path.exists(meta_path):
-        return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
+    with _metadata_lock:
+        if not os.path.exists(meta_path):
+            return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
 
-    try:
-        with open(meta_path, "r", encoding="utf-8") as fp:
-            meta = json.load(fp)
-    except (IOError, OSError, json.JSONDecodeError):
-        return jsonify({"success": False, "error": "Unable to read tunnelsats metadata file."}), 500
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, OSError, json.JSONDecodeError):
+            return jsonify({"success": False, "error": "Unable to read tunnelsats metadata file."}), 500
 
     dns = str(meta.get("serverDomain", "")).strip()
     try:
