@@ -2,9 +2,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: tunnelsats
-  # This RoleBinding lives in the LND/CLN namespace and grants the
-  # tunnelsats ServiceAccount (which may reside elsewhere) pod
-  # get/list/delete rights ONLY in this namespace.
+  # This RoleBinding grants the tunnelsats ServiceAccount get/list/delete on
+  # pods in the namespace where it is applied — NOT cluster-wide. If LND/CLN
+  # live in a different namespace, copy this file into that namespace and
+  # set subjects[].namespace below to the namespace where the ServiceAccount
+  # actually lives. Kustomize will rewrite both for you if you set
+  # `namespace:` in kustomization.yaml.
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -153,6 +153,20 @@ k8s_api() {
         "${K8S_API_URL}${path}"
 }
 
+# Percent-encode a string for safe use inside a URL query parameter. Used for
+# labelSelector values which may contain '=', ',', '!', spaces, etc.
+urlencode() {
+    local s="$1" i c out=""
+    for (( i=0; i<${#s}; i++ )); do
+        c="${s:i:1}"
+        case "${c}" in
+            [a-zA-Z0-9._~-]) out+="${c}" ;;
+            *) out+=$(printf '%%%02X' "'${c}") ;;
+        esac
+    done
+    printf '%s' "${out}"
+}
+
 read_wg_config_path() {
     local -a files=()
     # Use ls -1t for flat (non-recursive), time-ordered discovery.
@@ -201,8 +215,9 @@ detect_k3s_target() {
             log INFO "k3s: Detected LND service ${svc_fqdn} at ClusterIP ${svc_ip}"
             # Use the actual pod IP for DNAT and policy routing to avoid asymmetric
             # routing caused by kube-proxy's double NAT through the ClusterIP.
-            local pod_ip
-            pod_ip=$(k8s_api "/api/v1/namespaces/${LND_K8S_NAMESPACE}/pods?labelSelector=${LND_K8S_POD_SELECTOR}" 2>/dev/null \
+            local pod_ip encoded_selector
+            encoded_selector=$(urlencode "${LND_K8S_POD_SELECTOR}")
+            pod_ip=$(k8s_api "/api/v1/namespaces/${LND_K8S_NAMESPACE}/pods?labelSelector=${encoded_selector}" 2>/dev/null \
                 | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
                 | head -n1 || true)
             if [ -n "${pod_ip}" ]; then
@@ -227,8 +242,9 @@ detect_k3s_target() {
             TARGET_CONTAINER_NAME="${svc_name}"
             LN_TARGET_PORT="9736"
             log INFO "k3s: Detected CLN service ${svc_fqdn} at ClusterIP ${svc_ip}"
-            local pod_ip
-            pod_ip=$(k8s_api "/api/v1/namespaces/${CLN_K8S_NAMESPACE}/pods?labelSelector=${CLN_K8S_POD_SELECTOR}" 2>/dev/null \
+            local pod_ip encoded_selector
+            encoded_selector=$(urlencode "${CLN_K8S_POD_SELECTOR}")
+            pod_ip=$(k8s_api "/api/v1/namespaces/${CLN_K8S_NAMESPACE}/pods?labelSelector=${encoded_selector}" 2>/dev/null \
                 | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
                 | head -n1 || true)
             if [ -n "${pod_ip}" ]; then
@@ -463,6 +479,10 @@ ensure_policy_routing() {
         # Remove ALL IP-source rules at our reserved priorities — not just for the
         # current pod IP. LND pod IP can change across restarts; if the old tunnelsats
         # pod was SIGKILL'd, cleanup never ran and stale rules for the old IP remain.
+        #
+        # Only touch rules that look like ours — i.e. rules that route to table 51820 or
+        # table main. This avoids accidentally wiping unrelated rules that some other
+        # operator on the host might have parked at these prefs.
         local _pref _line _spec
         for _pref in 32500 32763 32764; do
             while IFS= read -r _line; do
@@ -470,7 +490,7 @@ ensure_policy_routing() {
                 _spec=$(echo "${_line}" | sed 's/^[0-9]*:[[:space:]]*//')
                 [[ -z "${_spec}" ]] && continue
                 ip rule del ${_spec} >/dev/null 2>&1 || true
-            done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" || true)
+            done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" | grep -E "lookup (51820|main)" || true)
         done
 
         # Single fwmark rule: only packets carrying fwmark 51820 go through table 51820.
@@ -618,13 +638,14 @@ ensure_nat_forward_rules() {
     fi
 
     if [[ "${K3S_MODE}" == "true" ]]; then
-        # k3s mode: use conntrack for established flows + allow all inbound from WireGuard interface.
-        # No bridge interface to reference; iptables matches by connection state and WG interface.
+        # k3s mode: scope FORWARD rules to the target pod IP rather than accepting all
+        # established connections / all WG-ingress traffic. This keeps tunnelsats off the
+        # path for traffic it should not touch and minimizes blast radius.
         forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-m conntrack"; then
+        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-d ${DOCKER_TARGET_IP}"; then
             log INFO "Syncing FORWARD inbound rules (k3s)"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
-            if ! iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED \
+            if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
                 LAST_ERROR="k3s: Failed to add FORWARD inbound rule"
                 return 1
@@ -633,10 +654,10 @@ ensure_nat_forward_rules() {
         fi
 
         forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
             log INFO "Syncing FORWARD outbound rules (k3s)"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
-            if ! iptables -I FORWARD 2 -i "${WG_IFACE}" \
+            if ! iptables -I FORWARD 2 -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
                 -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
                 LAST_ERROR="k3s: Failed to add FORWARD outbound rule"
                 return 1
@@ -665,10 +686,15 @@ ensure_nat_forward_rules() {
         # by other netfilter consumers in the cluster (Cilium, Calico, tc qdiscs).
         local conn_restore_count conn_save_count
         conn_restore_count=$(iptables -t mangle -S PREROUTING | grep -c "tunnelsats-conn-restore" || true)
-        if [ "${conn_restore_count}" -ne 1 ] || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
+        if [ "${conn_restore_count}" -ne 1 ] \
+            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" \
+            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF -- "-s ${DOCKER_TARGET_IP}" \
+            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
             log INFO "Syncing mangle CONNMARK restore rule (k3s)"
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
+            # -s ${DOCKER_TARGET_IP} scopes restore-mark to the LND pod's reply packets only,
+            # instead of fingering every non-WG packet traversing the host.
+            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
                 return 1
             fi
@@ -753,11 +779,21 @@ rules_are_synced() {
             return 1
         fi
 
-        # 1b. mangle CONNMARK restore rule — must have ! -i tunnelsatsv2 to avoid routing loop
-        #     AND --mask 0xca6c so we don't clobber other consumers' mark bits.
+        # 1b. mangle CONNMARK restore rule — must have ! -i tunnelsatsv2 to avoid routing loop,
+        #     -s ${DOCKER_TARGET_IP} to scope to LND pod replies, AND --mask 0xca6c so we don't
+        #     clobber other consumers' mark bits.
         if ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" \
+            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF -- "-s ${DOCKER_TARGET_IP}" \
             || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
             log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
+            return 1
+        fi
+
+        # 1c. mangle CONNMARK set rule — without this, conn-restore has nothing to restore
+        #     and LND replies silently take the default route (no WG return path).
+        if ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF -- "-i ${WG_IFACE}" \
+            || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qiE "0xca6c/0xca6c"; then
+            log WARN "rules_are_synced: k3s mangle conn-save FAIL (missing or wrong form)"
             return 1
         fi
 
@@ -767,14 +803,14 @@ rules_are_synced() {
             return 1
         fi
 
-        # 3. FORWARD Inbound check (conntrack)
-        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-m conntrack"; then
+        # 3. FORWARD Inbound check (scoped to target pod IP)
+        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-d ${DOCKER_TARGET_IP}"; then
             log WARN "rules_are_synced: k3s FORWARD in FAIL"
             return 1
         fi
 
-        # 4. FORWARD Outbound check (WG interface)
-        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-i ${WG_IFACE}"; then
+        # 4. FORWARD Outbound check (scoped to target pod IP)
+        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
             log WARN "rules_are_synced: k3s FORWARD out FAIL"
             return 1
         fi
@@ -971,7 +1007,7 @@ reconcile_once() {
     fi
 
     if ! resolve_bridge_name; then
-        LAST_ERROR="Failed to resolve docker bridge interface (not applicable in k3s mode)"
+        LAST_ERROR="Failed to resolve docker bridge interface"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false

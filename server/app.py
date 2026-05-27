@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
 from typing import Dict, Any, List, Optional, Tuple, Iterable
+from urllib.parse import quote
 
 import requests
 import yaml
@@ -842,27 +843,44 @@ def docker_api_post(path):
         return False
 
 
+def _k8s_list_pods_in_namespace(ns, token):
+    """Single-namespace fetch helper used by k8s_list_pods()."""
+    url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+    resp.raise_for_status()
+    out = []
+    for pod in resp.json().get("items", []):
+        meta = pod.get("metadata", {})
+        status = pod.get("status", {})
+        if status.get("phase") != "Running":
+            continue
+        pod_name = meta.get("name", "")
+        pod_ip = status.get("podIP", "")
+        out.append({
+            "Names": [f"/{pod_name}"],
+            "Id": meta.get("uid", pod_name),
+            "NetworkSettings": {"Networks": {"k8s": {"IPAddress": pod_ip}}},
+        })
+    return out
+
+
 def k8s_list_pods():
-    """Fetch running pods from k8s API and normalize to a Docker-compatible container list."""
+    """Fetch running pods across the tunnelsats namespace and LND/CLN namespaces.
+
+    Unifies pods from K8S_NAMESPACE, LND_K8S_NAMESPACE and CLN_K8S_NAMESPACE so that
+    name/pattern matching used by the dashboard (container_ip_by_match etc.) sees
+    pods even when LND or CLN are deployed in a different namespace.
+    """
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
-        url = f"https://kubernetes.default.svc/api/v1/namespaces/{K8S_NAMESPACE}/pods"
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
-        resp.raise_for_status()
+        namespaces = {K8S_NAMESPACE, LND_K8S_NAMESPACE, CLN_K8S_NAMESPACE}
         containers = []
-        for pod in resp.json().get("items", []):
-            meta = pod.get("metadata", {})
-            status = pod.get("status", {})
-            if status.get("phase") != "Running":
-                continue
-            pod_name = meta.get("name", "")
-            pod_ip = status.get("podIP", "")
-            containers.append({
-                "Names": [f"/{pod_name}"],
-                "Id": meta.get("uid", pod_name),
-                "NetworkSettings": {"Networks": {"k8s": {"IPAddress": pod_ip}}},
-            })
+        for ns in namespaces:
+            try:
+                containers.extend(_k8s_list_pods_in_namespace(ns, token))
+            except Exception as exc:
+                app.logger.warning(f"k8s pod listing failed for ns={ns}: {exc}")
         return containers
     except Exception as exc:
         app.logger.warning(f"k8s pod listing failed: {exc}")
@@ -875,7 +893,8 @@ def k8s_get_pod_name(label_selector, namespace=None):
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
-        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={label_selector}"
+        encoded_selector = quote(label_selector, safe="")
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={encoded_selector}"
         resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
         resp.raise_for_status()
         for pod in resp.json().get("items", []):
