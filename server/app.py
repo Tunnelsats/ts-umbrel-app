@@ -922,6 +922,8 @@ def k8s_list_pods():
 
 def k8s_get_pod_name(label_selector, namespace=None):
     """Return the name of the first Running pod matching label_selector."""
+    if not label_selector:
+        return None
     ns = namespace or K8S_NAMESPACE
     cache_key = f"pod_name:{ns}:{label_selector}"
     cached = _k8s_cache_get(cache_key)
@@ -949,6 +951,8 @@ def k8s_get_pod_name(label_selector, namespace=None):
 
 def k8s_delete_pod(pod_name, namespace=None):
     """Delete a pod by name; the owning Deployment will recreate it."""
+    if not pod_name:
+        return False
     ns = namespace or K8S_NAMESPACE
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
@@ -959,7 +963,7 @@ def k8s_delete_pod(pod_name, namespace=None):
         # (the Deployment will spin up a new pod with a different name+IP).
         with _k8s_cache_lock:
             _k8s_cache.clear()
-        return resp.status_code in (200, 202)
+        return resp.status_code in (200, 202, 404)
     except Exception as exc:
         app.logger.warning(f"k8s pod deletion failed ({pod_name}, ns={ns}): {exc}")
         return False
@@ -1650,12 +1654,19 @@ def local_status():
             name = os.environ.get(svc_env, "")
             if not name:
                 return ""
+            cache_key = f"svc_resolve:{name}:{ns}"
+            cached = _k8s_cache_get(cache_key)
+            if cached is not None:
+                return cached
+            resolved = ""
             for fqdn in (f"{name}.{ns}.svc.cluster.local", name):
                 try:
-                    return socket.gethostbyname(fqdn)
+                    resolved = socket.gethostbyname(fqdn)
+                    break
                 except OSError:
                     pass
-            return ""
+            _k8s_cache_set(cache_key, resolved)
+            return resolved
         lnd_ip = _resolve_svc("LND_K8S_SERVICE", LND_K8S_NAMESPACE)
         cln_ip = _resolve_svc("CLN_K8S_SERVICE", CLN_K8S_NAMESPACE)
         lnd_detected = lnd_exists()

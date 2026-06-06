@@ -1984,3 +1984,89 @@ class TestLazySubscriptionSync:
             meta = json.load(f)
             assert meta["expiresAt"] == "2026-06-04T19:06:14.000Z"
 
+
+class TestK3SModeSupport:
+    """TDD unit tests for Kubernetes/k3s helper functions."""
+
+    @patch('app.K8S_SA_TOKEN_PATH', '/dev/null')
+    @patch('app._k8s_session.get')
+    def test_k8s_get_pod_name_success(self, mock_get):
+        # Setup mock response from k8s API
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {
+                    "metadata": {"name": "lnd-pod-abc"},
+                    "status": {"phase": "Running"}
+                }
+            ]
+        }
+        mock_get.return_value = mock_resp
+
+        # Clear cache first to ensure a clean run
+        with app_module._k8s_cache_lock:
+            app_module._k8s_cache.clear()
+
+        name = app_module.k8s_get_pod_name("app=lnd", namespace="default")
+        assert name == "lnd-pod-abc"
+
+    def test_k8s_get_pod_name_empty_selector(self):
+        # Defensive guard test
+        name = app_module.k8s_get_pod_name("", namespace="default")
+        assert name is None
+        name = app_module.k8s_get_pod_name(None, namespace="default")
+        assert name is None
+
+    @patch('app.K8S_SA_TOKEN_PATH', '/dev/null')
+    @patch('app._k8s_session.delete')
+    def test_k8s_delete_pod_404_success(self, mock_delete):
+        # HTTP 404 should return True because pod is already gone
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_delete.return_value = mock_resp
+
+        # Clear cache first to ensure a clean run
+        with app_module._k8s_cache_lock:
+            app_module._k8s_cache.clear()
+
+        res = app_module.k8s_delete_pod("lnd-pod-abc", namespace="default")
+        assert res is True
+
+    def test_k8s_delete_pod_empty_name(self):
+        # Defensive guard test
+        res = app_module.k8s_delete_pod("", namespace="default")
+        assert res is False
+        res = app_module.k8s_delete_pod(None, namespace="default")
+        assert res is False
+
+    @patch('app.K3S_MODE', True)
+    @patch('app.lnd_exists', return_value=True)
+    @patch('app.cln_exists', return_value=True)
+    @patch('socket.gethostbyname')
+    @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
+    def test_resolve_svc_caching(self, mock_wg_state, mock_gethostbyname, _mock_cln, _mock_lnd, client):
+        # We set environment variables for the service names
+        os.environ["LND_K8S_SERVICE"] = "lnd-svc"
+        os.environ["CLN_K8S_SERVICE"] = "cln-svc"
+
+        # Mock socket.gethostbyname to return IP addresses
+        mock_gethostbyname.side_effect = lambda fqdn: "10.42.0.50" if "lnd" in fqdn else "10.42.0.60"
+
+        # Clear cache first to ensure a clean run
+        with app_module._k8s_cache_lock:
+            app_module._k8s_cache.clear()
+
+        # Call endpoint twice
+        res1 = client.get('/api/local/status')
+        assert res1.status_code == 200
+
+        res2 = client.get('/api/local/status')
+        assert res2.status_code == 200
+
+        # Assert socket.gethostbyname was called only once per unique service/FQDN
+        # (Total of 2 calls, one for LND service and one for CLN service)
+        # Without caching, it would be called at least 4 times (2 calls * 2 endpoints)
+        assert mock_gethostbyname.call_count == 2
+
+

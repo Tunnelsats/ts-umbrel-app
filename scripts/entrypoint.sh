@@ -518,7 +518,9 @@ ensure_policy_routing() {
                 [[ -z "${_line}" ]] && continue
                 _spec=$(echo "${_line}" | sed 's/^[0-9]*:[[:space:]]*//')
                 [[ -z "${_spec}" ]] && continue
-                ip rule del ${_spec} >/dev/null 2>&1 || true
+                local -a _spec_arr
+                read -r -a _spec_arr <<< "${_spec}"
+                ip rule del "${_spec_arr[@]}" >/dev/null 2>&1 || true
             done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" | grep -E "lookup (51820|main)" || true)
         done
 
@@ -629,11 +631,14 @@ ensure_nat_forward_rules() {
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
 
-    if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport ${internal_match_port}" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+    if ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
         primary_dnat_missing=1
     fi
 
-    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "--dport 9735" | grep -qF -- "-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
+    if [ "${internal_match_port}" != "9735" ] && \
+       ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport 9735 \
+        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
         fallback_dnat_missing=1
     fi
     
@@ -670,8 +675,8 @@ ensure_nat_forward_rules() {
         # k3s mode: scope FORWARD rules to the target pod IP rather than accepting all
         # established connections / all WG-ingress traffic. This keeps tunnelsats off the
         # path for traffic it should not touch and minimizes blast radius.
-        forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-d ${DOCKER_TARGET_IP}"; then
+        if ! iptables -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
             log INFO "Syncing FORWARD inbound rules (k3s)"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
             if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
@@ -682,8 +687,8 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
+        if ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
             log INFO "Syncing FORWARD outbound rules (k3s)"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
             if ! iptables -I FORWARD 2 -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
@@ -695,35 +700,12 @@ ensure_nat_forward_rules() {
         fi
 
         # Mangle rules for conntrack fwmark routing.
-        #
-        # FORWARD CONNMARK --set-mark: fires AFTER DNAT for packets arriving on tunnelsatsv2
-        #   (WG peer→LND direction). Writes mark 51820 directly into the conntrack entry.
-        #   IMPORTANT: must NOT use MARK --set-mark here — that sets the packet mark (nfmark)
-        #   which has bit 14 (0x4000) set (51820 = 0xca6c). kube-proxy's POSTROUTING rule
-        #   "--mark 0x4000/0x4000 -j MASQUERADE" would then masquerade the src to the cni0
-        #   bridge IP (10.42.0.1), breaking the Lightning Noise handshake. CONNMARK --set-mark
-        #   writes only to the conntrack mark, which kube-proxy does not inspect.
-        #
-        # PREROUTING --restore-mark (! -i tunnelsatsv2): copies the conntrack mark to the
-        #   packet mark ONLY for packets arriving on NON-WG interfaces — i.e. LND's replies
-        #   leaving via CNI. This is the critical exclusion: without it, subsequent WG-ingress
-        #   packets in the same TCP connection would also get fwmark 51820 restored and be
-        #   re-routed back through tunnelsatsv2 in a loop instead of being forwarded to LND.
-        # --mask 0xca6c (51820) constrains both set and restore operations to ONLY the bits
-        # that encode our fwmark, leaving all other conntrack/nfmark bits untouched. Without
-        # the mask, CONNMARK would copy/overwrite the full 32-bit mark, clobbering bits used
-        # by other netfilter consumers in the cluster (Cilium, Calico, tc qdiscs).
-        local conn_restore_count conn_save_count
-        conn_restore_count=$(iptables -t mangle -S PREROUTING | grep -c "tunnelsats-conn-restore" || true)
-        if [ "${conn_restore_count}" -ne 1 ] \
-            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" \
-            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF -- "-s ${DOCKER_TARGET_IP}" \
-            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
+        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
             log INFO "Syncing mangle CONNMARK restore rule (k3s)"
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            # -s ${DOCKER_TARGET_IP} scopes restore-mark to the LND pod's reply packets only,
-            # instead of fingering every non-WG packet traversing the host.
-            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
+            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
                 return 1
             fi
@@ -733,11 +715,12 @@ ensure_nat_forward_rules() {
         # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
         remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
 
-        conn_save_count=$(iptables -t mangle -S FORWARD | grep -c "tunnelsats-conn-save" || true)
-        if [ "${conn_save_count}" -ne 1 ] || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qiE "0xca6c/0xca6c"; then
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
             log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
                 return 1
             fi
@@ -745,8 +728,8 @@ ensure_nat_forward_rules() {
         fi
     else
         # Docker mode: bridge-interface FORWARD rules.
-        forward_in_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-in" || true)
-        if [ "${forward_in_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -F -- "-i ${WG_IFACE}" | grep -F -- "-o ${BRIDGE_NAME}" | grep -qF -- "-j ACCEPT"; then
+        if ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
             log INFO "Syncing FORWARD inbound rules"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
             if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
@@ -757,8 +740,8 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        forward_out_count=$(iptables -S FORWARD | grep -c "tunnelsats-forward-out" || true)
-        if [ "${forward_out_count}" -ne 1 ] || ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -F -- "-i ${BRIDGE_NAME}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j ACCEPT"; then
+        if ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
             log INFO "Syncing FORWARD outbound rules"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
             if ! iptables -I FORWARD 2 -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
@@ -808,47 +791,44 @@ rules_are_synced() {
             return 1
         fi
 
-        # 1b. mangle CONNMARK restore rule — must have ! -i tunnelsatsv2 to avoid routing loop,
-        #     -s ${DOCKER_TARGET_IP} to scope to LND pod replies, AND --mask 0xca6c so we don't
-        #     clobber other consumers' mark bits.
-        if ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF "! -i ${WG_IFACE}" \
-            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qF -- "-s ${DOCKER_TARGET_IP}" \
-            || ! iptables -t mangle -S PREROUTING | grep -F "tunnelsats-conn-restore" | grep -qiE "0xca6c"; then
+        # 1b. mangle CONNMARK restore rule
+        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
             log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
             return 1
         fi
 
-        # 1c. mangle CONNMARK set rule — without this, conn-restore has nothing to restore
-        #     and LND replies silently take the default route (no WG return path).
-        if ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qF -- "-i ${WG_IFACE}" \
-            || ! iptables -t mangle -S FORWARD | grep -F "tunnelsats-conn-save" | grep -qiE "0xca6c/0xca6c"; then
+        # 1c. mangle CONNMARK set rule
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
             log WARN "rules_are_synced: k3s mangle conn-save FAIL (missing or wrong form)"
             return 1
         fi
 
         # 2. NAT PREROUTING check (DNAT)
-        if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}"; then
+        if ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
             log WARN "rules_are_synced: NAT rule FAIL"
             return 1
         fi
 
         # 3. FORWARD Inbound check (scoped to target pod IP)
-        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qF -- "-d ${DOCKER_TARGET_IP}"; then
+        if ! iptables -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
             log WARN "rules_are_synced: k3s FORWARD in FAIL"
             return 1
         fi
 
         # 4. FORWARD Outbound check (scoped to target pod IP)
-        if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
+        if ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
             log WARN "rules_are_synced: k3s FORWARD out FAIL"
             return 1
         fi
 
-        # 5. MASQUERADE check — also verify -s ${DOCKER_TARGET_IP} so the reconcile
-        #    loop notices when the pod IP has shifted and the masq rule still points
-        #    at the stale source.
-        if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE" \
-            || ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
+        # 5. MASQUERADE check
+        if ! iptables -t nat -C POSTROUTING -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
+            -m comment --comment "tunnelsats-masq" -j MASQUERADE 2>/dev/null; then
             log WARN "rules_are_synced: MASQUERADE rule FAIL"
             return 1
         fi
@@ -879,36 +859,36 @@ rules_are_synced() {
     fi
 
     # 2. NAT PREROUTING check (DNAT)
-    if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport ${internal_match_port}.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
-         # Try an even looser check if the above regexp is too strict for some kernels
-         if ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "-i ${WG_IFACE}" || \
-            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "--dport ${internal_match_port}" || \
-            ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qF -- "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}"; then
-             log WARN "rules_are_synced: NAT rule FAIL"
-             return 1
-         fi
+    if ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
+        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
+         log WARN "rules_are_synced: NAT rule FAIL"
+         return 1
     fi
 
     # 2b. NAT PREROUTING fallback check for translated 9735 traffic
-    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -S PREROUTING | grep -F "tunnelsats-dnat" | grep -qE -- "-i ${WG_IFACE}.*--dport 9735.*-j DNAT --to-destination ${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" ; then
+    if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport 9735 \
+        -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
         log WARN "rules_are_synced: NAT fallback rule FAIL"
         return 1
     fi
 
     # 3. FORWARD Inbound check
-    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-in" | grep -qE -- "-i ${WG_IFACE}.*-o ${BRIDGE_NAME}.*-j ACCEPT"; then
+    if ! iptables -C FORWARD -i "${WG_IFACE}" -o "${BRIDGE_NAME}" \
+        -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
         log WARN "rules_are_synced: FORWARD in FAIL"
         return 1
     fi
 
     # 4. FORWARD Outbound check
-    if ! iptables -S FORWARD | grep -F "tunnelsats-forward-out" | grep -qE -- "-i ${BRIDGE_NAME}.*-o ${WG_IFACE}.*-j ACCEPT"; then
+    if ! iptables -C FORWARD -i "${BRIDGE_NAME}" -o "${WG_IFACE}" \
+        -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
         log WARN "rules_are_synced: FORWARD out FAIL"
         return 1
     fi
 
     # 5. MASQUERADE check
-    if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+    if ! iptables -t nat -C POSTROUTING -s "${DOCKER_NETWORK_SUBNET}" -o "${WG_IFACE}" \
+        -m comment --comment "tunnelsats-masq" -j MASQUERADE 2>/dev/null; then
         log WARN "rules_are_synced: MASQUERADE rule FAIL"
         return 1
     fi
