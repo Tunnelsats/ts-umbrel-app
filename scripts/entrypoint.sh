@@ -812,6 +812,13 @@ rules_are_synced() {
             return 1
         fi
 
+        # 2b. NAT PREROUTING fallback check for translated 9735 traffic (k3s)
+        if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport 9735 \
+            -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
+            log WARN "rules_are_synced: NAT fallback rule FAIL"
+            return 1
+        fi
+
         # 3. FORWARD Inbound check (scoped to target pod IP)
         if ! iptables -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
