@@ -111,6 +111,34 @@ LND_K8S_POD_SELECTOR = os.environ.get("LND_K8S_POD_SELECTOR", "app=lnd")
 CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
 K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+# Shared HTTP session for k8s API calls — enables TLS keep-alive across helpers so
+# the dashboard does not pay a fresh TCP+TLS handshake on every request.
+_k8s_session = requests.Session()
+
+# Tiny per-key TTL cache for k8s API responses. The dashboard's status endpoint is
+# polled frequently from the UI; without caching this would translate 1:1 to k8s
+# API calls and risk rate-limiting on busy clusters.
+_K8S_CACHE_TTL_SECONDS = 5
+_k8s_cache: Dict[str, Tuple[float, Any]] = {}
+_k8s_cache_lock = threading.Lock()
+
+
+def _k8s_cache_get(key):
+    with _k8s_cache_lock:
+        entry = _k8s_cache.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if time.time() - ts > _K8S_CACHE_TTL_SECONDS:
+            return None
+        return value
+
+
+def _k8s_cache_set(key, value):
+    with _k8s_cache_lock:
+        _k8s_cache[key] = (time.time(), value)
+
 _metadata_lock = threading.Lock()
 
 ALLOWED_NETWORKS = (
@@ -846,7 +874,7 @@ def docker_api_post(path):
 def _k8s_list_pods_in_namespace(ns, token):
     """Single-namespace fetch helper used by k8s_list_pods()."""
     url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
-    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+    resp = _k8s_session.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
     resp.raise_for_status()
     out = []
     for pod in resp.json().get("items", []):
@@ -869,8 +897,12 @@ def k8s_list_pods():
 
     Unifies pods from K8S_NAMESPACE, LND_K8S_NAMESPACE and CLN_K8S_NAMESPACE so that
     name/pattern matching used by the dashboard (container_ip_by_match etc.) sees
-    pods even when LND or CLN are deployed in a different namespace.
+    pods even when LND or CLN are deployed in a different namespace. Responses are
+    cached for _K8S_CACHE_TTL_SECONDS to keep the dashboard polling cheap.
     """
+    cached = _k8s_cache_get("list_pods")
+    if cached is not None:
+        return cached
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
@@ -881,6 +913,7 @@ def k8s_list_pods():
                 containers.extend(_k8s_list_pods_in_namespace(ns, token))
             except Exception as exc:
                 app.logger.warning(f"k8s pod listing failed for ns={ns}: {exc}")
+        _k8s_cache_set("list_pods", containers)
         return containers
     except Exception as exc:
         app.logger.warning(f"k8s pod listing failed: {exc}")
@@ -890,16 +923,25 @@ def k8s_list_pods():
 def k8s_get_pod_name(label_selector, namespace=None):
     """Return the name of the first Running pod matching label_selector."""
     ns = namespace or K8S_NAMESPACE
+    cache_key = f"pod_name:{ns}:{label_selector}"
+    cached = _k8s_cache_get(cache_key)
+    if cached is not None:
+        # Cache the negative result too (cached=="") so we don't re-hit the API
+        # in tight loops when a pod is genuinely missing.
+        return cached or None
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
         encoded_selector = quote(label_selector, safe="")
         url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={encoded_selector}"
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+        resp = _k8s_session.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
         resp.raise_for_status()
         for pod in resp.json().get("items", []):
             if pod.get("status", {}).get("phase") == "Running":
-                return pod["metadata"]["name"]
+                name = pod["metadata"]["name"]
+                _k8s_cache_set(cache_key, name)
+                return name
+        _k8s_cache_set(cache_key, "")
     except Exception as exc:
         app.logger.warning(f"k8s pod lookup failed (selector={label_selector}, ns={ns}): {exc}")
     return None
@@ -912,7 +954,11 @@ def k8s_delete_pod(pod_name, namespace=None):
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
         url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{pod_name}"
-        resp = requests.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
+        resp = _k8s_session.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
+        # Invalidate the cache so the next list/lookup sees the post-delete state
+        # (the Deployment will spin up a new pod with a different name+IP).
+        with _k8s_cache_lock:
+            _k8s_cache.clear()
         return resp.status_code in (200, 202)
     except Exception as exc:
         app.logger.warning(f"k8s pod deletion failed ({pod_name}, ns={ns}): {exc}")

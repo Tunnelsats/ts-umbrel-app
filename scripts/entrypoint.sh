@@ -17,17 +17,19 @@ DOCKER_TARGET_IP="10.9.9.9"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 
-# k3s mode: set K3S_MODE=true to bypass Docker networking and use Kubernetes Services instead
-K3S_MODE="${K3S_MODE:-false}"
-LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
-CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
-K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+# k3s mode: set K3S_MODE=true to bypass Docker networking and use Kubernetes Services instead.
+# These are explicitly exported so the Python dashboard (launched as a child process below)
+# always sees them, even if a future caller passes them as plain shell vars instead of env.
+export K3S_MODE="${K3S_MODE:-false}"
+export LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
+export CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
 # Namespace where LND/CLN live — defaults to the same namespace as tunnelsats,
 # but must be set explicitly when they run in a different namespace.
-LND_K8S_NAMESPACE="${LND_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
-CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
-LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
-CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
+export LND_K8S_NAMESPACE="${LND_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
+export CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
+export LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
+export CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -196,6 +198,35 @@ extract_forwarding_port() {
     echo "${port}"
 }
 
+# Resolve a k8s Service to its ClusterIP. Tries the FQDN first, then the short name.
+# Distinguishes the common "name not found" case (getent rc=2) from real resolver
+# failures (rc=1/3/other) so the logs make it clear whether DNS is broken or the
+# Service simply does not exist yet.
+resolve_svc_ip() {
+    local fqdn="$1" name="$2"
+    local out rc
+
+    out=$(getent hosts "${fqdn}" 2>&1)
+    rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        echo "${out}" | awk '{print $1}' | head -n1
+        return 0
+    elif [ "${rc}" -ne 2 ]; then
+        log WARN "k3s: getent failed for ${fqdn} (rc=${rc}): ${out}"
+    fi
+
+    out=$(getent hosts "${name}" 2>&1)
+    rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        echo "${out}" | awk '{print $1}' | head -n1
+        return 0
+    elif [ "${rc}" -ne 2 ]; then
+        log WARN "k3s: getent failed for ${name} (rc=${rc}): ${out}"
+    fi
+
+    return 1
+}
+
 detect_k3s_target() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
@@ -206,8 +237,7 @@ detect_k3s_target() {
     if [ -n "${LND_K8S_SERVICE}" ]; then
         svc_name="${LND_K8S_SERVICE}"
         svc_fqdn="${svc_name}.${LND_K8S_NAMESPACE}.svc.cluster.local"
-        svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
-        [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
+        svc_ip=$(resolve_svc_ip "${svc_fqdn}" "${svc_name}" || true)
         if [ -n "${svc_ip}" ]; then
             TARGET_IMPL="lnd"
             TARGET_CONTAINER_NAME="${svc_name}"
@@ -235,8 +265,7 @@ detect_k3s_target() {
     if [ -n "${CLN_K8S_SERVICE}" ]; then
         svc_name="${CLN_K8S_SERVICE}"
         svc_fqdn="${svc_name}.${CLN_K8S_NAMESPACE}.svc.cluster.local"
-        svc_ip=$(getent hosts "${svc_fqdn}" 2>/dev/null | awk '{print $1}' | head -n1)
-        [ -z "${svc_ip}" ] && svc_ip=$(getent hosts "${svc_name}" 2>/dev/null | awk '{print $1}' | head -n1)
+        svc_ip=$(resolve_svc_ip "${svc_fqdn}" "${svc_name}" || true)
         if [ -n "${svc_ip}" ]; then
             TARGET_IMPL="cln"
             TARGET_CONTAINER_NAME="${svc_name}"
@@ -815,8 +844,11 @@ rules_are_synced() {
             return 1
         fi
 
-        # 5. MASQUERADE check
-        if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+        # 5. MASQUERADE check — also verify -s ${DOCKER_TARGET_IP} so the reconcile
+        #    loop notices when the pod IP has shifted and the masq rule still points
+        #    at the stale source.
+        if ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE" \
+            || ! iptables -t nat -S POSTROUTING | grep -F "tunnelsats-masq" | grep -qF -- "-s ${DOCKER_TARGET_IP}"; then
             log WARN "rules_are_synced: MASQUERADE rule FAIL"
             return 1
         fi
