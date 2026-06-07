@@ -106,4 +106,3 @@ Verify a clean removal:
 ```sh
 kubectl get all,pvc,sa,role,rolebinding -n <ns> | grep tunnelsats   # empty
 ```
-Agreg
