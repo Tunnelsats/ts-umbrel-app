@@ -259,8 +259,9 @@ detect_k3s_target() {
                 DOCKER_TARGET_IP="${pod_ip}"
                 log INFO "k3s: Using LND pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
             else
-                DOCKER_TARGET_IP="${svc_ip}"
-                log WARN "k3s: Could not resolve LND pod IP, falling back to ClusterIP ${svc_ip}"
+                LAST_ERROR="k3s: Could not resolve LND pod IP"
+                log ERROR "k3s: Could not resolve LND pod IP, direct routing is required for WireGuard CONNMARK"
+                return 1
             fi
             return 0
         fi
@@ -285,8 +286,9 @@ detect_k3s_target() {
                 DOCKER_TARGET_IP="${pod_ip}"
                 log INFO "k3s: Using CLN pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
             else
-                DOCKER_TARGET_IP="${svc_ip}"
-                log WARN "k3s: Could not resolve CLN pod IP, falling back to ClusterIP ${svc_ip}"
+                LAST_ERROR="k3s: Could not resolve CLN pod IP"
+                log ERROR "k3s: Could not resolve CLN pod IP, direct routing is required for WireGuard CONNMARK"
+                return 1
             fi
             return 0
         fi
@@ -302,7 +304,10 @@ detect_lightning_container() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
 
-    [[ "${K3S_MODE}" == "true" ]] && { detect_k3s_target; return; }
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        detect_k3s_target || return 1
+        return 0
+    fi
 
     local containers
     containers=$(docker_api "GET" "/containers/json?all=0") || return 1
