@@ -53,6 +53,11 @@ log() {
     printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$level" "$*" >&2
 }
 
+if [[ "${K3S_MODE}" == "true" ]] && [ ! -f "${K8S_SA_TOKEN_PATH}" ]; then
+    log WARN "K3S_MODE is enabled but Kubernetes ServiceAccount token is missing. Falling back to Docker mode."
+    export K3S_MODE="false"
+fi
+
 is_valid_request_id() {
     local request_id="$1"
     [[ "${request_id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]]
