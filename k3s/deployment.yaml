@@ -25,12 +25,8 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: tunnelsats
-          # NOTE: k3s-dev is a MUTABLE preview tag for the k3s feature branch and is
-          # NOT pinned for production use. Once this feature ships a stable release,
-          # replace it with an immutable tag (e.g. v1.2.3) or a digest-pinned ref
-          # like tunnelsats/ts-umbrel-app@sha256:... so rollouts are reproducible
-          # and rollbacks are deterministic.
-          image: tunnelsats/ts-umbrel-app:k3s-dev
+          # Pin to an immutable tag before production use:
+          image: tunnelsats/ts-umbrel-app:3.1.1
           imagePullPolicy: Always
           securityContext:
             capabilities:

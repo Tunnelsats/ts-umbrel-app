@@ -4,6 +4,7 @@ import re
 import subprocess
 import uuid
 import threading
+import concurrent.futures
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
@@ -122,6 +123,7 @@ _k8s_session = requests.Session()
 _K8S_CACHE_TTL_SECONDS = 5
 _k8s_cache: Dict[str, Tuple[float, Any]] = {}
 _k8s_cache_lock = threading.Lock()
+_dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 
 def _k8s_cache_get(key):
@@ -1661,9 +1663,12 @@ def local_status():
             resolved = ""
             for fqdn in (f"{name}.{ns}.svc.cluster.local", name):
                 try:
-                    resolved = socket.gethostbyname(fqdn)
-                    break
-                except OSError:
+                    future = _dns_executor.submit(socket.getaddrinfo, fqdn, None, socket.AF_INET)
+                    addr_info = future.result(timeout=1.0)
+                    if addr_info:
+                        resolved = addr_info[0][4][0]
+                        break
+                except Exception:
                     pass
             _k8s_cache_set(cache_key, resolved)
             return resolved

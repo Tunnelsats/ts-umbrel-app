@@ -2043,15 +2043,17 @@ class TestK3SModeSupport:
     @patch('app.K3S_MODE', True)
     @patch('app.lnd_exists', return_value=True)
     @patch('app.cln_exists', return_value=True)
-    @patch('socket.gethostbyname')
+    @patch('socket.getaddrinfo')
     @patch('app._get_wireguard_state', return_value=('Connected', 'pubKey123'))
-    def test_resolve_svc_caching(self, mock_wg_state, mock_gethostbyname, _mock_cln, _mock_lnd, client):
+    def test_resolve_svc_caching(self, mock_wg_state, mock_getaddrinfo, _mock_cln, _mock_lnd, client):
         # We set environment variables for the service names
         os.environ["LND_K8S_SERVICE"] = "lnd-svc"
         os.environ["CLN_K8S_SERVICE"] = "cln-svc"
 
-        # Mock socket.gethostbyname to return IP addresses
-        mock_gethostbyname.side_effect = lambda fqdn: "10.42.0.50" if "lnd" in fqdn else "10.42.0.60"
+        # Mock socket.getaddrinfo to return IP addresses
+        mock_getaddrinfo.side_effect = lambda host, port, family=0, type=0, proto=0, flags=0: (
+            [(2, 1, 6, '', ("10.42.0.50", 0))] if "lnd" in host else [(2, 1, 6, '', ("10.42.0.60", 0))]
+        )
 
         # Clear cache first to ensure a clean run
         with app_module._k8s_cache_lock:
@@ -2064,9 +2066,10 @@ class TestK3SModeSupport:
         res2 = client.get('/api/local/status')
         assert res2.status_code == 200
 
-        # Assert socket.gethostbyname was called only once per unique service/FQDN
+        # Assert socket.getaddrinfo was called only once per unique service/FQDN
         # (Total of 2 calls, one for LND service and one for CLN service)
         # Without caching, it would be called at least 4 times (2 calls * 2 endpoints)
-        assert mock_gethostbyname.call_count == 2
+        svc_calls = [c for c in mock_getaddrinfo.call_args_list if "svc" in c[0][0]]
+        assert len(svc_calls) == 2
 
 

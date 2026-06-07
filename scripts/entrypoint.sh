@@ -720,11 +720,11 @@ ensure_nat_forward_rules() {
         # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
         remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
 
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" \
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
             log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" \
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
                 LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
                 return 1
@@ -804,7 +804,7 @@ rules_are_synced() {
         fi
 
         # 1c. mangle CONNMARK set rule
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" \
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
             log WARN "rules_are_synced: k3s mangle conn-save FAIL (missing or wrong form)"
             return 1
