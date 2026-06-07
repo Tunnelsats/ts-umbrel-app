@@ -69,11 +69,19 @@ spec:
             - name: tunnelsats-data
               mountPath: /data
             - name: lnd-data
+              # IMPORTANT: do NOT change this mountPath. The server expects the
+              # LND config at the fixed path /lightning-data/lnd/lnd.conf. If you
+              # mount the PVC elsewhere, "Configure Node" fails with
+              # "Failed to modify LND config" (ENOENT on the temp file).
+              # Adjust the PVC (claimName / subPath) to fit your data layout
+              # instead of moving this mountPath. See k3s/README.md.
               mountPath: /lightning-data/lnd
               # subPath: lnd   # ← uncomment if your PVC root has a "lnd/" subdirectory
               #                #   (i.e. lnd.conf lives at <pvc-root>/lnd/lnd.conf)
             # Uncomment if using CLN:
             # - name: cln-data
+            #   # Same rule as LND: keep this mountPath. The server expects the CLN
+            #   # config at the fixed path /lightning-data/cln/config.
             #   mountPath: /lightning-data/cln
       volumes:
         - name: tunnelsats-data
