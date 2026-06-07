@@ -27,7 +27,7 @@ spec:
         - name: tunnelsats
           # Pin to an immutable tag before production use:
           image: tunnelsats/ts-umbrel-app:3.2.0
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           securityContext:
             capabilities:
               add:
