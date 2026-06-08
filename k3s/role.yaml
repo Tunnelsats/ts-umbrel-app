@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tunnelsats
+  # Deploy this Role in EACH namespace that hosts an LND or CLN pod the
+  # dashboard needs to restart. If LND/CLN live in a different namespace
+  # than tunnelsats, copy this file into that namespace and apply it
+  # separately (kustomize cannot template namespaces).
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]

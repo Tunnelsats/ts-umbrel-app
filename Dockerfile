@@ -20,7 +20,8 @@ COPY scripts/ /app/scripts/
 COPY web/ /app/web/
 COPY server/ /app/server/
 COPY tunnelsats/umbrel-app.yml /app/
-RUN chmod +x /app/scripts/*.sh
+RUN for f in /app/scripts/*.sh; do tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done \
+    && chmod +x /app/scripts/*.sh
 
 ENV WG_CONF_PATH="/data/tunnelsats*.conf"
 

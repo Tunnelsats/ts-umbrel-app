@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tunnelsats
+  labels:
+    app: tunnelsats
+spec:
+  replicas: 1
+  # hostNetwork + fixed host port 9739 cannot tolerate the default RollingUpdate
+  # (old + new pod briefly coexist and the new pod fails to bind the host port).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tunnelsats
+  template:
+    metadata:
+      labels:
+        app: tunnelsats
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/tunnelsats: unconfined
+    spec:
+      serviceAccountName: tunnelsats
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: tunnelsats
+          # Pin to an immutable tag before production use:
+          image: tunnelsats/ts-umbrel-app:3.2.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          env:
+            - name: K3S_MODE
+              value: "true"
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Set to your LND Service name (used for routing + config injection)
+            - name: LND_K8S_SERVICE
+              value: "lnd"
+            # Namespace where LND runs — omit this if LND is in the same namespace as tunnelsats.
+            # Uncomment and set if they differ:
+            # - name: LND_K8S_NAMESPACE
+            #   value: "bitcoin-lab"
+            # Label selector used to find (and restart) the LND pod
+            - name: LND_K8S_POD_SELECTOR
+              value: "app=lnd"
+            # Uncomment to support Core-Lightning instead of / in addition to LND:
+            # - name: CLN_K8S_SERVICE
+            #   value: "cln"
+            # - name: CLN_K8S_NAMESPACE
+            #   value: "default"
+            # - name: CLN_K8S_POD_SELECTOR
+            #   value: "app=cln"
+          ports:
+            - containerPort: 9739
+              name: web
+              protocol: TCP
+          volumeMounts:
+            - name: tunnelsats-data
+              mountPath: /data
+            - name: lnd-data
+              # IMPORTANT: do NOT change this mountPath. The server expects the
+              # LND config at the fixed path /lightning-data/lnd/lnd.conf. If you
+              # mount the PVC elsewhere, "Configure Node" fails with
+              # "Failed to modify LND config" (ENOENT on the temp file).
+              # Adjust the PVC (claimName / subPath) to fit your data layout
+              # instead of moving this mountPath. See k3s/README.md.
+              mountPath: /lightning-data/lnd
+              # subPath: lnd   # ← uncomment if your PVC root has a "lnd/" subdirectory
+              #                #   (i.e. lnd.conf lives at <pvc-root>/lnd/lnd.conf)
+            # Uncomment if using CLN:
+            # - name: cln-data
+            #   # Same rule as LND: keep this mountPath. The server expects the CLN
+            #   # config at the fixed path /lightning-data/cln/config.
+            #   mountPath: /lightning-data/cln
+      volumes:
+        - name: tunnelsats-data
+          persistentVolumeClaim:
+            claimName: tunnelsats-data
+        # Replace with the PVC name that holds your LND data directory
+        - name: lnd-data
+          persistentVolumeClaim:
+            claimName: lnd-data
+        # Uncomment if using CLN:
+        # - name: cln-data
+        #   persistentVolumeClaim:
+        #     claimName: cln-data

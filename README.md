@@ -38,6 +38,20 @@ While we await review for the official Umbrel App Store - Appreciate the upvote 
 
 ---
 
+## ☸️ Running on k3s / Kubernetes
+
+Besides Umbrel, TunnelSats can run in `k3s` mode alongside an LND/CLN node in a
+Kubernetes cluster. The manifests live in [`k3s/`](k3s/) and are applied with
+`kubectl apply -k k3s/ --namespace=<your-namespace>`.
+
+See **[`k3s/README.md`](k3s/README.md)** for the full guide. Pay special
+attention to the **namespace/RBAC** and **PVC mount path** configuration — those
+are the two settings most likely to trip up a first install (a misconfigured
+namespace causes `403 Forbidden` pod lookups; a wrong mount path causes
+*"Failed to modify LND config"*).
+
+---
+
 ## 🛠 Architecture & Dataplane
 
 Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
