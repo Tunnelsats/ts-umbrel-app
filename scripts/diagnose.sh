@@ -15,12 +15,5 @@ elif [ ! -r "$TARGET_SCRIPT" ]; then
     exit 1
 fi
 
-if [ ! -x "$TARGET_SCRIPT" ]; then
-    if ! chmod +x "$TARGET_SCRIPT" 2>/dev/null; then
-        echo "[ERROR] Failed to make verification script executable at $TARGET_SCRIPT (permission issue)" >&2
-        exit 1
-    fi
-fi
-
 # Relay all arguments
 exec bash "$TARGET_SCRIPT" "$@"

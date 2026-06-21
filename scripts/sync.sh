@@ -118,6 +118,7 @@ run_vendor() {
             if curl -L -s --fail --show-error "$URL" -o "$FULL_PATH"; then
                 log_info "   ✅  Localized ${NAME} to ${LOCAL_PATH}"
             else
+                rm -f "$FULL_PATH"
                 log_error "  ❌  Failed to download ${NAME}"
                 FAILED=1
             fi
