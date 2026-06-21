@@ -17,37 +17,37 @@
     {
       "name": "inter-400",
       "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-400.woff2",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/fonts/inter-400.woff2",
       "local_path": "web/vendor/fonts/inter-400.woff2"
     },
     {
       "name": "inter-500",
       "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-500.woff2",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/fonts/inter-500.woff2",
       "local_path": "web/vendor/fonts/inter-500.woff2"
     },
     {
       "name": "inter-600",
       "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-600.woff2",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/fonts/inter-600.woff2",
       "local_path": "web/vendor/fonts/inter-600.woff2"
     },
     {
       "name": "inter-700",
       "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/fonts/inter-700.woff2",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/fonts/inter-700.woff2",
       "local_path": "web/vendor/fonts/inter-700.woff2"
     },
     {
       "name": "earth-dark",
       "version": "1.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/img/earth-dark.jpg",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/img/earth-dark.jpg",
       "local_path": "web/vendor/img/earth-dark.jpg"
     },
     {
       "name": "earth-topology",
       "version": "1.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/master/web/vendor/img/earth-topology.png",
+      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.0/web/vendor/img/earth-topology.png",
       "local_path": "web/vendor/img/earth-topology.png"
     }
   ]
