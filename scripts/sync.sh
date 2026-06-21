@@ -103,7 +103,8 @@ run_vendor() {
     if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
 
     # Read assets from JSON
-    jq -c '.assets[]' "$MANIFEST" | while read -r asset; do
+    FAILED=0
+    while read -r asset; do
         NAME=$(echo "$asset" | jq -r '.name')
         URL=$(echo "$asset" | jq -r '.source_url')
         LOCAL_PATH=$(echo "$asset" | jq -r '.local_path')
@@ -118,12 +119,17 @@ run_vendor() {
                 log_info "   ✅  Localized ${NAME} to ${LOCAL_PATH}"
             else
                 log_error "  ❌  Failed to download ${NAME}"
+                FAILED=1
             fi
         else
             log_info "   💎  ${NAME} is already localized."
         fi
-    done
+    done < <(jq -c '.assets[]' "$MANIFEST")
+    
     log_info "Vendor asset check finished."
+    if [ "$FAILED" -ne 0 ]; then
+        return 1
+    fi
 }
 
 run_version() {

@@ -83,7 +83,7 @@ cd web && npm test
 sudo ~/umbrel/app-data/tunnelsats/scripts/verify.sh 
 
 # Developer-facing (local repo root)
-bash scripts/diagnose.sh
+sudo bash scripts/diagnose.sh
 ```
 === TunnelSats Dataplane Verification ===
 Target: us3.tunnelsats.com (178.156.167.202) : 12345
