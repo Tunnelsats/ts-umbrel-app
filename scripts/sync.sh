@@ -96,8 +96,8 @@ run_vendor() {
     log_info "Updating localized vendor assets..."
     MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
     
-    if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; exit 1; fi
-    if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; exit 1; fi
+    if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; return 1; fi
+    if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; return 1; fi
 
     FORCE="false"
     if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
@@ -131,9 +131,11 @@ run_vendor() {
         fi
     done < <(jq -c '.assets[]' "$MANIFEST")
     
-    log_info "Vendor asset check finished."
     if [ "$FAILED" -ne 0 ]; then
+        log_error "Vendor asset check finished with errors."
         return 1
+    else
+        log_info "Vendor asset check finished successfully."
     fi
 }
 
