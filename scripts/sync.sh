@@ -94,12 +94,12 @@ run_monorepo() {
 
 run_vendor() {
     log_info "Updating localized vendor assets..."
-    MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
+    local MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
     
     if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; return 1; fi
     if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; return 1; fi
 
-    FORCE="false"
+    local FORCE="false"
     if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
 
     # Read assets from JSON
@@ -107,7 +107,8 @@ run_vendor() {
         log_error "Vendor manifest is missing or has an invalid 'assets' array: $MANIFEST"
         return 1
     fi
-    FAILED=0
+    local FAILED=0
+    local NAME URL LOCAL_PATH FULL_PATH
     while read -r asset; do
         NAME=$(echo "$asset" | jq -r '.name')
         URL=$(echo "$asset" | jq -r '.source_url')
