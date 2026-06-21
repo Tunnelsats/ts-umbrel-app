@@ -103,6 +103,10 @@ run_vendor() {
     if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
 
     # Read assets from JSON
+    if ! jq -e '.assets | arrays' "$MANIFEST" > /dev/null 2>&1; then
+        log_error "Vendor manifest is missing or has an invalid 'assets' array: $MANIFEST"
+        return 1
+    fi
     FAILED=0
     while read -r asset; do
         NAME=$(echo "$asset" | jq -r '.name')
