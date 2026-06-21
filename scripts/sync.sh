@@ -108,29 +108,27 @@ run_vendor() {
         return 1
     fi
     local FAILED=0
-    local NAME URL LOCAL_PATH FULL_PATH
-    while read -r asset; do
-        NAME=$(echo "$asset" | jq -r '.name')
-        URL=$(echo "$asset" | jq -r '.source_url')
-        LOCAL_PATH=$(echo "$asset" | jq -r '.local_path')
-        FULL_PATH="${REPO_ROOT}/${LOCAL_PATH}"
+    local name url local_path full_path
+    while IFS=$'\t' read -r name url local_path; do
+        if [ -z "$name" ]; then continue; fi
+        full_path="${REPO_ROOT}/${local_path}"
 
         # Ensure directory exists
-        mkdir -p "$(dirname "$FULL_PATH")"
+        mkdir -p "$(dirname "$full_path")"
 
-        if [ "$FORCE" = "true" ] || [ ! -f "$FULL_PATH" ]; then
-            log_info "   ⬇️  Downloading ${NAME} from remote sources..."
-            if curl -L -s --fail --show-error "$URL" -o "$FULL_PATH"; then
-                log_info "   ✅  Localized ${NAME} to ${LOCAL_PATH}"
+        if [ "$FORCE" = "true" ] || [ ! -f "$full_path" ]; then
+            log_info "   ⬇️  Downloading ${name} from remote sources..."
+            if curl -L -s --fail --show-error "$url" -o "$full_path"; then
+                log_info "   ✅  Localized ${name} to ${local_path}"
             else
-                rm -f "$FULL_PATH"
-                log_error "  ❌  Failed to download ${NAME}"
+                rm -f "$full_path"
+                log_error "  ❌  Failed to download ${name}"
                 FAILED=1
             fi
         else
-            log_info "   💎  ${NAME} is already localized."
+            log_info "   💎  ${name} is already localized."
         fi
-    done < <(jq -c '.assets[]' "$MANIFEST")
+    done < <(jq -r '.assets[] | [.name, .source_url, .local_path] | @tsv' "$MANIFEST")
     
     if [ "$FAILED" -ne 0 ]; then
         log_error "Vendor asset check finished with errors."
