@@ -97,6 +97,7 @@ run_vendor() {
     local MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
     
     if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; return 1; fi
+    if ! command -v curl &> /dev/null; then log_error "curl is required for vendor sync."; return 1; fi
     if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; return 1; fi
 
     local FORCE="false"
