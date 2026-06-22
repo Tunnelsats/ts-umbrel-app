@@ -109,7 +109,7 @@ run_vendor() {
     fi
     local FAILED=0
     local name url local_path full_path
-    while IFS=$'\t' read -r name url local_path; do
+    while IFS='|' read -r name url local_path; do
         if [ -z "$name" ] || [ -z "$url" ] || [ -z "$local_path" ]; then
             log_error "Invalid or incomplete asset entry: name='$name', url='$url', path='$local_path'"
             FAILED=1
@@ -122,17 +122,17 @@ run_vendor() {
 
         if [ "$FORCE" = "true" ] || [ ! -f "$full_path" ]; then
             log_info "   ⬇️  Downloading ${name} from remote sources..."
-            if curl -L -s --fail --show-error --connect-timeout 10 "$url" -o "$full_path"; then
+            if curl -L -s --fail --show-error --connect-timeout 10 "$url" -o "${full_path}.tmp" && mv "${full_path}.tmp" "$full_path"; then
                 log_info "   ✅  Localized ${name} to ${local_path}"
             else
-                rm -f "$full_path"
+                rm -f "${full_path}.tmp"
                 log_error "  ❌  Failed to download ${name}"
                 FAILED=1
             fi
         else
             log_info "   💎  ${name} is already localized."
         fi
-    done < <(jq -r '.assets[] | [.name // "", .source_url // "", .local_path // ""] | @tsv' "$MANIFEST")
+    done < <(jq -r '.assets[] | [.name, .source_url, .local_path] | map(. // "") | join("|")' "$MANIFEST")
     
     if [ "$FAILED" -ne 0 ]; then
         log_error "Vendor asset check finished with errors."
