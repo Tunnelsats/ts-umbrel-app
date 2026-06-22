@@ -72,7 +72,7 @@ jobs:
             type=raw,value=${{ steps.extract_version.outputs.MAJOR_MINOR }},enable=${{ steps.extract_version.outputs.IS_NEW_VERSION == 'true' }}
 
       - name: Build and Push
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v5
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v5
         with:
           context: .
           # Only push on master or tag, do test builds on PR
