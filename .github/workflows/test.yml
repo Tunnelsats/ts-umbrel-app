@@ -10,7 +10,7 @@ jobs:
   test-compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
 
       - name: Generate Dummy Wireguard Keypair
         run: |
@@ -39,7 +39,7 @@ jobs:
           ./scripts/test.sh entrypoint
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Extract Image Tag
         id: image_tag
@@ -47,7 +47,7 @@ jobs:
           echo "IMAGE=$(grep -E 'image: tunnelsats/ts-umbrel-app' docker-compose.yml | awk '{print $2}')" >> $GITHUB_OUTPUT
 
       - name: Build Docker Image with Cache
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -73,7 +73,7 @@ jobs:
   backend-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -94,7 +94,7 @@ jobs:
   frontend-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
