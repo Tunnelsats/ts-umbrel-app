@@ -8,7 +8,7 @@ This document explains the repository structure and workflow for the TunnelSats 
 | :--- | :--- |
 | `/` (Root) | Primary development workspace and source code (Server, Web, Scripts). |
 | `tunnelsats/` | **Staging Area** for Umbrel Metadata (Manifests, Icons, Gallery). |
-| `scripts/` | Tooling for verification, persistence testing, and synchronization. |
+| `scripts/` | Tooling for vendor sync, node diagnostics, and persistence testing. |
 | `umbrel-apps/tunnelsats/` | **External Monorepo Target** for official submissions. |
 
 ## Single Source of Truth
@@ -49,6 +49,7 @@ npm run promote
 ## Important Files
 
 - `scripts/test.sh persistence`: Verifies that configuration data survives Umbrel 1.x uninstallation.
+- `scripts/diagnose.sh`: Developer convenience wrapper for the bundled troubleshooting suite.
 - `tunnelsats/scripts/verify.sh dataplane`: Automated health check for local/remote installations (must be executed with `sudo`).
 - `umbrel-app.yml`: Main Umbrel app manifest (located in `tunnelsats/`).
 
