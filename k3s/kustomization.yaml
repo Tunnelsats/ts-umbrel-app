@@ -1,11 +1,19 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Override at apply-time with `kubectl apply -k k3s/ --namespace=<ns>` or by
-# adding `namespace: <your-namespace>` here. Kustomize will rewrite the
-# namespace of all generated resources AND the ServiceAccount subject of the
-# RoleBinding, so you do not have to edit rolebinding.yaml by hand.
-# namespace: default
+# Set the namespace where your Lightning node (LND/CLN) AND the tunnelsats
+# ServiceAccount live. Kustomize's namespace transformer rewrites the namespace
+# of every generated resource *and* the ServiceAccount subject of the
+# RoleBinding (subjects[].namespace), so you never have to edit
+# rolebinding.yaml by hand. Edit the value below.
+#
+# IMPORTANT: do NOT rely on `kubectl apply -k k3s/ --namespace=<ns>` for this.
+# The `--namespace` flag only defaults the request namespace; it does NOT run
+# the namespace transformer, so it leaves the RoleBinding subject pinned to
+# `default`. Deploying to any other namespace that way binds the Role to
+# system:serviceaccount:default:tunnelsats instead of the real ServiceAccount,
+# and pod get/list/delete then fail with HTTP 403. Always set it here.
+namespace: default
 
 resources:
   - serviceaccount.yaml

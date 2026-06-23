@@ -23,6 +23,21 @@ spec:
       serviceAccountName: tunnelsats
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      # CO-LOCATION (multi-node clusters): TunnelSats routes WireGuard traffic
+      # straight to the Lightning pod IP and the reply path must traverse THIS
+      # host's fwmark/WireGuard rules. That only holds if tunnelsats runs on the
+      # SAME node as the LND/CLN pod. On a single-node cluster this is automatic.
+      # On a multi-node cluster you MUST pin them together — uncomment the
+      # podAffinity below and set the labelSelector to match your Lightning pod
+      # (the same labels as LND_K8S_POD_SELECTOR / CLN_K8S_POD_SELECTOR). See
+      # k3s/README.md → "Multi-node clusters".
+      # affinity:
+      #   podAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app: lnd
+      #         topologyKey: kubernetes.io/hostname
       containers:
         - name: tunnelsats
           # Pin to an immutable tag before production use:
