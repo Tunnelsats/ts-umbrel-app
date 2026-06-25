@@ -22,6 +22,18 @@ fi
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+check_sha256() {
+    local expected="$1"
+    local file="$2"
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "$expected  $file" | sha256sum --status -c -
+    elif command -v shasum >/dev/null 2>&1; then
+        echo "$expected  $file" | shasum -a 256 --status -c -
+    else
+        return 1
+    fi
+}
+
 UMBREL_HOST="${UMBREL_HOST:-umbrel.local}"
 
 usage() {
@@ -93,9 +105,126 @@ run_monorepo() {
 }
 
 run_vendor() {
-    log_info "Updating vendor assets..."
-    # Placeholder for vendor logic
-    echo "[INFO] Vendor check finished."
+    log_info "Updating localized vendor assets..."
+    local MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
+    
+    if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; return 1; fi
+    if ! command -v curl &> /dev/null; then log_error "curl is required for vendor sync."; return 1; fi
+    if ! command -v sha256sum &> /dev/null && ! command -v shasum &> /dev/null; then
+        log_error "sha256sum or shasum is required for vendor sync."
+        return 1
+    fi
+    if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; return 1; fi
+
+    local FORCE="false"
+    if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
+
+    # Read assets from JSON
+    if ! jq -e '.assets | arrays' "$MANIFEST" > /dev/null 2>&1; then
+        log_error "Vendor manifest is missing or has an invalid 'assets' array: $MANIFEST"
+        return 1
+    fi
+    local FAILED=0
+    local PROCESSED=0
+    local name url local_path full_path needs_download manifest_data JQ_FAILED=0 sha256
+    if ! manifest_data=$(jq -r '.assets[] | [.name, .source_url, .local_path, .sha256] | map(. // "") | join("\u001f")' "$MANIFEST"); then
+        log_error "Manifest parsing failed (jq exited with non-zero status)."
+        FAILED=$((FAILED + 1))
+        JQ_FAILED=1
+    fi
+
+    if [ -n "${manifest_data:-}" ]; then
+        while IFS=$'\x1f' read -r name url local_path sha256; do
+            PROCESSED=$((PROCESSED + 1))
+            if [ -z "$name" ] || [ -z "$url" ] || [ -z "$local_path" ]; then
+                log_error "Invalid or incomplete asset entry: name='$name', url='$url', path='$local_path'"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+
+            if [ -z "$sha256" ]; then
+                log_error "Missing sha256 checksum for asset: ${name}"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+
+            # Path traversal check: ensure local_path starts with "web/vendor/" and does not contain ".."
+            if [[ "$local_path" != web/vendor/* ]] || [[ "$local_path" == *..* ]]; then
+                log_error "Path traversal or invalid local path detected: '$local_path'"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+
+            full_path="${REPO_ROOT}/${local_path}"
+
+            # Ensure directory exists
+            if ! mkdir -p "$(dirname "$full_path")"; then
+                log_error "Failed to create directory for: ${full_path}"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+
+            # Check if download is required
+            needs_download="false"
+            if [ "$FORCE" = "true" ] || [ ! -f "$full_path" ]; then
+                needs_download="true"
+            elif ! check_sha256 "$sha256" "$full_path"; then
+                # Checksum mismatch on existing file
+                log_info "   ⚠️  Checksum mismatch for ${name}, will re-download."
+                needs_download="true"
+            elif [ ! -f "${full_path}.meta" ]; then
+                # File exists and is valid, but meta is missing
+                if ! echo "$url" > "${full_path}.meta"; then
+                    log_error "  ❌  Failed to write .meta for ${name}"
+                    FAILED=$((FAILED + 1))
+                    continue
+                fi
+            elif [ "$(cat "${full_path}.meta" 2>/dev/null)" != "$url" ]; then
+                # URL mismatch (asset version bumped locally)
+                needs_download="true"
+            fi
+
+            if [ "$needs_download" = "true" ]; then
+                log_info "   ⬇️  Downloading ${name} from remote sources..."
+                if curl -L -s --fail --show-error --connect-timeout 10 --max-time 60 "$url" -o "${full_path}.tmp"; then
+                    if ! check_sha256 "$sha256" "${full_path}.tmp"; then
+                        log_error "  ❌  Checksum verification failed for ${name}"
+                        rm -f "${full_path}.tmp"
+                        FAILED=$((FAILED + 1))
+                    elif mv "${full_path}.tmp" "$full_path"; then
+                        if ! echo "$url" > "${full_path}.meta"; then
+                            log_error "  ❌  Failed to write .meta for ${name}"
+                            FAILED=$((FAILED + 1))
+                            continue
+                        fi
+                        log_info "   ✅  Localized ${name} to ${local_path}"
+                    else
+                        rm -f "${full_path}.tmp"
+                        log_error "  ❌  Failed to save downloaded ${name}"
+                        FAILED=$((FAILED + 1))
+                    fi
+                else
+                    rm -f "${full_path}.tmp"
+                    log_error "  ❌  Failed to download ${name}"
+                    FAILED=$((FAILED + 1))
+                fi
+            else
+                log_info "   💎  ${name} is already localized."
+            fi
+        done <<< "$manifest_data"
+    fi
+    
+    if [ "$PROCESSED" -eq 0 ] && [ "$JQ_FAILED" -eq 0 ]; then
+        log_error "No vendor assets were processed. (Check manifest or jq parsing)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    if [ "$FAILED" -ne 0 ]; then
+        log_error "Vendor asset check finished with ${FAILED} error(s)."
+        return 1
+    else
+        log_info "Vendor asset check finished successfully."
+    fi
 }
 
 run_version() {
@@ -176,7 +305,7 @@ if [ "$#" -lt 1 ]; then usage; fi
 case "${1}" in
     node) run_node ;;
     monorepo) run_monorepo ;;
-    vendor) run_vendor ;;
+    vendor) shift; run_vendor "$@" ;;
     version) shift; run_version "$@" ;;
     promote) run_promote ;;
     *) usage ;;

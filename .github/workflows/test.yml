@@ -3,6 +3,10 @@ name: TDD Docker Tests
 on:
   push:
     branches: [ "master", "feat/*", "feature-parity" ]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [ "master" ]
 
@@ -10,7 +14,7 @@ jobs:
   test-compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Generate Dummy Wireguard Keypair
         run: |
@@ -39,7 +43,7 @@ jobs:
           ./scripts/test.sh entrypoint
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Extract Image Tag
         id: image_tag
@@ -47,7 +51,7 @@ jobs:
           echo "IMAGE=$(grep -E 'image: tunnelsats/ts-umbrel-app' docker-compose.yml | awk '{print $2}')" >> $GITHUB_OUTPUT
 
       - name: Build Docker Image with Cache
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
           load: true
@@ -73,12 +77,14 @@ jobs:
   backend-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.10"
+          cache: 'pip'
+          cache-dependency-path: 'server/requirements-test.txt'
 
       - name: Install dependencies
         run: |
@@ -94,16 +100,18 @@ jobs:
   frontend-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "18"
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
 
       - name: Install JS dependencies
         working-directory: ./web
-        run: npm install
+        run: npm ci
 
       - name: Run Jest
         working-directory: ./web

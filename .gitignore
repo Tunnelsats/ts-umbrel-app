@@ -20,6 +20,7 @@ venv/
 *.bak
 *.bak.*
 *.md.resolved*
+*.meta
 .codex
 
 # Scripts/Testing Temp Files

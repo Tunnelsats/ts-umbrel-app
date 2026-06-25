@@ -4,13 +4,13 @@ on:
   push:
     branches:
       - master
-  pull_request:
-    branches:
-      - master
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
       - '.gitignore'
+  pull_request:
+    branches:
+      - master
 
 jobs:
   docker:
@@ -20,13 +20,14 @@ jobs:
     
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up QEMU
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v3
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Login to Docker Hub
         # Only login if it's not a PR in order to avoid pushing from forks
@@ -50,9 +51,9 @@ jobs:
           MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
           echo "MAJOR_MINOR=$MAJOR_MINOR" >> $GITHUB_OUTPUT
           
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+          if RELEASE_OUT=$(gh release view "v${VERSION}" 2>&1); then
             echo "IS_NEW_VERSION=false" >> $GITHUB_OUTPUT
-          elif gh release view "v${VERSION}" 2>&1 | grep -q "release not found\|Could not resolve"; then
+          elif echo "$RELEASE_OUT" | grep -q "release not found\|Could not resolve"; then
             echo "IS_NEW_VERSION=true" >> $GITHUB_OUTPUT
           else
             echo "::error::Failed to query GitHub releases (API error or rate limit). Aborting to avoid overwriting existing tags."
@@ -72,14 +73,14 @@ jobs:
             type=raw,value=${{ steps.extract_version.outputs.MAJOR_MINOR }},enable=${{ steps.extract_version.outputs.IS_NEW_VERSION == 'true' }}
 
       - name: Build and Push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v5
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
           # Only push on master or tag, do test builds on PR
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
