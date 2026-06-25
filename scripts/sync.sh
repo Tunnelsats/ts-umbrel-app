@@ -26,9 +26,9 @@ check_sha256() {
     local expected="$1"
     local file="$2"
     if command -v sha256sum >/dev/null 2>&1; then
-        echo "$expected  $file" | sha256sum --status -c -
+        printf "%s  %s\n" "$expected" "$file" | sha256sum -c - >/dev/null 2>&1
     elif command -v shasum >/dev/null 2>&1; then
-        echo "$expected  $file" | shasum -a 256 --status -c -
+        printf "%s  %s\n" "$expected" "$file" | shasum -a 256 -c - >/dev/null 2>&1
     else
         return 1
     fi
@@ -148,8 +148,8 @@ run_vendor() {
                 continue
             fi
 
-            # Path traversal check: ensure local_path starts with "web/vendor/" and does not contain ".."
-            if [[ "$local_path" != web/vendor/* ]] || [[ "$local_path" == *..* ]]; then
+            # Path traversal check: ensure local_path starts with "web/vendor/" and does not contain directory traversal
+            if [[ "$local_path" != web/vendor/* ]] || [[ "$local_path" == */../* ]] || [[ "$local_path" == ../* ]] || [[ "$local_path" == */.. ]]; then
                 log_error "Path traversal or invalid local path detected: '$local_path'"
                 FAILED=$((FAILED + 1))
                 continue
