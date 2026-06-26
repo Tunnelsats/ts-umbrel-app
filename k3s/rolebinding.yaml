@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tunnelsats
+  # This RoleBinding grants the tunnelsats ServiceAccount get/list/delete on
+  # pods in the namespace where it is applied — NOT cluster-wide. To target a
+  # namespace other than `default`, set `namespace:` in kustomization.yaml:
+  # Kustomize rewrites both this resource's namespace AND the
+  # subjects[].namespace below for you. Do NOT use `kubectl --namespace=<ns>`
+  # for this — that flag does not rewrite the subject and leaves it bound to
+  # `default`, causing pod get/list/delete to fail with HTTP 403.
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tunnelsats
+subjects:
+  - kind: ServiceAccount
+    name: tunnelsats
+    namespace: default         # namespace where the tunnelsats ServiceAccount is deployed
