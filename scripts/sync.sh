@@ -93,9 +93,54 @@ run_monorepo() {
 }
 
 run_vendor() {
-    log_info "Updating vendor assets..."
-    # Placeholder for vendor logic
-    echo "[INFO] Vendor check finished."
+    log_info "Updating localized vendor assets..."
+    local MANIFEST="${REPO_ROOT}/web/vendor/vendor.json"
+    
+    if ! command -v jq &> /dev/null; then log_error "jq is required for vendor sync."; return 1; fi
+    if ! command -v curl &> /dev/null; then log_error "curl is required for vendor sync."; return 1; fi
+    if [ ! -f "$MANIFEST" ]; then log_error "Vendor manifest not found at $MANIFEST"; return 1; fi
+
+    local FORCE="false"
+    if [[ "${1:-}" == "force" ]]; then FORCE="true"; fi
+
+    # Read assets from JSON
+    if ! jq -e '.assets | arrays' "$MANIFEST" > /dev/null 2>&1; then
+        log_error "Vendor manifest is missing or has an invalid 'assets' array: $MANIFEST"
+        return 1
+    fi
+    local FAILED=0
+    local name url local_path full_path
+    while IFS='|' read -r name url local_path; do
+        if [ -z "$name" ] || [ -z "$url" ] || [ -z "$local_path" ]; then
+            log_error "Invalid or incomplete asset entry: name='$name', url='$url', path='$local_path'"
+            FAILED=1
+            continue
+        fi
+        full_path="${REPO_ROOT}/${local_path}"
+
+        # Ensure directory exists
+        mkdir -p "$(dirname "$full_path")"
+
+        if [ "$FORCE" = "true" ] || [ ! -f "$full_path" ]; then
+            log_info "   ⬇️  Downloading ${name} from remote sources..."
+            if curl -L -s --fail --show-error --connect-timeout 10 "$url" -o "${full_path}.tmp" && mv "${full_path}.tmp" "$full_path"; then
+                log_info "   ✅  Localized ${name} to ${local_path}"
+            else
+                rm -f "${full_path}.tmp"
+                log_error "  ❌  Failed to download ${name}"
+                FAILED=1
+            fi
+        else
+            log_info "   💎  ${name} is already localized."
+        fi
+    done < <(jq -r '.assets[] | [.name, .source_url, .local_path] | map(. // "") | join("|")' "$MANIFEST")
+    
+    if [ "$FAILED" -ne 0 ]; then
+        log_error "Vendor asset check finished with errors."
+        return 1
+    else
+        log_info "Vendor asset check finished successfully."
+    fi
 }
 
 run_version() {
@@ -176,7 +221,7 @@ if [ "$#" -lt 1 ]; then usage; fi
 case "${1}" in
     node) run_node ;;
     monorepo) run_monorepo ;;
-    vendor) run_vendor ;;
+    vendor) shift; run_vendor "$@" ;;
     version) shift; run_version "$@" ;;
     promote) run_promote ;;
     *) usage ;;

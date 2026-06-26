@@ -91,9 +91,16 @@ cd web && npm test
 ```
 
 ### Troubleshooting & API
-- Run the available Inbound / Outbound Connection script:
+- Run the available Inbound / Outbound Connection script (bundled or developer wrapper):
 ```bash
+# User-facing (on Umbrel host)
 sudo ~/umbrel/app-data/tunnelsats/scripts/verify.sh 
+
+# Developer-facing (local repo root)
+sudo bash scripts/diagnose.sh
+```
+
+```text
 === TunnelSats Dataplane Verification ===
 Target: us3.tunnelsats.com (178.156.167.202) : 12345
 ----------------------------------------------------------------
