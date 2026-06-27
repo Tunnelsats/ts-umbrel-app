@@ -1,0 +1,7 @@
+project-includes = ["."]
+project-excludes = ["**/venv", "**/.venv", "**/node_modules", "**/dist"]
+python-version = "3.12"
+python-interpreter-path = "venv/bin/python"
+check-unannotated-defs = false
+search-path = ["server"]
+

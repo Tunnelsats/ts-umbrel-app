@@ -16,9 +16,13 @@ import app as app_module
 # --- Fixtures ---
 
 @pytest.fixture(autouse=True)
-def clear_subscription_cache():
-    """Ensure the server-side subscription cache is cleared between every test to prevent isolation leaks."""
+def clear_caches():
+    """Ensure server-side caches are cleared between every test to prevent isolation leaks."""
     app_module._SUBSCRIPTION_CACHE.clear()
+    if hasattr(app_module, '_probe_cache'):
+        app_module._probe_cache.clear()
+    if hasattr(app_module, '_in_flight_probes'):
+        app_module._in_flight_probes.clear()
     yield
 
 @pytest.fixture
@@ -1227,7 +1231,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
+            mock_restart.assert_called_once_with(r'(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)')
 
             with open(cln_path, 'r') as f:
                 cln_content = f.read()
@@ -1530,7 +1534,7 @@ class TestDataplaneAndRegressionFixes:
             # Should have called restart for both LND and CLN
             assert mock_restart.call_count == 2
             mock_restart.assert_any_call(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
-            mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)')
+            mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)')
 
     @patch('app.read_dataplane_state')
     @patch('app.docker_api')
@@ -2071,5 +2075,49 @@ class TestK3SModeSupport:
         # Without caching, it would be called at least 4 times (2 calls * 2 endpoints)
         svc_calls = [c for c in mock_getaddrinfo.call_args_list if "svc" in c[0][0]]
         assert len(svc_calls) == 2
+
+
+class TestSecureModeToggle:
+    @patch('app.SECURE_MODE', True)
+    @patch('app.check_tcp_port', return_value=True)
+    def test_list_containers_secure_mode(self, mock_tcp):
+        from app import list_containers
+        containers = list_containers()
+        assert len(containers) == 2
+        assert containers[0]["Names"] == ["/lightning_lnd_1"]
+        assert containers[1]["Names"] == ["/lightning_cln_1"]
+
+    @patch('app.SECURE_MODE', True)
+    @patch('app.lnd_exists', return_value=True)
+    @patch('app.cln_exists', return_value=True)
+    def test_configure_node_secure_mode_returns_instructions(self, mock_cln, mock_lnd, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+
+            with patch('app.DATA_DIR', tmp_dir):
+                res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                assert res.status_code == 200
+                payload = json.loads(res.data)
+                assert payload['success'] is True
+                assert payload['manual_mode'] is True
+                assert payload['node_type'] == 'lnd'
+                assert 'externalhosts=de2.tunnelsats.com:35825' in payload['config_lines'][0]
+
+    @patch('app.SECURE_MODE', True)
+    @patch('app.lnd_exists', return_value=True)
+    @patch('app.cln_exists', return_value=True)
+    def test_restore_node_secure_mode_returns_instructions(self, mock_cln, mock_lnd, client):
+        res = client.post('/api/local/restore-node')
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload['success'] is True
+        assert payload['manual_mode'] is True
+        assert payload['restore'] is True
+        assert len(payload['targets']) == 2
+        assert payload['targets'][0]['node_type'] == 'lnd'
+        assert 'externalhosts=' in payload['targets'][0]['config_lines']
+
 
 

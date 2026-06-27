@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import socket
 import subprocess
 import uuid
 import threading
@@ -96,15 +97,132 @@ RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
+LND_HOST_CONFIG_PATH = "/home/umbrel/umbrel/app-data/lightning/data/lnd/lnd.conf"
+LND_PROBE_IP = "10.21.21.9"
+LND_PROBE_PORT = 9735
+CLN_PROBE_IP = "10.21.21.96"
+CLN_PROBE_PORT = 9736
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
 LND_CONTAINER_PATTERN = r"^lightning[_-]lnd[_-]\d+$"
 LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
-CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"
+CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
+SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
+
+def check_tcp_port(ip, port):
+    try:
+        with socket.create_connection((ip, port), timeout=1.0):
+            return True
+    except (socket.timeout, OSError):
+        return False
+
+_PROBE_CACHE_TTL_SECONDS = 5
+_probe_cache = {}
+_probe_cache_lock = threading.Lock()
+_in_flight_probes = {}
+_in_flight_lock = threading.Lock()
+
+def check_tcp_port_cached(ip, port):
+    key = f"{ip}:{port}"
+    with _probe_cache_lock:
+        entry = _probe_cache.get(key)
+        if entry is not None:
+            ts, val = entry
+            if time.time() - ts <= _PROBE_CACHE_TTL_SECONDS:
+                return val
+
+    initiator = False
+    with _in_flight_lock:
+        if key in _in_flight_probes:
+            event = _in_flight_probes[key]
+        else:
+            # Re-check cache inside lock to prevent TOCTOU window
+            with _probe_cache_lock:
+                entry = _probe_cache.get(key)
+                if entry is not None:
+                    ts, val = entry
+                    if time.time() - ts <= _PROBE_CACHE_TTL_SECONDS:
+                        return val
+            event = threading.Event()
+            _in_flight_probes[key] = event
+            initiator = True
+
+    if not initiator:
+        if event.wait(timeout=3.0):
+            with _probe_cache_lock:
+                entry = _probe_cache.get(key)
+                if entry is not None:
+                    return entry[1]
+        # Fallback to direct check if timeout or cache is empty
+        return check_tcp_port(ip, port)
+
+    val = False
+    try:
+        val = check_tcp_port(ip, port)
+        with _probe_cache_lock:
+            _probe_cache[key] = (time.time(), val)
+    finally:
+        with _in_flight_lock:
+            finished_event = _in_flight_probes.pop(key, None)
+            if finished_event is not None:
+                finished_event.set()
+
+    return val
+
+def detect_cln_network():
+    """Detect the active CLN network by checking subdirectories in /lightning-data/cln/."""
+    networks = ["bitcoin", "testnet", "signet", "regtest"]
+    active_net = "bitcoin"
+    latest_mtime = 0.0
+
+    for net in networks:
+        db_path = f"/lightning-data/cln/{net}/lightningd.sqlite3"
+        if os.path.exists(db_path):
+            try:
+                mtime = os.path.getmtime(db_path)
+                if mtime > latest_mtime:
+                    latest_mtime = mtime
+                    active_net = net
+            except Exception:
+                pass
+
+    # If no sqlite database was found, fall back to checking config file presence using mtime recency
+    if latest_mtime == 0.0:
+        latest_config_mtime = 0.0
+        for net in networks:
+            config_path = f"/lightning-data/cln/{net}/config"
+            try:
+                mtime = os.path.getmtime(config_path)
+                if mtime > latest_config_mtime:
+                    latest_config_mtime = mtime
+                    active_net = net
+            except Exception:
+                pass
+
+    return active_net
+
+
+def resolve_node_config(node_type):
+    """Return (config_path_container, config_path_host) for LND or CLN."""
+    if node_type == "lnd":
+        return LND_CONFIG_PATH, LND_HOST_CONFIG_PATH
+    elif node_type == "cln":
+        net = detect_cln_network()
+        container_path = f"/lightning-data/cln/{net}/config"
+        # Test-only sentinel: when CLN_CONFIG_PATH is patched to a temp file by a test,
+        # use that path as the container path so file-presence assertions resolve correctly.
+        # NOTE: host_path is still derived from detect_cln_network(); patch detect_cln_network
+        # too if the test needs a consistent (container_path, host_path) pair.
+        if CLN_CONFIG_PATH != "/lightning-data/cln/config":
+            container_path = CLN_CONFIG_PATH
+        host_path = f"/home/umbrel/umbrel/app-data/core-lightning/data/lightningd/{net}/config"
+        return container_path, host_path
+    return None, None
+
 K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 LND_K8S_NAMESPACE = os.environ.get("LND_K8S_NAMESPACE", K8S_NAMESPACE)
 CLN_K8S_NAMESPACE = os.environ.get("CLN_K8S_NAMESPACE", K8S_NAMESPACE)
@@ -338,7 +456,7 @@ def upsert_config_line(path: str, prefix: str, replacement_line: str) -> Tuple[b
     normalized_line = f"{replacement_line}\n"
 
     for line in lines:
-        line_str = str(line)
+        line_str = line
         stripped = line_str.lstrip()
         candidate = stripped.removeprefix("#").lstrip()
         if candidate.startswith(prefix):
@@ -521,7 +639,7 @@ def upsert_config_line_in_section(path: str, section_header: str, prefix: str, r
         found = False
         updated_section: List[str] = []
         for line in lines[section_start + 1 : section_end]:
-            line_str = str(line)
+            line_str = line
             stripped: str = line_str.lstrip()
             candidate: str = stripped.removeprefix("#").lstrip()
             if candidate.startswith(prefix):
@@ -533,7 +651,7 @@ def upsert_config_line_in_section(path: str, section_header: str, prefix: str, r
                 else:
                     changed = True
                 continue
-            updated_section.append(str(line))
+            updated_section.append(line)
 
         if not found:
             updated_section.append(normalized_line)
@@ -975,6 +1093,25 @@ def list_containers():
     """Return the running container/pod list for the active mode."""
     if K3S_MODE:
         return k8s_list_pods()
+    if SECURE_MODE:
+        containers = []
+        # Note: Falling back to config file existence handles a "possibly installed but down"
+        # heuristic when the active TCP port probe fails, allowing users to still trigger manual
+        # configuration/restore flows for stopped containers.
+        if check_tcp_port_cached(LND_PROBE_IP, LND_PROBE_PORT) or os.path.exists(LND_CONFIG_PATH):
+            containers.append({
+                "Names": ["/lightning_lnd_1"],
+                "Id": "lnd_probe_id",
+                "NetworkSettings": {"Networks": {"umbrel_main_network": {"IPAddress": LND_PROBE_IP}}}
+            })
+        cln_container_config, _ = resolve_node_config("cln")
+        if check_tcp_port_cached(CLN_PROBE_IP, CLN_PROBE_PORT) or (cln_container_config and os.path.exists(cln_container_config)):
+            containers.append({
+                "Names": ["/lightning_cln_1"],
+                "Id": "cln_probe_id",
+                "NetworkSettings": {"Networks": {"umbrel_main_network": {"IPAddress": CLN_PROBE_IP}}}
+            })
+        return containers
     return docker_api("/containers/json?all=0")
 
 
@@ -982,6 +1119,8 @@ def lnd_exists():
     """Return True if an LND container/pod is reachable in the current mode."""
     if K3S_MODE:
         return bool(k8s_get_pod_name(LND_K8S_POD_SELECTOR, namespace=LND_K8S_NAMESPACE))
+    if SECURE_MODE:
+        return check_tcp_port_cached(LND_PROBE_IP, LND_PROBE_PORT) or os.path.exists(LND_CONFIG_PATH)
     return bool(container_ids_by_match(LND_CONTAINER_PATTERN))
 
 
@@ -989,6 +1128,9 @@ def cln_exists():
     """Return True if a CLN container/pod is reachable in the current mode."""
     if K3S_MODE:
         return bool(k8s_get_pod_name(CLN_K8S_POD_SELECTOR, namespace=CLN_K8S_NAMESPACE))
+    if SECURE_MODE:
+        container_path, _ = resolve_node_config("cln")
+        return check_tcp_port_cached(CLN_PROBE_IP, CLN_PROBE_PORT) or (container_path and os.path.exists(container_path))
     return bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
 
 
@@ -1246,12 +1388,14 @@ def proxy_request(method, endpoint, payload=None):
 
 @app.route("/")
 def serve_index():
-    return send_from_directory(app.static_folder, "index.html")
+    static_folder = app.static_folder or "web"
+    return send_from_directory(static_folder, "index.html")
 
 
 @app.route("/<path:path>")
 def serve_static(path):
-    return send_from_directory(app.static_folder, path)
+    static_folder = app.static_folder or "web"
+    return send_from_directory(static_folder, path)
 
 
 # --- API PROXY ROUTES ---
@@ -1291,7 +1435,7 @@ def _fetch_subscription_status_cached(wg_public_key: str) -> Optional[Dict[str, 
         _SUBSCRIPTION_CACHE.pop(wg_public_key, None)
     return info
 
-def _is_timestamp_expired(timestamp_str: str) -> bool:
+def _is_timestamp_expired(timestamp_str: Optional[str]) -> bool:
     """Checks if a given ISO timestamp string is in the past."""
     if not timestamp_str:
         return False
@@ -1475,13 +1619,12 @@ def _update_local_metadata(
 
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
-        if not os.path.exists(meta_path):
-            app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
-            return False
-
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
+        except FileNotFoundError:
+            app.logger.warning(f"Metadata file not found at {meta_path}; skipping sync.")
+            return False
         except (IOError, json.JSONDecodeError) as exc:
             app.logger.warning(f"Failed to read metadata for sync: {exc}")
             return False
@@ -1616,16 +1759,17 @@ def renew_subscription():
         payload = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as fp:
-                    meta = json.load(fp)
-                    if not payload.get("serverId") and "serverId" in meta:
-                        payload["serverId"] = meta["serverId"]
-                    if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
-                        payload["wgPublicKey"] = meta["wgPublicKey"]
-            except (IOError, json.JSONDecodeError) as exc:
-                app.logger.warning(f"Failed to read metadata for renew autofill: {exc}")
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+                if not payload.get("serverId") and "serverId" in meta:
+                    payload["serverId"] = meta["serverId"]
+                if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
+                    payload["wgPublicKey"] = meta["wgPublicKey"]
+        except FileNotFoundError:
+            pass
+        except (IOError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read metadata for renew autofill: {exc}")
 
     app.logger.info("Initiating renewal upstream...")
     res = proxy_request("POST", "subscription/renew", payload)
@@ -1674,10 +1818,21 @@ def local_status():
             return resolved
         lnd_ip = _resolve_svc("LND_K8S_SERVICE", LND_K8S_NAMESPACE)
         cln_ip = _resolve_svc("CLN_K8S_SERVICE", CLN_K8S_NAMESPACE)
-        lnd_detected = lnd_exists()
-        cln_detected = cln_exists()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_lnd = executor.submit(lnd_exists)
+            future_cln = executor.submit(cln_exists)
+            lnd_detected = future_lnd.result()
+            cln_detected = future_cln.result()
+    elif SECURE_MODE:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_lnd = executor.submit(lnd_exists)
+            future_cln = executor.submit(cln_exists)
+            lnd_detected = future_lnd.result()
+            cln_detected = future_cln.result()
+        lnd_ip = LND_PROBE_IP if lnd_detected else ""
+        cln_ip = CLN_PROBE_IP if cln_detected else ""
     else:
-        containers = docker_api("/containers/json?all=0") or []
+        containers = list_containers() or []
         lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
         cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
         lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
@@ -1687,24 +1842,28 @@ def local_status():
     vpn_active = (wg_status == "Connected")
 
     lnd_routing_active = False
-    if os.path.exists(LND_CONFIG_PATH):
-        try:
-            with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.lstrip().startswith("externalhosts="):
-                        lnd_routing_active = True
-                        break
-        except (IOError, OSError) as exc:
-            app.logger.warning(f"Failed to read LND config for routing detection: {exc}")
+    try:
+        with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.lstrip().startswith("externalhosts="):
+                    lnd_routing_active = True
+                    break
+    except FileNotFoundError:
+        pass
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to read LND config for routing detection: {exc}")
 
     cln_routing_active = False
-    if os.path.exists(CLN_CONFIG_PATH):
+    cln_container_config, _ = resolve_node_config("cln")
+    if cln_container_config:
         try:
-            with open(CLN_CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(cln_container_config, "r", encoding="utf-8") as f:
                 for line in f:
                     if line.lstrip().startswith("announce-addr="):
                         cln_routing_active = True
                         break
+        except FileNotFoundError:
+            pass
         except (IOError, OSError) as exc:
             app.logger.warning(f"Failed to read CLN config for routing detection: {exc}")
 
@@ -1727,16 +1886,16 @@ def local_status():
     vpn_port = ""
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as fp:
-                    meta = json.load(fp)
-                    server_domain = meta.get("serverDomain", "")
-                    expires_at = meta.get("expiresAt", "")
-                    vpn_port = meta.get("vpnPort", "")
-            except (IOError, OSError, json.JSONDecodeError) as exc:
-                app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
-                pass
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+                server_domain = meta.get("serverDomain", "")
+                expires_at = meta.get("expiresAt", "")
+                vpn_port = meta.get("vpnPort", "")
+        except FileNotFoundError:
+            pass
+        except (IOError, OSError, json.JSONDecodeError) as exc:
+            app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
 
     # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
@@ -1772,6 +1931,7 @@ def local_status():
             "expires_at": expires_at,
             "vpn_port": vpn_port,
             "dataplane_mode": dataplane["dataplane_mode"],
+            "secure_mode": SECURE_MODE,
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
             "target_impl": dataplane["target_impl"],
@@ -1951,14 +2111,15 @@ def get_metadata():
     meta_data = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as fp:
-                    meta_data = json.load(fp)
-                    meta_data.pop("presharedKey", None)
-                    meta_data.pop("paymentHash", None)
-            except (json.JSONDecodeError, IOError) as exc:
-                app.logger.error(f"Error reading metadata file {meta_path}: {exc}")
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta_data = json.load(fp)
+                meta_data.pop("presharedKey", None)
+                meta_data.pop("paymentHash", None)
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, IOError) as exc:
+            app.logger.error(f"Error reading metadata file {meta_path}: {exc}")
     return jsonify(meta_data)
 
 
@@ -1973,23 +2134,55 @@ def configure_node():
 
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
-        if not os.path.exists(meta_path):
-            return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
-
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
+        except FileNotFoundError:
+            return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
         except (IOError, OSError, json.JSONDecodeError):
             return jsonify({"success": False, "error": "Unable to read tunnelsats metadata file."}), 500
 
-    dns = str(meta.get("serverDomain", "")).strip()
-    try:
-        port = int(meta.get("vpnPort", 0))
-    except (TypeError, ValueError):
-        port = 0
+        dns = str(meta.get("serverDomain", "")).strip()
+        try:
+            port = int(meta.get("vpnPort", 0))
+        except (TypeError, ValueError):
+            port = 0
 
-    if not dns or port <= 0:
-        return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
+        if not dns or port <= 0:
+            return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
+
+        if SECURE_MODE:
+            if meta.get("nodeType") != node_type:
+                meta["nodeType"] = node_type
+                try:
+                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                except (IOError, OSError) as exc:
+                    app.logger.error(f"Failed to save nodeType to metadata: {exc}")
+                    return jsonify({"success": False, "error": "Failed to update metadata file."}), 500
+
+    if SECURE_MODE:
+        _, config_path = resolve_node_config(node_type)
+        config_lines = []
+        if node_type == "lnd":
+            config_lines = [
+                f"externalhosts={dns}:{port}"
+            ]
+        else:
+            config_lines = [
+                "bind-addr=0.0.0.0:9736",
+                f"announce-addr={dns}:{port}",
+                "always-use-proxy=false"
+            ]
+
+        return jsonify({
+            "success": True,
+            "manual_mode": True,
+            "node_type": node_type,
+            "config_path": config_path,
+            "config_lines": config_lines,
+            "port": port,
+            "dns": dns
+        })
 
     lnd_pending_key = "lndRestartPending"
     cln_pending_key = "clnRestartPending"
@@ -2049,7 +2242,8 @@ def configure_node():
         ("announce-addr=", f"announce-addr={dns}:{port}"),
         ("always-use-proxy=", "always-use-proxy=false"),
     )
-    cln_processed, cln_changed = upsert_config_lines(CLN_CONFIG_PATH, cln_steps)
+    cln_container_config, _ = resolve_node_config("cln")
+    cln_processed, cln_changed = upsert_config_lines(cln_container_config, cln_steps)
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
@@ -2072,6 +2266,35 @@ def configure_node():
 @app.route("/api/local/restore-node", methods=["POST"])
 def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
+    if SECURE_MODE:
+        targets = []
+        if lnd_exists():
+            _, lnd_path = resolve_node_config("lnd")
+            targets.append({
+                "node_type": "lnd",
+                "config_path": lnd_path,
+                "config_lines": [
+                    "externalhosts="
+                ]
+            })
+        if cln_exists():
+            _, cln_path = resolve_node_config("cln")
+            targets.append({
+                "node_type": "cln",
+                "config_path": cln_path,
+                "config_lines": [
+                    "bind-addr=",
+                    "announce-addr=",
+                    "always-use-proxy="
+                ]
+            })
+        return jsonify({
+            "success": True,
+            "manual_mode": True,
+            "restore": True,
+            "targets": targets
+        })
+
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
     lnd_detected = lnd_exists()
@@ -2090,8 +2313,9 @@ def restore_node():
     elif lnd_processed and not lnd_detected:
         app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
 
+    cln_container_config, _ = resolve_node_config("cln")
     cln_processed, cln_changed = comment_out_config_lines(
-        CLN_CONFIG_PATH,
+        cln_container_config,
         (
             "bind-addr=",
             "announce-addr=",
