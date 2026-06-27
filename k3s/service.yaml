@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tunnelsats
+  labels:
+    app: tunnelsats
+spec:
+  selector:
+    app: tunnelsats
+  ports:
+    - name: web
+      port: 9739
+      targetPort: 9739
+  type: ClusterIP

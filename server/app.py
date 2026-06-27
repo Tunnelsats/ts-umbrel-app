@@ -4,10 +4,12 @@ import re
 import subprocess
 import uuid
 import threading
+import concurrent.futures
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
 from typing import Dict, Any, List, Optional, Tuple, Iterable
+from urllib.parse import quote
 
 import requests
 import yaml
@@ -23,7 +25,7 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.1.1rc"
+APP_VERSION = "v3.2.0"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -100,6 +102,44 @@ LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
 CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
+
+# k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
+K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
+K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
+LND_K8S_NAMESPACE = os.environ.get("LND_K8S_NAMESPACE", K8S_NAMESPACE)
+CLN_K8S_NAMESPACE = os.environ.get("CLN_K8S_NAMESPACE", K8S_NAMESPACE)
+LND_K8S_POD_SELECTOR = os.environ.get("LND_K8S_POD_SELECTOR", "app=lnd")
+CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
+K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+# Shared HTTP session for k8s API calls — enables TLS keep-alive across helpers so
+# the dashboard does not pay a fresh TCP+TLS handshake on every request.
+_k8s_session = requests.Session()
+
+# Tiny per-key TTL cache for k8s API responses. The dashboard's status endpoint is
+# polled frequently from the UI; without caching this would translate 1:1 to k8s
+# API calls and risk rate-limiting on busy clusters.
+_K8S_CACHE_TTL_SECONDS = 5
+_k8s_cache: Dict[str, Tuple[float, Any]] = {}
+_k8s_cache_lock = threading.Lock()
+_dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+def _k8s_cache_get(key):
+    with _k8s_cache_lock:
+        entry = _k8s_cache.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if time.time() - ts > _K8S_CACHE_TTL_SECONDS:
+            return None
+        return value
+
+
+def _k8s_cache_set(key, value):
+    with _k8s_cache_lock:
+        _k8s_cache[key] = (time.time(), value)
 
 _metadata_lock = threading.Lock()
 
@@ -833,9 +873,128 @@ def docker_api_post(path):
         return False
 
 
+def _k8s_list_pods_in_namespace(ns, token):
+    """Single-namespace fetch helper used by k8s_list_pods()."""
+    url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
+    resp = _k8s_session.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+    resp.raise_for_status()
+    out = []
+    for pod in resp.json().get("items", []):
+        meta = pod.get("metadata", {})
+        status = pod.get("status", {})
+        if status.get("phase") != "Running":
+            continue
+        pod_name = meta.get("name", "")
+        pod_ip = status.get("podIP", "")
+        out.append({
+            "Names": [f"/{pod_name}"],
+            "Id": meta.get("uid", pod_name),
+            "NetworkSettings": {"Networks": {"k8s": {"IPAddress": pod_ip}}},
+        })
+    return out
+
+
+def k8s_list_pods():
+    """Fetch running pods across the tunnelsats namespace and LND/CLN namespaces.
+
+    Unifies pods from K8S_NAMESPACE, LND_K8S_NAMESPACE and CLN_K8S_NAMESPACE so that
+    name/pattern matching used by the dashboard (container_ip_by_match etc.) sees
+    pods even when LND or CLN are deployed in a different namespace. Responses are
+    cached for _K8S_CACHE_TTL_SECONDS to keep the dashboard polling cheap.
+    """
+    cached = _k8s_cache_get("list_pods")
+    if cached is not None:
+        return cached
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        namespaces = {K8S_NAMESPACE, LND_K8S_NAMESPACE, CLN_K8S_NAMESPACE}
+        containers = []
+        for ns in namespaces:
+            try:
+                containers.extend(_k8s_list_pods_in_namespace(ns, token))
+            except Exception as exc:
+                app.logger.warning(f"k8s pod listing failed for ns={ns}: {exc}")
+        _k8s_cache_set("list_pods", containers)
+        return containers
+    except Exception as exc:
+        app.logger.warning(f"k8s pod listing failed: {exc}")
+        return None
+
+
+def k8s_get_pod_name(label_selector, namespace=None):
+    """Return the name of the first Running pod matching label_selector."""
+    if not label_selector:
+        return None
+    ns = namespace or K8S_NAMESPACE
+    cache_key = f"pod_name:{ns}:{label_selector}"
+    cached = _k8s_cache_get(cache_key)
+    if cached is not None:
+        # Cache the negative result too (cached=="") so we don't re-hit the API
+        # in tight loops when a pod is genuinely missing.
+        return cached or None
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        encoded_selector = quote(label_selector, safe="")
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={encoded_selector}"
+        resp = _k8s_session.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
+        resp.raise_for_status()
+        for pod in resp.json().get("items", []):
+            if pod.get("status", {}).get("phase") == "Running":
+                name = pod["metadata"]["name"]
+                _k8s_cache_set(cache_key, name)
+                return name
+        _k8s_cache_set(cache_key, "")
+    except Exception as exc:
+        app.logger.warning(f"k8s pod lookup failed (selector={label_selector}, ns={ns}): {exc}")
+    return None
+
+
+def k8s_delete_pod(pod_name, namespace=None):
+    """Delete a pod by name; the owning Deployment will recreate it."""
+    if not pod_name:
+        return False
+    ns = namespace or K8S_NAMESPACE
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{pod_name}"
+        resp = _k8s_session.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
+        # Invalidate the cache so the next list/lookup sees the post-delete state
+        # (the Deployment will spin up a new pod with a different name+IP).
+        with _k8s_cache_lock:
+            _k8s_cache.clear()
+        return resp.status_code in (200, 202, 404)
+    except Exception as exc:
+        app.logger.warning(f"k8s pod deletion failed ({pod_name}, ns={ns}): {exc}")
+        return False
+
+
+def list_containers():
+    """Return the running container/pod list for the active mode."""
+    if K3S_MODE:
+        return k8s_list_pods()
+    return docker_api("/containers/json?all=0")
+
+
+def lnd_exists():
+    """Return True if an LND container/pod is reachable in the current mode."""
+    if K3S_MODE:
+        return bool(k8s_get_pod_name(LND_K8S_POD_SELECTOR, namespace=LND_K8S_NAMESPACE))
+    return bool(container_ids_by_match(LND_CONTAINER_PATTERN))
+
+
+def cln_exists():
+    """Return True if a CLN container/pod is reachable in the current mode."""
+    if K3S_MODE:
+        return bool(k8s_get_pod_name(CLN_K8S_POD_SELECTOR, namespace=CLN_K8S_NAMESPACE))
+    return bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
+
+
 def container_ip_by_match(pattern, containers=None):
     if containers is None:
-        containers = docker_api("/containers/json?all=0")
+        containers = list_containers()
     if not containers:
         return ""
 
@@ -864,7 +1023,7 @@ def container_ip_by_match(pattern, containers=None):
 
 def container_ids_by_match(pattern, containers=None):
     if containers is None:
-        containers = docker_api("/containers/json?all=0")
+        containers = list_containers()
     if not containers:
         return []
 
@@ -885,6 +1044,19 @@ def container_id_by_match(pattern):
 
 
 def restart_container_by_pattern(pattern, is_lnd=False):
+    if K3S_MODE:
+        selector = LND_K8S_POD_SELECTOR if is_lnd else CLN_K8S_POD_SELECTOR
+        ns = LND_K8S_NAMESPACE if is_lnd else CLN_K8S_NAMESPACE
+        app.logger.info(f"k3s: Triggering pod restart (selector={selector}, ns={ns})")
+        pod_name = k8s_get_pod_name(selector, namespace=ns)
+        if not pod_name:
+            app.logger.error(f"k3s: No Running pod found for selector {selector} in ns={ns}")
+            return False
+        app.logger.info(f"k3s: Deleting pod {pod_name} (Deployment will recreate it)")
+        result = k8s_delete_pod(pod_name, namespace=ns)
+        app.logger.info(f"k3s: Pod deletion {'successful' if result else 'failed'}")
+        return result
+
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
     if is_lnd:
         app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
@@ -1477,14 +1649,42 @@ def local_status():
                 configs.append(fname)
 
     dataplane = read_dataplane_state()
-    containers = docker_api("/containers/json?all=0") or []
-    lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
-    cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
+
+    if K3S_MODE:
+        import socket
+        def _resolve_svc(svc_env, ns):
+            name = os.environ.get(svc_env, "")
+            if not name:
+                return ""
+            cache_key = f"svc_resolve:{name}:{ns}"
+            cached = _k8s_cache_get(cache_key)
+            if cached is not None:
+                return cached
+            resolved = ""
+            for fqdn in (f"{name}.{ns}.svc.cluster.local", name):
+                try:
+                    future = _dns_executor.submit(socket.getaddrinfo, fqdn, None, socket.AF_INET)
+                    addr_info = future.result(timeout=1.0)
+                    if addr_info:
+                        resolved = addr_info[0][4][0]
+                        break
+                except Exception:
+                    pass
+            _k8s_cache_set(cache_key, resolved)
+            return resolved
+        lnd_ip = _resolve_svc("LND_K8S_SERVICE", LND_K8S_NAMESPACE)
+        cln_ip = _resolve_svc("CLN_K8S_SERVICE", CLN_K8S_NAMESPACE)
+        lnd_detected = lnd_exists()
+        cln_detected = cln_exists()
+    else:
+        containers = docker_api("/containers/json?all=0") or []
+        lnd_ip = container_ip_by_match(LND_CONTAINER_PATTERN, containers=containers)
+        cln_ip = container_ip_by_match(CLN_CONTAINER_PATTERN, containers=containers)
+        lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
+        cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
 
     # Granular state detection
     vpn_active = (wg_status == "Connected")
-    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers))
-    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN, containers=containers))
 
     lnd_routing_active = False
     if os.path.exists(LND_CONFIG_PATH):
@@ -1795,7 +1995,7 @@ def configure_node():
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
-        if not container_ids_by_match(LND_CONTAINER_PATTERN):
+        if not lnd_exists():
             app.logger.warning("LND container not found. Skipping configuration.")
             return jsonify({
                 "success": False, 
@@ -1832,7 +2032,7 @@ def configure_node():
         )
 
     # CLN target
-    if not container_ids_by_match(CLN_CONTAINER_PATTERN):
+    if not cln_exists():
         app.logger.warning("CLN container not found. Skipping configuration.")
         return jsonify({
             "success": False, 
@@ -1874,8 +2074,8 @@ def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
-    lnd_detected = bool(container_ids_by_match(LND_CONTAINER_PATTERN))
-    cln_detected = bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
+    lnd_detected = lnd_exists()
+    cln_detected = cln_exists()
 
     lnd_processed, lnd_changed = comment_out_config_lines(
         LND_CONFIG_PATH,

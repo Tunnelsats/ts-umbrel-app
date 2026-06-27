@@ -1,6 +1,9 @@
 # OS
 .DS_Store
 
+# IDE / Editor
+.claude/settings.local.json
+
 # Environment
 .env.local
 .umbrel-apps-fork/
