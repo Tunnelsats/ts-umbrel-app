@@ -173,8 +173,18 @@ def check_tcp_port_cached(ip, port):
 
     return val
 
+_cln_network_cache = None
+_cln_network_cache_time = 0.0
+_cln_network_lock = threading.Lock()
+
 def detect_cln_network():
     """Detect the active CLN network by checking subdirectories in /lightning-data/cln/."""
+    global _cln_network_cache, _cln_network_cache_time
+    now = time.time()
+    with _cln_network_lock:
+        if _cln_network_cache is not None and now - _cln_network_cache_time < 60.0:
+            return _cln_network_cache
+
     networks = ["bitcoin", "testnet", "signet", "regtest"]
     active_net = "bitcoin"
     latest_mtime = 0.0
@@ -202,6 +212,10 @@ def detect_cln_network():
                     active_net = net
             except Exception:
                 pass
+
+    with _cln_network_lock:
+        _cln_network_cache = active_net
+        _cln_network_cache_time = now
 
     return active_net
 
@@ -2265,7 +2279,10 @@ def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
     if SECURE_MODE:
         targets = []
-        if lnd_exists():
+        lnd_detected = lnd_exists() or os.path.exists(LND_CONFIG_PATH)
+        cln_container_config, _ = resolve_node_config("cln")
+        cln_detected = cln_exists() or (cln_container_config and os.path.exists(cln_container_config))
+        if lnd_detected:
             _, lnd_path = resolve_node_config("lnd")
             targets.append({
                 "node_type": "lnd",
@@ -2274,7 +2291,7 @@ def restore_node():
                     "externalhosts="
                 ]
             })
-        if cln_exists():
+        if cln_detected:
             _, cln_path = resolve_node_config("cln")
             targets.append({
                 "node_type": "cln",

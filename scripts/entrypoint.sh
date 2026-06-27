@@ -648,9 +648,9 @@ ensure_policy_routing() {
         # 1. Discover target's bridge network subnet dynamically
         local route_info dev_iface subnet
         route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-        dev_iface=$(echo "${route_info}" | grep -oP 'dev \K\S+' || true)
+        dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
         if [ -n "${dev_iface}" ]; then
-            subnet=$(ip addr show dev "${dev_iface}" | grep -oP 'inet \K\S+' | head -n1 || true)
+            subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
         fi
         if [ -n "${subnet}" ]; then
             subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
@@ -937,9 +937,9 @@ rules_are_synced() {
             # Discover target's bridge network subnet dynamically
             local route_info dev_iface subnet
             route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-            dev_iface=$(echo "${route_info}" | grep -oP 'dev \K\S+' || true)
+            dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
             if [ -n "${dev_iface}" ]; then
-                subnet=$(ip addr show dev "${dev_iface}" | grep -oP 'inet \K\S+' | head -n1 || true)
+                subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
             fi
             if [ -n "${subnet}" ]; then
                 subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
@@ -1094,9 +1094,9 @@ cleanup_dataplane() {
             # Discover target's bridge network subnet dynamically
             local route_info dev_iface subnet
             route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-            dev_iface=$(echo "${route_info}" | grep -oP 'dev \K\S+' || true)
+            dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
             if [ -n "${dev_iface}" ]; then
-                subnet=$(ip addr show dev "${dev_iface}" | grep -oP 'inet \K\S+' | head -n1 || true)
+                subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
             fi
             if [ -n "${subnet}" ]; then
                 subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")

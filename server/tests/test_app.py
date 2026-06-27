@@ -2119,5 +2119,31 @@ class TestSecureModeToggle:
         assert payload['targets'][0]['node_type'] == 'lnd'
         assert 'externalhosts=' in payload['targets'][0]['config_lines']
 
+    def test_detect_cln_network_caching(self):
+        import app
+        # Reset cache
+        app._cln_network_cache = None
+        app._cln_network_cache_time = 0.0
+
+        with patch('os.path.exists', return_value=True), \
+             patch('os.path.getmtime', side_effect=[100.0, 50.0, 50.0, 50.0, 200.0, 50.0, 50.0, 50.0]) as mock_mtime:
+            # First call: bitcoin has mtime 100.0
+            net1 = app.detect_cln_network()
+            assert net1 == "bitcoin"
+            assert mock_mtime.call_count == 4
+
+            # Second call: within 60s TTL, should use cache and not call getmtime
+            net2 = app.detect_cln_network()
+            assert net2 == "bitcoin"
+            assert mock_mtime.call_count == 4
+
+            # Advance time by 61 seconds
+            with patch('time.time', return_value=time.time() + 61.0):
+                # Third call: cache expired, calls getmtime again
+                net3 = app.detect_cln_network()
+                assert net3 == "bitcoin"
+                assert mock_mtime.call_count == 8
+
+
 
 
