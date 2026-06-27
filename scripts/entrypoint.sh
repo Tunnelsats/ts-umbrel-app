@@ -1090,7 +1090,7 @@ cleanup_dataplane() {
         remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
         remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
 
-        if [[ "${SECURE_MODE}" == "true" ]]; then
+        if [[ "${SECURE_MODE}" == "true" ]] && [ -n "${DOCKER_TARGET_IP:-}" ]; then
             # Discover target's bridge network subnet dynamically
             local route_info dev_iface subnet
             route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)

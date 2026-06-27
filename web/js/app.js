@@ -1356,10 +1356,11 @@ function createModalOverlay(id) {
     const panel = document.createElement('div');
     panel.className = 'w-full max-w-lg rounded-2xl border border-gray-700/50 bg-gray-950 p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transform transition-all duration-300 scale-95 opacity-0 text-left';
 
+    const OVERLAY_TRANSITION_MS = 300;
     const closeModal = () => {
         panel.classList.add('scale-95', 'opacity-0');
         overlay.classList.add('opacity-0');
-        setTimeout(() => overlay.remove(), 200);
+        setTimeout(() => overlay.remove(), OVERLAY_TRANSITION_MS);
     };
 
     overlay.onclick = (e) => {

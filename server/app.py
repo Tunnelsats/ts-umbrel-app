@@ -1401,13 +1401,13 @@ def proxy_request(method, endpoint, payload=None):
 
 @app.route("/")
 def serve_index():
-    static_folder = app.static_folder or "web"
+    static_folder = app.static_folder or "../web"
     return send_from_directory(static_folder, "index.html")
 
 
 @app.route("/<path:path>")
 def serve_static(path):
-    static_folder = app.static_folder or "web"
+    static_folder = app.static_folder or "../web"
     return send_from_directory(static_folder, path)
 
 

@@ -430,7 +430,7 @@ describe('UI Routing and Initialization', () => {
         const configDoneBtn = Array.from(configBtns).find(btn => btn.textContent === 'Done');
         expect(configDoneBtn.className).toContain('text-base'); // Done btn has text-base
         configDoneBtn.click();
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
 
         // Test manual restore modal font sizes and formatting
         window.showManualRestoreModal([{
@@ -462,7 +462,7 @@ describe('UI Routing and Initialization', () => {
         expect(code.textContent).toBe('remove1');
 
         restoreDoneBtn.click();
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
     });
 
     test('manual configuration modal closes on clicking the overlay outside the panel but not inside', async () => {
@@ -493,7 +493,7 @@ describe('UI Routing and Initialization', () => {
 
         // Click outside panel (on overlay itself)
         overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-config-modal')).toBeNull();
     });
 
@@ -528,7 +528,7 @@ describe('UI Routing and Initialization', () => {
 
         // Click outside panel (on overlay itself)
         overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
 
@@ -1378,7 +1378,7 @@ describe('Phase 3b: Install Config', () => {
         // Close modal
         const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
         doneBtn.click();
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-config-modal')).toBeNull();
     });
 
@@ -1415,7 +1415,7 @@ describe('Phase 3b: Install Config', () => {
         // Close modal
         const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
         doneBtn.click();
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
 
