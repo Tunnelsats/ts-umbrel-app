@@ -1603,8 +1603,12 @@ async function restoreNode() {
 
         if (res.ok) {
             if (data.manual_mode) {
-                setActionMessage('restore-node-msg', 'Manual restore required.', 'info');
-                showManualRestoreModal(data.targets);
+                if (!data.targets || data.targets.length === 0) {
+                    setActionMessage('restore-node-msg', 'No active Lightning nodes detected for manual restore.', 'info');
+                } else {
+                    setActionMessage('restore-node-msg', 'Manual restore required.', 'info');
+                    showManualRestoreModal(data.targets);
+                }
             } else {
                 const lndState = data.lnd ? (data.lnd_changed ? 'updated' : 'no changes') : 'config not found';
                 const clnState = data.cln ? (data.cln_changed ? 'updated' : 'no changes') : 'config not found';

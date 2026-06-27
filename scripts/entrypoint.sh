@@ -356,14 +356,14 @@ detect_lightning_container() {
         if [ "${lnd_ok}" -eq 0 ] && [ "${cln_ok}" -eq 0 ]; then
             local lnd_has_ts=0
             local cln_has_ts=0
-            if [ -f "/lightning-data/lnd/lnd.conf" ] && grep -q "externalhosts=" "/lightning-data/lnd/lnd.conf" 2>/dev/null; then
+            if [ -f "/lightning-data/lnd/lnd.conf" ] && grep -qE "^[[:space:]]*externalhosts=" "/lightning-data/lnd/lnd.conf" 2>/dev/null; then
                 lnd_has_ts=1
             fi
-            if { [ -f "/lightning-data/cln/config" ] && grep -q "announce-addr=" "/lightning-data/cln/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/bitcoin/config" ] && grep -q "announce-addr=" "/lightning-data/cln/bitcoin/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/testnet/config" ] && grep -q "announce-addr=" "/lightning-data/cln/testnet/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/signet/config" ] && grep -q "announce-addr=" "/lightning-data/cln/signet/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/regtest/config" ] && grep -q "announce-addr=" "/lightning-data/cln/regtest/config" 2>/dev/null; }; then
+            if { [ -f "/lightning-data/cln/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/config" 2>/dev/null; } || \
+               { [ -f "/lightning-data/cln/bitcoin/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/bitcoin/config" 2>/dev/null; } || \
+               { [ -f "/lightning-data/cln/testnet/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/testnet/config" 2>/dev/null; } || \
+               { [ -f "/lightning-data/cln/signet/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/signet/config" 2>/dev/null; } || \
+               { [ -f "/lightning-data/cln/regtest/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/regtest/config" 2>/dev/null; }; then
                 cln_has_ts=1
             fi
             
@@ -844,15 +844,15 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        if [[ "${K3S_MODE}" == "true" ]]; then
+        if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
             # Mangle rules for conntrack fwmark routing.
             if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK restore rule (k3s)"
+                log INFO "Syncing mangle CONNMARK restore rule"
                 remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
                 if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
                     -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                    LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
+                    LAST_ERROR="Failed to add CONNMARK restore-mark rule"
                     return 1
                 fi
                 changed=1
@@ -863,11 +863,11 @@ ensure_nat_forward_rules() {
 
             if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
+                log INFO "Syncing mangle CONNMARK set-mark rule"
                 remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
                 if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                     -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                    LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
+                    LAST_ERROR="Failed to add CONNMARK set-mark rule"
                     return 1
                 fi
                 changed=1
@@ -1086,6 +1086,10 @@ cleanup_dataplane() {
     local attempt=0
 
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+
         if [[ "${SECURE_MODE}" == "true" ]]; then
             # Discover target's bridge network subnet dynamically
             local route_info dev_iface subnet
@@ -1107,9 +1111,6 @@ cleanup_dataplane() {
             # Also remove any legacy IP-source rules from older deployments.
             ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
             ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
-            remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
         fi
     else
         # Remove local bypass rule (pref 32500)

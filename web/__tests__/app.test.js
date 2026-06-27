@@ -1419,6 +1419,30 @@ describe('Phase 3b: Install Config', () => {
         expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
 
+    test('restoreNode handles manual_mode with empty targets gracefully', async () => {
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        restore: true,
+                        targets: []
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.restoreNode();
+
+        const modal = document.getElementById('manual-restore-modal');
+        expect(modal).toBeNull();
+        const msg = document.getElementById('restore-node-msg');
+        expect(msg.textContent).toContain('No active Lightning nodes detected for manual restore.');
+    });
+
 // Removed pollReconcileStatus tests
 });
 

@@ -1120,7 +1120,7 @@ def lnd_exists():
     if K3S_MODE:
         return bool(k8s_get_pod_name(LND_K8S_POD_SELECTOR, namespace=LND_K8S_NAMESPACE))
     if SECURE_MODE:
-        return check_tcp_port_cached(LND_PROBE_IP, LND_PROBE_PORT) or os.path.exists(LND_CONFIG_PATH)
+        return check_tcp_port_cached(LND_PROBE_IP, LND_PROBE_PORT)
     return bool(container_ids_by_match(LND_CONTAINER_PATTERN))
 
 
@@ -1129,8 +1129,7 @@ def cln_exists():
     if K3S_MODE:
         return bool(k8s_get_pod_name(CLN_K8S_POD_SELECTOR, namespace=CLN_K8S_NAMESPACE))
     if SECURE_MODE:
-        container_path, _ = resolve_node_config("cln")
-        return check_tcp_port_cached(CLN_PROBE_IP, CLN_PROBE_PORT) or (container_path and os.path.exists(container_path))
+        return check_tcp_port_cached(CLN_PROBE_IP, CLN_PROBE_PORT)
     return bool(container_ids_by_match(CLN_CONTAINER_PATTERN))
 
 
@@ -1818,17 +1817,15 @@ def local_status():
             return resolved
         lnd_ip = _resolve_svc("LND_K8S_SERVICE", LND_K8S_NAMESPACE)
         cln_ip = _resolve_svc("CLN_K8S_SERVICE", CLN_K8S_NAMESPACE)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_lnd = executor.submit(lnd_exists)
-            future_cln = executor.submit(cln_exists)
-            lnd_detected = future_lnd.result()
-            cln_detected = future_cln.result()
+        future_lnd = _dns_executor.submit(lnd_exists)
+        future_cln = _dns_executor.submit(cln_exists)
+        lnd_detected = future_lnd.result()
+        cln_detected = future_cln.result()
     elif SECURE_MODE:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_lnd = executor.submit(lnd_exists)
-            future_cln = executor.submit(cln_exists)
-            lnd_detected = future_lnd.result()
-            cln_detected = future_cln.result()
+        future_lnd = _dns_executor.submit(lnd_exists)
+        future_cln = _dns_executor.submit(cln_exists)
+        lnd_detected = future_lnd.result()
+        cln_detected = future_cln.result()
         lnd_ip = LND_PROBE_IP if lnd_detected else ""
         cln_ip = CLN_PROBE_IP if cln_detected else ""
     else:
