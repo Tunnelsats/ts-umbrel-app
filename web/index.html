@@ -491,9 +491,23 @@
 
                 <div>
                     <h2 class="text-xl font-bold text-white mb-2">Configure Lightning Node</h2>
-                    <p class="text-sm text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats
+                    <p id="install-desc" class="text-base text-gray-400 mb-4">Choose your node implementation and inject the TunnelSats
                         forwarding host. This step applies the WireGuard configuration to your node and restarts the
                         necessary containers so your Lightning node connects through the secure TunnelSats network.</p>
+
+                    <!-- Secure Mode manual config warning -->
+                    <div id="secure-mode-warning-box" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                        <strong class="text-base text-tsyellow mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Configuration (Secure Mode)</strong>
+                        <p class="mb-2">TunnelSats is running in Secure Mode (without root Docker socket access) to comply with Umbrel's security guidelines. Because of this sandbox isolation, <strong>you must manually edit your Lightning configuration file</strong> to announce your TunnelSats external IP and port.</p>
+                        <p class="mb-2 text-tsyellow"><strong>CRITICAL:</strong> If you skip this, your Lightning node will not broadcast its clearnet IP address to the network. As a result, other nodes will be unable to connect to you or open channels to you (inbound connections will fail).</p>
+                        <p class="font-semibold text-white mb-1">How to apply:</p>
+                        <ol class="list-decimal pl-5 space-y-1 text-gray-400">
+                            <li>Select LND or CLN below and click <strong>Configure Node</strong> to fetch the exact configuration parameters.</li>
+                            <li>Open the Umbrel <strong>Files</strong> app (or connect via SSH).</li>
+                            <li>Navigate to the target file path shown in the instructions.</li>
+                            <li>Paste the configuration lines, save the file, and then restart your <strong>Lightning Node or Core-Lightning</strong> app from the Umbrel dashboard.</li>
+                        </ol>
+                    </div>
 
                     <div class="grid grid-cols-2 gap-3 mb-4">
                         <button id="node-type-lnd" type="button"
@@ -523,8 +537,22 @@
 
                     <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-6 mb-6">
                         <h3 class="text-white font-bold mb-2">Restore Node Config</h3>
-                        <p class="text-sm text-gray-300 mb-4">Revert TunnelSats node configuration changes before
+                        <p id="uninstall-desc" class="text-base text-gray-300 mb-4">Revert TunnelSats node configuration changes before
                             uninstalling.</p>
+
+                        <!-- Secure Mode manual restore warning -->
+                        <div id="secure-mode-uninstall-warning-box" class="hidden bg-red-950/30 border border-red-500/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                            <strong class="text-base text-red-400 mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Restore (Secure Mode)</strong>
+                            <p class="mb-2">Because TunnelSats has read-only access to your configurations, <strong>you must manually revert configuration changes</strong> before uninstalling the TunnelSats app.</p>
+                            <p class="mb-2 text-red-400"><strong>CRITICAL:</strong> If you do not remove the TunnelSats external host parameters from your Lightning config file, your node will remain offline trying to route through a non-existent VPN IP address once the app is deleted.</p>
+                            <p class="font-semibold text-white mb-1">How to restore:</p>
+                            <ol class="list-decimal pl-5 space-y-1 text-gray-400">
+                                <li>Click <strong>Restore Node Networking</strong> below to view the lines that need to be removed.</li>
+                                <li>Open the Umbrel <strong>Files</strong> app (or connect via SSH).</li>
+                                <li>Open your node config file, delete or comment out the specified lines, and save.</li>
+                                <li>Restart your <strong>Lightning Node or Core-Lightning</strong> app from the Umbrel dashboard to apply the defaults.</li>
+                            </ol>
+                        </div>
                         <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
                             Restore Node Networking
@@ -593,6 +621,13 @@
                             <li><a href="#faq-6"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-6"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 6. In Secure Mode, why must I edit my config manually?</a></li>
+                            <li><a href="#faq-7"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-7"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
@@ -715,7 +750,7 @@
                                     </h4>
                                     <p class="mb-2">First, we must safely detach the VPN from your Lightning node and
                                         return it to its default Tor/Clearnet state.</p>
-                                    <ol class="list-decimal pl-5 space-y-1 text-xs">
+                                    <ol id="faq-uninstall-steps" class="list-decimal pl-5 space-y-1 text-xs">
                                         <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.
                                         </li>
                                         <li>Click the <strong>Restore Node Networking</strong> button.</li>
@@ -756,9 +791,27 @@
                                 </div>
                             </div>
                         </div>
+                        <!-- Q6 (Secure Mode) -->
+                        <div id="faq-6" class="bg-yellow-950/10 border border-tsyellow/30 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
+                                <span class="text-tsyellow">⚠️</span> 6. In Secure Mode, why must I edit my config manually?
+                            </h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>To comply with Umbrel's official security rules, TunnelSats runs in a hardened sandbox (without root system access or direct access to the Docker socket). Consequently, it cannot write to your node's config files or trigger container restarts automatically.</p>
+                                <p class="text-tsyellow font-semibold">Without these manual config changes, your Lightning node will not broadcast its TunnelSats clearnet IP/port to the gossip network. This means other nodes will not know how to connect to you, and inbound channel opens will fail.</p>
+                                <h4 class="text-white font-semibold mt-4 mb-2">How to apply manually:</h4>
+                                <ol class="list-decimal pl-5 space-y-2">
+                                    <li>Navigate to the <strong>Install</strong> tab, select your implementation, and click <strong>Configure Node</strong>.</li>
+                                    <li>Copy the target config file path and the configuration lines.</li>
+                                    <li>Open the Umbrel <strong>Files</strong> app, navigate to the config file (e.g. <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code> for LND), paste the lines, and save.</li>
+                                    <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
+                                    <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> app settings, and click <strong>Restart</strong>.</li>
+                                </ol>
+                            </div>
+                        </div>
 
                         <!-- Troubleshooting -->
-                        <div id="faq-6" class="bg-red-900/10 border border-red-500/30 rounded-lg p-5 scroll-mt-6">
+                        <div id="faq-7" class="bg-red-900/10 border border-red-500/30 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2"><svg
                                     class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -770,7 +823,7 @@
                                 <p>If you skipped Step 1, your LND or CLN configuration file still contains the
                                     TunnelSats <code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts</code>
-                                    or <code
+                                     or <code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">announce-addr</code>
                                     directives, but the VPN tunnel is dead. Your traffic is effectively being sent into
                                     a black hole.</p>
@@ -800,7 +853,6 @@
                                 </ol>
                             </div>
                         </div>
-
                     </div>
                 </div>
 
@@ -865,7 +917,7 @@
                 <div class="flex flex-col">
                     <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
                             class="text-tsyellow">Sats</span></h1>
-                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.2.0</span>
+                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.3.0</span>
                 </div>
             </div>
 

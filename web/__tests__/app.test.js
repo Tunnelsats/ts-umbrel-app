@@ -168,6 +168,44 @@ describe('UI Routing and Initialization', () => {
         }
     });
 
+    test('delegated data-scroll-to click switches tab when target is inside a hidden section', () => {
+        const faq3 = document.getElementById('faq-3');
+        const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
+        faq3.scrollIntoView = jest.fn();
+
+        const faqView = document.getElementById('view-faq');
+        faqView.classList.add('hidden');
+        window.switchTab = jest.fn();
+
+        const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+        tocLink.dispatchEvent(clickEvent);
+
+        expect(clickEvent.defaultPrevented).toBe(true);
+        expect(window.switchTab).toHaveBeenCalledWith('faq');
+        expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
+
+        faqView.classList.remove('hidden');
+        delete window.switchTab;
+    });
+
+    test('hash routing switches to FAQ tab on load/hashchange', () => {
+        jest.useFakeTimers();
+        const faq6 = document.getElementById('faq-6');
+        faq6.scrollIntoView = jest.fn();
+        window.switchTab = jest.fn();
+
+        window.location.hash = '#faq-6';
+        window.__tsHashHandler();
+
+        expect(window.switchTab).toHaveBeenCalledWith('faq');
+        jest.advanceTimersByTime(150);
+        expect(faq6.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
+
+        window.location.hash = '';
+        delete window.switchTab;
+        jest.useRealTimers();
+    });
+
     test('all target=_blank links include noopener and noreferrer', () => {
         const links = Array.from(document.querySelectorAll('a[target="_blank"]'));
         expect(links.length).toBeGreaterThan(0);
@@ -219,6 +257,279 @@ describe('UI Routing and Initialization', () => {
 
         expect(document.getElementById('statusBadge').textContent).toBe('Connected');
         expect(document.getElementById('txt-routing-status').textContent).toBe('No Nodes Detected');
+    });
+
+    test('fetchStatus adjusts UI for secure_mode: true', async () => {
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: 'lnd',
+                    configs_found: [],
+                    version: 'v3.0.0',
+                    secure_mode: true
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('install-desc').textContent).toContain('Since TunnelSats is running in Secure Mode, the configuration cannot be applied automatically');
+        expect(document.getElementById('uninstall-desc').textContent).toContain('Since TunnelSats is running in Secure Mode, the configuration cannot be modified automatically');
+        expect(document.getElementById('faq-uninstall-steps').innerHTML).toContain('Follow the modal instructions to manually comment out or delete');
+        
+        const warningBox = document.getElementById('secure-mode-warning-box');
+        const uninstallWarningBox = document.getElementById('secure-mode-uninstall-warning-box');
+        expect(warningBox.classList.contains('hidden')).toBe(false);
+        expect(warningBox.textContent).toContain('Files app');
+        expect(uninstallWarningBox.classList.contains('hidden')).toBe(false);
+        expect(uninstallWarningBox.textContent).toContain('manually revert configuration changes');
+        
+        expect(document.getElementById('faq-6')).toBeTruthy();
+        expect(document.getElementById('faq-6').textContent).toContain('In Secure Mode, why must I edit my config manually');
+        
+        expect(window.secureModeActive).toBe(true);
+    });
+
+    test('fetchStatus adjusts UI for secure_mode: false', async () => {
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: 'lnd',
+                    configs_found: [],
+                    version: 'v3.0.0',
+                    secure_mode: false
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('install-desc').textContent).toContain('Choose your node implementation and inject the TunnelSats forwarding host');
+        expect(document.getElementById('uninstall-desc').textContent).toContain('Revert TunnelSats node configuration changes before uninstalling');
+        expect(document.getElementById('faq-uninstall-steps').innerHTML).toContain('Wait for the UI to confirm that your node configuration has been restored');
+        
+        expect(document.getElementById('secure-mode-warning-box').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('secure-mode-uninstall-warning-box').classList.contains('hidden')).toBe(true);
+        
+        expect(window.secureModeActive).toBe(false);
+    });
+
+    test('configureNode bypasses confirmRestartModal in secure mode', async () => {
+        window.secureModeActive = true;
+        window.confirmRestartModal = jest.fn().mockResolvedValue(true);
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    success: true,
+                    manual_mode: true,
+                    node_type: 'lnd',
+                    config_path: '/path/to/lnd.conf',
+                    config_lines: ['line1', 'line2']
+                }),
+                ok: true
+            })
+        );
+
+        await window.configureNode();
+
+        expect(window.confirmRestartModal).not.toHaveBeenCalled();
+        expect(document.getElementById('manual-config-modal')).toBeTruthy();
+        
+        document.getElementById('manual-config-modal').remove();
+    });
+
+    test('restoreNode bypasses confirmRestartModal in secure mode', async () => {
+        window.secureModeActive = true;
+        window.confirmRestartModal = jest.fn().mockResolvedValue(true);
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    success: true,
+                    manual_mode: true,
+                    restore: true,
+                    targets: [
+                        {
+                            node_type: 'lnd',
+                            config_path: '/path/to/lnd.conf',
+                            config_lines: ['remove1']
+                        }
+                    ]
+                }),
+                ok: true
+            })
+        );
+
+        await window.restoreNode();
+
+        expect(window.confirmRestartModal).not.toHaveBeenCalled();
+        expect(document.getElementById('manual-restore-modal')).toBeTruthy();
+
+        document.getElementById('manual-restore-modal').remove();
+    });
+
+    test('FAQ layout ordering matches Q5 -> Q6 (Secure Mode) -> Q7 (Troubleshooting)', () => {
+        const anchors = Array.from(document.querySelectorAll('#view-faq a[data-scroll-to]'));
+        const index5 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-5');
+        const index6 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-6');
+        const index7 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-7');
+        
+        expect(index5).toBeLessThan(index6);
+        expect(index6).toBeLessThan(index7);
+
+        const faq5 = document.getElementById('faq-5');
+        const faq6 = document.getElementById('faq-6');
+        const faq7 = document.getElementById('faq-7');
+
+        expect(faq5.compareDocumentPosition(faq6)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+        expect(faq6.compareDocumentPosition(faq7)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+
+    test('Install/Uninstall tab descriptions and warning boxes have increased font sizes', () => {
+        const installDesc = document.getElementById('install-desc');
+        const uninstallDesc = document.getElementById('uninstall-desc');
+        const warningBox = document.getElementById('secure-mode-warning-box');
+        const uninstallWarningBox = document.getElementById('secure-mode-uninstall-warning-box');
+
+        expect(installDesc.className).toContain('text-base');
+        expect(uninstallDesc.className).toContain('text-base');
+        expect(warningBox.className).toContain('text-sm');
+        expect(uninstallWarningBox.className).toContain('text-sm');
+    });
+
+    test('Manual configuration and restore modals have increased font sizes and correct typography styling', async () => {
+        // Test manual config modal font sizes
+        window.showManualConfigModal('lnd', '/path/to/lnd.conf', ['line1']);
+        const configModal = document.getElementById('manual-config-modal');
+        expect(configModal).toBeTruthy();
+        expect(configModal.querySelector('p').className).toContain('text-sm'); // desc has text-sm
+        expect(configModal.querySelector('ol').className).toContain('text-sm'); // instructions have text-sm
+        expect(configModal.querySelector('pre').className).toContain('text-sm'); // pre code block has text-sm
+        const configBtns = configModal.querySelectorAll('button');
+        const configDoneBtn = Array.from(configBtns).find(btn => btn.textContent === 'Done');
+        expect(configDoneBtn.className).toContain('text-base'); // Done btn has text-base
+        configDoneBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 250));
+
+        // Test manual restore modal font sizes and formatting
+        window.showManualRestoreModal([{
+            node_type: 'lnd',
+            config_path: '/path/to/lnd.conf',
+            config_lines: ['remove1']
+        }]);
+        const restoreModal = document.getElementById('manual-restore-modal');
+        expect(restoreModal).toBeTruthy();
+        expect(restoreModal.querySelector('p').className).toContain('text-sm'); // desc has text-sm
+        const restoreDoneBtn = Array.from(restoreModal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
+        expect(restoreDoneBtn.className).toContain('text-base'); // Done btn has text-base
+        
+        // Check formatting of the configuration lines list
+        const ul = restoreModal.querySelector('ul');
+        expect(ul.className).toContain('list-disc');
+        expect(ul.className).toContain('text-sm');
+        expect(ul.className).toContain('text-gray-300'); // normal sans-serif gray text for list item
+        expect(ul.className).not.toContain('font-mono'); // ul shouldn't force monospace globally
+        expect(ul.className).not.toContain('text-tsyellow'); // ul shouldn't force yellow globally
+
+        const li = ul.querySelector('li');
+        expect(li.className).toContain('text-sm');
+        expect(li.innerHTML).toContain('Remove/comment out:');
+        const code = li.querySelector('code');
+        expect(code).toBeTruthy();
+        expect(code.className).toContain('font-mono');
+        expect(code.className).toContain('text-tsyellow');
+        expect(code.textContent).toBe('remove1');
+
+        restoreDoneBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 250));
+    });
+
+    test('manual configuration modal closes on clicking the overlay outside the panel but not inside', async () => {
+        window.secureModeActive = true;
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    success: true,
+                    manual_mode: true,
+                    node_type: 'lnd',
+                    config_path: '/path/to/lnd.conf',
+                    config_lines: ['line1']
+                }),
+                ok: true
+            })
+        );
+
+        await window.configureNode();
+
+        const overlay = document.getElementById('manual-config-modal');
+        expect(overlay).toBeTruthy();
+
+        // Click inside panel
+        const panel = overlay.querySelector('div');
+        panel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        expect(document.getElementById('manual-config-modal')).toBeTruthy();
+
+        // Click outside panel (on overlay itself)
+        overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 250));
+        expect(document.getElementById('manual-config-modal')).toBeNull();
+    });
+
+    test('manual restore modal closes on clicking the overlay outside the panel but not inside', async () => {
+        window.secureModeActive = true;
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    success: true,
+                    manual_mode: true,
+                    restore: true,
+                    targets: [{
+                        node_type: 'lnd',
+                        config_path: '/path/to/lnd.conf',
+                        config_lines: ['remove1']
+                    }]
+                }),
+                ok: true
+            })
+        );
+
+        await window.restoreNode();
+
+        const overlay = document.getElementById('manual-restore-modal');
+        expect(overlay).toBeTruthy();
+
+        // Click inside panel
+        const panel = overlay.querySelector('div');
+        panel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        expect(document.getElementById('manual-restore-modal')).toBeTruthy();
+
+        // Click outside panel (on overlay itself)
+        overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 250));
+        expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
 
     test('switchTab resumes polling and restores UI if activePaymentHash exists', () => {
@@ -1037,6 +1348,75 @@ describe('Phase 3b: Install Config', () => {
         const msg = document.getElementById('restore-node-msg').textContent;
         expect(msg).toContain('LND: config not found');
         expect(msg).toContain('CLN: config not found');
+    });
+
+    test('configureNode handles manual_mode and renders instructions modal', async () => {
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/configure-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        node_type: 'lnd',
+                        config_path: '/path/to/lnd.conf',
+                        config_lines: ['line1', 'line2']
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.configureNode();
+
+        const modal = document.getElementById('manual-config-modal');
+        expect(modal).toBeTruthy();
+        expect(modal.textContent).toContain('Manual Setup Required');
+        expect(modal.textContent).toContain('/path/to/lnd.conf');
+        expect(modal.textContent).toContain('line1\nline2');
+
+        // Close modal
+        const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
+        doneBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 250));
+        expect(document.getElementById('manual-config-modal')).toBeNull();
+    });
+
+    test('restoreNode handles manual_mode and renders manual restore modal', async () => {
+        global.fetch = jest.fn((url) => {
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        restore: true,
+                        targets: [
+                            {
+                                node_type: 'lnd',
+                                config_path: '/path/to/lnd.conf',
+                                config_lines: ['remove1', 'remove2']
+                            }
+                        ]
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ json: () => Promise.resolve({}), ok: true });
+        });
+
+        await window.restoreNode();
+
+        const modal = document.getElementById('manual-restore-modal');
+        expect(modal).toBeTruthy();
+        expect(modal.textContent).toContain('Manual Restore Required');
+        expect(modal.textContent).toContain('/path/to/lnd.conf');
+        expect(modal.textContent).toContain('remove1');
+
+        // Close modal
+        const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
+        doneBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 250));
+        expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
 
 // Removed pollReconcileStatus tests
