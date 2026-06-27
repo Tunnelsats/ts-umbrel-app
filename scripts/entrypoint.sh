@@ -601,6 +601,26 @@ ${rules}
 EOF_RULES
 }
 
+get_target_subnet() {
+    local target_ip="${1:-${DOCKER_TARGET_IP:-}}"
+    if [ -z "${target_ip}" ]; then
+        echo "10.21.0.0/16"
+        return
+    fi
+    local route_info dev_iface subnet
+    route_info=$(ip route get "${target_ip}" 2>/dev/null || true)
+    dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
+    if [ -n "${dev_iface}" ]; then
+        subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
+    fi
+    if [ -n "${subnet}" ]; then
+        subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
+    else
+        subnet="10.21.0.0/16"
+    fi
+    echo "${subnet}"
+}
+
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
@@ -646,17 +666,8 @@ ensure_policy_routing() {
     elif [[ "${SECURE_MODE}" == "true" ]]; then
         # Secure Mode: Direct IP policy routing
         # 1. Discover target's bridge network subnet dynamically
-        local route_info dev_iface subnet
-        route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-        dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
-        if [ -n "${dev_iface}" ]; then
-            subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
-        fi
-        if [ -n "${subnet}" ]; then
-            subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
-        else
-            subnet="10.21.0.0/16"
-        fi
+        local subnet
+        subnet=$(get_target_subnet)
         
         # 2. Local-to-Local bypass rule (so LND can talk to local Bitcoind/Tor on 10.21.x.x)
         if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${subnet} lookup main"; then
@@ -935,17 +946,8 @@ rules_are_synced() {
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
         if [[ "${SECURE_MODE}" == "true" ]]; then
             # Discover target's bridge network subnet dynamically
-            local route_info dev_iface subnet
-            route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-            dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
-            if [ -n "${dev_iface}" ]; then
-                subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
-            fi
-            if [ -n "${subnet}" ]; then
-                subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
-            else
-                subnet="10.21.0.0/16"
-            fi
+            local subnet
+            subnet=$(get_target_subnet)
 
             if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${subnet} lookup main"; then
                 log WARN "rules_are_synced: SecureMode local bypass rule FAIL"
@@ -1092,17 +1094,8 @@ cleanup_dataplane() {
 
         if [[ "${SECURE_MODE}" == "true" ]] && [ -n "${DOCKER_TARGET_IP:-}" ]; then
             # Discover target's bridge network subnet dynamically
-            local route_info dev_iface subnet
-            route_info=$(ip route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
-            dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
-            if [ -n "${dev_iface}" ]; then
-                subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
-            fi
-            if [ -n "${subnet}" ]; then
-                subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
-            else
-                subnet="10.21.0.0/16"
-            fi
+            local subnet
+            subnet=$(get_target_subnet)
             
             ip rule del from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1 || true
             ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
