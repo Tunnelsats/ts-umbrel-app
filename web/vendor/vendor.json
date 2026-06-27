@@ -6,49 +6,57 @@
       "name": "globe.gl",
       "version": "2.45.1",
       "source_url": "https://unpkg.com/globe.gl@2.45.1/dist/globe.gl.min.js",
-      "local_path": "web/vendor/globe.gl.min.js"
+      "local_path": "web/vendor/globe.gl.min.js",
+      "sha256": "7c033e295fdd9c32e842fd68849996d13c43cb8e8f6f4b455abf9f3489103027"
     },
     {
       "name": "qrcode",
       "version": "1.0.0",
       "source_url": "https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js",
-      "local_path": "web/vendor/qrcode.min.js"
+      "local_path": "web/vendor/qrcode.min.js",
+      "sha256": "c541ef06327885a8415bca8df6071e14189b4855336def4f36db54bde8484f36"
     },
     {
       "name": "inter-400",
-      "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/fonts/inter-400.woff2",
-      "local_path": "web/vendor/fonts/inter-400.woff2"
+      "version": "4.5.15",
+      "source_url": "https://unpkg.com/@fontsource/inter@4.5.15/files/inter-latin-400-normal.woff2",
+      "local_path": "web/vendor/fonts/inter-400.woff2",
+      "sha256": "0364d368abf457d4e70dbc7a7a360f3486eaea2837b194915b23d4398bee91ac"
     },
     {
       "name": "inter-500",
-      "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/fonts/inter-500.woff2",
-      "local_path": "web/vendor/fonts/inter-500.woff2"
+      "version": "4.5.15",
+      "source_url": "https://unpkg.com/@fontsource/inter@4.5.15/files/inter-latin-500-normal.woff2",
+      "local_path": "web/vendor/fonts/inter-500.woff2",
+      "sha256": "d53336707c39d1ec20a2b1f7399ca9f183c45592e215a42fd596dfa2dbb8ad7a"
     },
     {
       "name": "inter-600",
-      "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/fonts/inter-600.woff2",
-      "local_path": "web/vendor/fonts/inter-600.woff2"
+      "version": "4.5.15",
+      "source_url": "https://unpkg.com/@fontsource/inter@4.5.15/files/inter-latin-600-normal.woff2",
+      "local_path": "web/vendor/fonts/inter-600.woff2",
+      "sha256": "048d136d592e66896cccc1fe4fada4feb16b7f6af671cd49a2fe6ed6b2276c6c"
     },
     {
       "name": "inter-700",
-      "version": "4.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/fonts/inter-700.woff2",
-      "local_path": "web/vendor/fonts/inter-700.woff2"
+      "version": "4.5.15",
+      "source_url": "https://unpkg.com/@fontsource/inter@4.5.15/files/inter-latin-700-normal.woff2",
+      "local_path": "web/vendor/fonts/inter-700.woff2",
+      "sha256": "ced2d8e02e2fbf08d2edec9b5f13648ed8348588a05f7181632f3c1dd6e1f5c3"
     },
     {
       "name": "earth-dark",
-      "version": "1.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/img/earth-dark.jpg",
-      "local_path": "web/vendor/img/earth-dark.jpg"
+      "version": "2.30.0",
+      "source_url": "https://unpkg.com/three-globe@2.30.0/example/img/earth-dark.jpg",
+      "local_path": "web/vendor/img/earth-dark.jpg",
+      "sha256": "8b8f3a4e258428b6e669a0799fb8b6f2db15c6240825d6a7c75963829b576994"
     },
     {
       "name": "earth-topology",
-      "version": "1.0.0",
-      "source_url": "https://github.com/Tunnelsats/ts-umbrel-app/raw/v3.1.1/web/vendor/img/earth-topology.png",
-      "local_path": "web/vendor/img/earth-topology.png"
+      "version": "2.30.0",
+      "source_url": "https://unpkg.com/three-globe@2.30.0/example/img/earth-topology.png",
+      "local_path": "web/vendor/img/earth-topology.png",
+      "sha256": "839b12da2e4dd346b256cebae72e10c479a102c8980a22084c41275e4b9a0e12"
     }
   ]
 }
