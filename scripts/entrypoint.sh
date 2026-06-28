@@ -919,20 +919,21 @@ rules_are_synced() {
                 log WARN "rules_are_synced: k3s fwmark rule FAIL"
                 return 1
             fi
+        fi
 
-            # 1b. mangle CONNMARK restore rule
-            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-                log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
-                return 1
-            fi
+        # Both K3S_MODE and SECURE_MODE use conntrack mangle rules
+        # 1b. mangle CONNMARK restore rule
+        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+            log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
+            return 1
+        fi
 
-            # 1c. mangle CONNMARK set rule
-            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-                log WARN "rules_are_synced: k3s mangle conn-save FAIL (missing or wrong form)"
-                return 1
-            fi
+        # 1c. mangle CONNMARK set rule
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+            log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
+            return 1
         fi
 
         # 2. NAT PREROUTING check (DNAT)
@@ -1039,15 +1040,14 @@ cleanup_dataplane() {
     remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+    remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
 
     local max_attempts=10
     local attempt=0
 
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-        remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-
         if [[ "${SECURE_MODE}" == "true" ]] && [ -n "${DOCKER_TARGET_IP:-}" ]; then
             # Discover target's bridge network subnet dynamically
             local subnet
@@ -1142,6 +1142,7 @@ reconcile_once() {
 
     if ! detect_lightning_container; then
         LAST_ERROR="${LAST_ERROR:-No running LND/CLN container detected}"
+        cleanup_dataplane
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
