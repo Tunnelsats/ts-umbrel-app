@@ -21,6 +21,7 @@ RECONCILE_INTERVAL=30
 # These are explicitly exported so the Python dashboard (launched as a child process below)
 # always sees them, even if a future caller passes them as plain shell vars instead of env.
 export K3S_MODE="${K3S_MODE:-false}"
+export SECURE_MODE="${SECURE_MODE:-false}"
 export LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
 export CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
@@ -77,7 +78,13 @@ write_state() {
     tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
 
     local dataplane_mode
-    dataplane_mode="$([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "docker-full-parity")"
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        dataplane_mode="k3s"
+    elif [[ "${SECURE_MODE}" == "true" ]]; then
+        dataplane_mode="secure-mode"
+    else
+        dataplane_mode="docker-full-parity"
+    fi
 
     if jq -n \
         --arg dataplane_mode "${dataplane_mode}" \
@@ -309,6 +316,52 @@ detect_lightning_container() {
         return 0
     fi
 
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        local lnd_ok=0
+        local cln_ok=0
+        
+        # 1. Active TCP probes first (indicates a running, listening node)
+        if timeout 2 bash -c 'cat < /dev/null > /dev/tcp/10.21.21.9/9735' 2>/dev/null; then
+            lnd_ok=1
+        fi
+        if timeout 2 bash -c 'cat < /dev/null > /dev/tcp/10.21.21.96/9736' 2>/dev/null; then
+            cln_ok=1
+        fi
+
+        # Load metadata node type configuration if available to break ties
+        local meta_node=""
+        if [ -f "/data/tunnelsats-meta.json" ]; then
+            meta_node=$(jq -r '.nodeType // empty' /data/tunnelsats-meta.json 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        fi
+
+        # 2. Tie resolution if both TCP probes succeeded
+        if [ "${lnd_ok}" -eq 1 ] && [ "${cln_ok}" -eq 1 ]; then
+            if [ "${meta_node}" = "lnd" ]; then
+                cln_ok=0
+            elif [ "${meta_node}" = "cln" ]; then
+                lnd_ok=0
+            fi
+        fi
+
+        if [ "${lnd_ok}" -eq 1 ]; then
+            TARGET_IMPL="lnd"
+            TARGET_CONTAINER_NAME="lightning_lnd_1"
+            LN_TARGET_PORT="9735"
+            DOCKER_TARGET_IP="10.21.21.9"
+            log INFO "SecureMode: Detected LND node at ${DOCKER_TARGET_IP}"
+            return 0
+        elif [ "${cln_ok}" -eq 1 ]; then
+            TARGET_IMPL="cln"
+            TARGET_CONTAINER_NAME="lightning_cln_1"
+            LN_TARGET_PORT="9736"
+            DOCKER_TARGET_IP="10.21.21.96"
+            log INFO "SecureMode: Detected CLN node at ${DOCKER_TARGET_IP}"
+            return 0
+        fi
+        LAST_ERROR="SecureMode: No Lightning node detected (probed 10.21.21.9 and 10.21.21.96)"
+        return 1
+    fi
+
     local containers
     containers=$(docker_api "GET" "/containers/json?all=0") || return 1
 
@@ -357,6 +410,7 @@ detect_lightning_container() {
 
 ensure_docker_network() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
     local response body code
     response=$(docker_api_with_code "GET" "/networks/${DOCKER_NETWORK_NAME}") || true
     body="${response%HTTPSTATUS:*}"
@@ -386,7 +440,7 @@ ensure_docker_network() {
 }
 
 resolve_bridge_name() {
-    if [[ "${K3S_MODE}" == "true" ]]; then
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
         BRIDGE_NAME=""
         return 0
     fi
@@ -405,6 +459,7 @@ resolve_bridge_name() {
 
 ensure_container_attached() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
     local inspect
     inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || return 1
 
@@ -502,6 +557,26 @@ ${rules}
 EOF_RULES
 }
 
+get_target_subnet() {
+    local target_ip="${1:-${DOCKER_TARGET_IP:-}}"
+    if [ -z "${target_ip}" ]; then
+        echo "10.21.0.0/16"
+        return
+    fi
+    local route_info dev_iface subnet
+    route_info=$(ip route get "${target_ip}" 2>/dev/null || true)
+    dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
+    if [ -n "${dev_iface}" ]; then
+        subnet=$(ip addr show dev "${dev_iface}" | awk '$1 == "inet" {print $2; exit}' || true)
+    fi
+    if [ -n "${subnet}" ]; then
+        subnet=$(python3 -c "import sys, ipaddress; print(ipaddress.IPv4Network(sys.stdin.read().strip(), strict=False))" 2>/dev/null <<< "${subnet}" || echo "10.21.0.0/16")
+    else
+        subnet="10.21.0.0/16"
+    fi
+    echo "${subnet}"
+}
+
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
@@ -539,6 +614,47 @@ ensure_policy_routing() {
             if ! ip rule add fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1; then
                 if ! ip rule show pref 32764 | grep -q "fwmark"; then
                     LAST_ERROR="k3s: Failed to add fwmark policy routing rule"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
+    elif [[ "${SECURE_MODE}" == "true" ]]; then
+        # Secure Mode: Direct IP policy routing
+        # 1. Discover target's bridge network subnet dynamically
+        local subnet
+        subnet=$(get_target_subnet)
+        
+        # 1b. Sweep stale source-IP rules for the other possible node IP to prevent route leakage
+        local other_ip
+        if [ "${DOCKER_TARGET_IP}" = "10.21.21.9" ]; then
+            other_ip="10.21.21.96"
+        else
+            other_ip="10.21.21.9"
+        fi
+        local other_subnet
+        other_subnet=$(get_target_subnet "${other_ip}")
+        ip rule del from "${other_ip}" to "${other_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${other_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+
+        # 2. Local-to-Local bypass rule (so LND can talk to local Bitcoind/Tor on 10.21.x.x)
+        if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${subnet//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
+            ip rule del from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1; then
+                if ! ip rule show pref 32500 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
+                    LAST_ERROR="SecureMode: Failed to add local bypass rule"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
+        
+        # 3. Route external traffic through the VPN table 51820
+        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+            ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
+                if ! ip rule show pref 32764 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
+                    LAST_ERROR="SecureMode: Failed to add policy routing rule"
                     return 1
                 fi
             fi
@@ -681,17 +797,15 @@ ensure_nat_forward_rules() {
         fi
     fi
 
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        # k3s mode: scope FORWARD rules to the target pod IP rather than accepting all
-        # established connections / all WG-ingress traffic. This keeps tunnelsats off the
-        # path for traffic it should not touch and minimizes blast radius.
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        # Scope FORWARD rules to the target IP
         if ! iptables -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
-            log INFO "Syncing FORWARD inbound rules (k3s)"
+            log INFO "Syncing FORWARD inbound rules"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
             if ! iptables -I FORWARD 1 -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-forward-in" -j ACCEPT; then
-                LAST_ERROR="k3s: Failed to add FORWARD inbound rule"
+                LAST_ERROR="Failed to add FORWARD inbound rule"
                 return 1
             fi
             changed=1
@@ -699,11 +813,11 @@ ensure_nat_forward_rules() {
 
         if ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
             -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
-            log INFO "Syncing FORWARD outbound rules (k3s)"
+            log INFO "Syncing FORWARD outbound rules"
             remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
             if ! iptables -I FORWARD 2 -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
                 -m comment --comment "tunnelsats-forward-out" -j ACCEPT; then
-                LAST_ERROR="k3s: Failed to add FORWARD outbound rule"
+                LAST_ERROR="Failed to add FORWARD outbound rule"
                 return 1
             fi
             changed=1
@@ -712,11 +826,11 @@ ensure_nat_forward_rules() {
         # Mangle rules for conntrack fwmark routing.
         if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK restore rule (k3s)"
+            log INFO "Syncing mangle CONNMARK restore rule"
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
             if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                LAST_ERROR="k3s: Failed to add CONNMARK restore-mark rule"
+                LAST_ERROR="Failed to add CONNMARK restore-mark rule"
                 return 1
             fi
             changed=1
@@ -727,11 +841,11 @@ ensure_nat_forward_rules() {
 
         if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK set-mark rule (k3s)"
+            log INFO "Syncing mangle CONNMARK set-mark rule"
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
             if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
                 -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                LAST_ERROR="k3s: Failed to add CONNMARK set-mark rule"
+                LAST_ERROR="Failed to add CONNMARK set-mark rule"
                 return 1
             fi
             changed=1
@@ -767,12 +881,15 @@ ensure_nat_forward_rules() {
 
     # Verify MASQUERADE positioning to ensure deterministic routing priority (Grep ID 3033104618)
     # Check if the exact rule exists at position 1 (first entry in POSTROUTING)
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        local masq_src="${DOCKER_TARGET_IP}"
+    local masq_src
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        masq_src="${DOCKER_TARGET_IP}"
     else
-        local masq_src="${DOCKER_NETWORK_SUBNET}"
+        masq_src="${DOCKER_NETWORK_SUBNET}"
     fi
-    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${masq_src}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+    local first_rule
+    first_rule=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -v '^-P' | head -n 1 || true)
+    if ! echo "${first_rule}" | grep -F "tunnelsats-masq" | grep -F -- "-s ${masq_src}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
         log INFO "Rule rotation: TunnelSats MASQUERADE is not at position 1. Re-positioning for ${WG_IFACE}..."
 
         # Deterministic cleanup before re-insertion at position 1 (Grep ID 3033104618)
@@ -794,24 +911,40 @@ rules_are_synced() {
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
 
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        # 1. fwmark policy routing rule
-        if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
-            log WARN "rules_are_synced: k3s fwmark rule FAIL"
-            return 1
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        if [[ "${SECURE_MODE}" == "true" ]]; then
+            # Discover target's bridge network subnet dynamically
+            local subnet
+            subnet=$(get_target_subnet)
+
+            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${subnet//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
+                log WARN "rules_are_synced: SecureMode local bypass rule FAIL"
+                return 1
+            fi
+            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820"; then
+                log WARN "rules_are_synced: SecureMode policy routing rule FAIL"
+                return 1
+            fi
+        else
+            # 1. fwmark policy routing rule
+            if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*(lookup|table)[[:space:]]+51820"; then
+                log WARN "rules_are_synced: k3s fwmark rule FAIL"
+                return 1
+            fi
         fi
 
+        # Both K3S_MODE and SECURE_MODE use conntrack mangle rules
         # 1b. mangle CONNMARK restore rule
         if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: k3s mangle conn-restore FAIL (missing or wrong form)"
+            log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
             return 1
         fi
 
         # 1c. mangle CONNMARK set rule
         if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: k3s mangle conn-save FAIL (missing or wrong form)"
+            log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
             return 1
         fi
 
@@ -822,24 +955,24 @@ rules_are_synced() {
             return 1
         fi
 
-        # 2b. NAT PREROUTING fallback check for translated 9735 traffic (k3s)
+        # 2b. NAT PREROUTING fallback check for translated 9735 traffic
         if [ "${internal_match_port}" != "9735" ] && ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport 9735 \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
             log WARN "rules_are_synced: NAT fallback rule FAIL"
             return 1
         fi
 
-        # 3. FORWARD Inbound check (scoped to target pod IP)
+        # 3. FORWARD Inbound check (scoped to target IP)
         if ! iptables -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
             -m comment --comment "tunnelsats-forward-in" -j ACCEPT 2>/dev/null; then
-            log WARN "rules_are_synced: k3s FORWARD in FAIL"
+            log WARN "rules_are_synced: FORWARD in FAIL"
             return 1
         fi
 
-        # 4. FORWARD Outbound check (scoped to target pod IP)
+        # 4. FORWARD Outbound check (scoped to target IP)
         if ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" -o "${WG_IFACE}" \
             -m comment --comment "tunnelsats-forward-out" -j ACCEPT 2>/dev/null; then
-            log WARN "rules_are_synced: k3s FORWARD out FAIL"
+            log WARN "rules_are_synced: FORWARD out FAIL"
             return 1
         fi
 
@@ -914,23 +1047,35 @@ rules_are_synced() {
 }
 
 cleanup_dataplane() {
-    log INFO "Cleaning dataplane rules"
+    local keep_tunnel=false
+    if [[ "${1:-}" == "--keep-tunnel" ]]; then
+        keep_tunnel=true
+    fi
+    log INFO "Cleaning dataplane rules (keep_tunnel=${keep_tunnel})"
     remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
     remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+    remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
 
     local max_attempts=10
     local attempt=0
 
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
-        # Also remove any legacy IP-source rules from older deployments.
-        ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
-        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
-        remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+    # Clean up all potential node target IP routing rules in Secure Mode unconditionally to prevent stale rules persisting across mode toggles or restores
+    for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        [ -n "${cleanup_ip}" ] || continue
+        local cleanup_subnet
+        cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
+        ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+    done
+
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        if [[ "${SECURE_MODE}" != "true" ]]; then
+            ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
+        fi
     else
         # Remove local bypass rule (pref 32500)
         ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
@@ -946,10 +1091,12 @@ cleanup_dataplane() {
         done
     fi
 
-    ip route flush table 51820 >/dev/null 2>&1 || true
+    if [ "${keep_tunnel}" = false ]; then
+        ip route flush table 51820 >/dev/null 2>&1 || true
 
-    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
-        wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+        if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+            wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -1001,7 +1148,7 @@ reconcile_once() {
 
     log INFO "reconcile_start reason=${reason}"
 
-    if [[ "${K3S_MODE}" != "true" ]] && [ ! -S "${DOCKER_SOCK}" ]; then
+    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]] && [ ! -S "${DOCKER_SOCK}" ]; then
         LAST_ERROR="Docker socket unavailable"
         write_state
         if [ -n "${request_id}" ]; then
@@ -1012,6 +1159,7 @@ reconcile_once() {
 
     if ! detect_lightning_container; then
         LAST_ERROR="${LAST_ERROR:-No running LND/CLN container detected}"
+        cleanup_dataplane "--keep-tunnel"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false

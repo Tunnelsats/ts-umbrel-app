@@ -38,6 +38,24 @@ While we await review for the official Umbrel App Store - Appreciate the upvote 
 
 ---
 
+## 🔒 Secure Mode (Official App Store Sandbox)
+
+To comply with Umbrel's strict security guidelines, the version of TunnelSats submitted to the official Umbrel App Store runs in **Secure Mode** (with `SECURE_MODE=true` set in the environment).
+
+### What changes in Secure Mode?
+1. **No Docker Socket Access**: The container does not mount `/var/run/docker.sock`, preventing it from inspecting or mutating other containers on the host.
+2. **Dynamic Probing**: Instead of using the Docker API, the app detects LND or Core-Lightning nodes by dynamically probing their default TCP ports (`10.21.21.9:9735` and `10.21.21.96:9736`) and checking configuration file paths.
+3. **Manual Node Configuration**: The app cannot automatically edit your node's configuration files or restart the containers. Instead, the UI provides copy-to-clipboard blocks and step-by-step instructions so you can easily copy and paste the parameters yourself.
+
+### Swapping Modes
+By default, the Community App Store version runs with automated setup (`SECURE_MODE=false`), while the Official Store version defaults to Secure Mode. 
+
+You can manually force either behavior by editing `tunnelsats/docker-compose.yml` or setting the environment variable:
+- **Force Secure Mode**: `SECURE_MODE=true`
+- **Force Automated Mode**: `SECURE_MODE=false` (requires mounting `/var/run/docker.sock:/var/run/docker.sock:ro` in your compose file)
+
+---
+
 ## ☸️ Running on k3s / Kubernetes
 
 Besides Umbrel, TunnelSats can run in `k3s` mode alongside an LND/CLN node in a

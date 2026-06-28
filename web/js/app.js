@@ -2,6 +2,7 @@
 var pollInterval;
 var activePaymentHash = null;
 var purchaseMode = "buy"; // "buy" or "renew"
+window.secureModeActive = false;
 
 // Pricing Configuration
 const BASE_PRICE_USD = 3;
@@ -9,6 +10,26 @@ const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
+
+// Badge States Constants for Routing Status
+const BADGE_STATES = {
+    notFound: {
+        text: "Not Found",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 bg-gray-900/50 text-gray-500"
+    },
+    offline: {
+        text: "Offline",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-red-700 bg-red-900/50 text-red-500"
+    },
+    unsecured: {
+        text: "Unsecured",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow pulse-yellow"
+    },
+    active: {
+        text: "Active",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"
+    }
+};
 
 // 3D Visualization State
 let myGlobe = null;
@@ -426,11 +447,43 @@ function handleScrollToClick(e) {
     const el = document.getElementById(id);
     if (el) {
         e.preventDefault();
-        el.scrollIntoView({ behavior: 'smooth' });
+        const section = el.closest('main section');
+        let needsDelay = false;
+        if (section && section.classList.contains('hidden')) {
+            const tabId = section.id.replace('view-', '');
+            if (typeof switchTab === 'function') {
+                switchTab(tabId);
+                needsDelay = true;
+            }
+        }
+        if (needsDelay) {
+            setTimeout(() => {
+                el.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
+        } else {
+            el.scrollIntoView({ behavior: 'smooth' });
+        }
+    }
+}
+
+function handleHashRoute() {
+    const hash = window.location.hash;
+    if (hash && hash.startsWith('#faq-')) {
+        const id = hash.substring(1);
+        const el = document.getElementById(id);
+        if (el) {
+            if (typeof switchTab === 'function') {
+                switchTab('faq');
+            }
+            setTimeout(() => {
+                el.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
+        }
     }
 }
 
 function initApp() {
+    window._lastSecureMode = undefined;
     // Keep globe bootstrap independent from one-time app initialization.
     if (!myGlobe) initGlobe();
 
@@ -496,6 +549,14 @@ function initApp() {
     }
     window.__tsScrollToHandler = handleScrollToClick;
     document.addEventListener('click', window.__tsScrollToHandler);
+
+    // Hash routing for deep-linking
+    if (window.__tsHashHandler) {
+        window.removeEventListener('hashchange', window.__tsHashHandler);
+    }
+    window.__tsHashHandler = handleHashRoute;
+    window.addEventListener('hashchange', window.__tsHashHandler);
+    handleHashRoute();
 }
 
 if (document.readyState !== 'loading') {
@@ -598,6 +659,57 @@ function switchTab(tabId) {
     if (window.innerWidth < 768) {
         const nav = document.getElementById('sidebar-nav');
         if (nav) nav.classList.add('hidden');
+    }
+}
+
+function applySecureModeUI(isSecureMode) {
+    if (window._lastSecureMode === isSecureMode) {
+        return;
+    }
+    window._lastSecureMode = isSecureMode;
+    window.secureModeActive = isSecureMode;
+
+    const elements = {
+        installDesc: document.getElementById('install-desc'),
+        uninstallDesc: document.getElementById('uninstall-desc'),
+        faqUninstallSteps: document.getElementById('faq-uninstall-steps'),
+        warningBox: document.getElementById('secure-mode-warning-box'),
+        uninstallWarningBox: document.getElementById('secure-mode-uninstall-warning-box')
+    };
+
+    if (elements.installDesc) {
+        elements.installDesc.textContent = isSecureMode
+            ? "Choose your node implementation and follow the manual configuration steps. Since TunnelSats is running in Secure Mode, the configuration cannot be applied automatically."
+            : "Choose your node implementation and inject the TunnelSats forwarding host. This step applies the WireGuard configuration to your node and restarts the necessary containers so your Lightning node connects through the secure TunnelSats network.";
+    }
+
+    if (elements.uninstallDesc) {
+        elements.uninstallDesc.textContent = isSecureMode
+            ? "To restore your lightning node networking back to default, click the button below to view the manual steps to revert the configuration parameter changes from your config files. Since TunnelSats is running in Secure Mode, the configuration cannot be modified automatically."
+            : "Revert TunnelSats node configuration changes before uninstalling.";
+    }
+
+    if (elements.faqUninstallSteps) {
+        elements.faqUninstallSteps.innerHTML = isSecureMode
+            ? `
+                <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.</li>
+                <li>Click the <strong>Restore Node Networking</strong> button.</li>
+                <li>Follow the modal instructions to manually comment out or delete the configuration parameters from your lightning node config files.</li>
+                <li>Restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard.</li>
+            `
+            : `
+                <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.</li>
+                <li>Click the <strong>Restore Node Networking</strong> button.</li>
+                <li>Wait for the UI to confirm that your node configuration has been restored to its default state without TunnelSats routing.</li>
+            `;
+    }
+
+    if (elements.warningBox) {
+        elements.warningBox.classList.toggle('hidden', !isSecureMode);
+    }
+
+    if (elements.uninstallWarningBox) {
+        elements.uninstallWarningBox.classList.toggle('hidden', !isSecureMode);
     }
 }
 
@@ -730,6 +842,10 @@ async function fetchStatus() {
             document.getElementById('app-version').textContent = data.version;
         }
 
+        // Update Secure Mode dynamic description text & warning boxes
+        const isSecureMode = data.secure_mode === true;
+        applySecureModeUI(isSecureMode);
+
         // Node Routing explicit UI states
         const badgeRouting = document.getElementById('badge-routing');
         const txtRoutingStatus = document.getElementById('txt-routing-status');
@@ -744,24 +860,26 @@ async function fetchStatus() {
         if (btnDashEnable) btnDashEnable.classList.add('hidden');
         if (btnDashDisable) btnDashDisable.classList.add('hidden');
 
+        let badgeState;
         if (!hasNode) {
-            // State 1
-            if (badgeRouting) { badgeRouting.textContent = "Not Found"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 bg-gray-900/50 text-gray-500"; }
+            badgeState = BADGE_STATES.notFound;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
         } else if (!vpnActive) {
-            // State 2
-            if (badgeRouting) { badgeRouting.textContent = "Offline"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-red-700 bg-red-900/50 text-red-500"; }
+            badgeState = BADGE_STATES.offline;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "VPN Disconnected";
         } else if (!routingActive) {
-            // State 3
-            if (badgeRouting) { badgeRouting.textContent = "Unsecured"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-yellow-700 bg-yellow-900/50 text-tsyellow pulse-yellow"; }
+            badgeState = BADGE_STATES.unsecured;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "Hybrid Lightning Connectivity";
             if (btnDashEnable) btnDashEnable.classList.remove('hidden');
         } else {
-            // State 4
-            if (badgeRouting) { badgeRouting.textContent = "Active"; badgeRouting.className = "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"; }
+            badgeState = BADGE_STATES.active;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "Node Routing Secured";
             if (btnDashDisable) btnDashDisable.classList.remove('hidden');
+        }
+
+        if (badgeRouting && badgeState) {
+            badgeRouting.textContent = badgeState.text;
+            badgeRouting.className = badgeState.className;
         }
 
         // Update Dashboard Banner
@@ -1233,12 +1351,209 @@ async function confirmRestartModal(nodeType) {
     });
 }
 
+function createModalOverlay(id) {
+    const existingModal = document.getElementById(id);
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = id;
+    overlay.className = 'absolute inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm transition-opacity duration-300';
+
+    const panel = document.createElement('div');
+    panel.className = 'w-full max-w-lg rounded-2xl border border-gray-700/50 bg-gray-950 p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transform transition-all duration-300 scale-95 opacity-0 text-left';
+
+    const OVERLAY_TRANSITION_MS = 300;
+    const closeModal = () => {
+        panel.classList.add('scale-95', 'opacity-0');
+        overlay.classList.add('opacity-0');
+        setTimeout(() => overlay.remove(), OVERLAY_TRANSITION_MS);
+    };
+
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeModal();
+    });
+
+    const mountAndAnimate = () => {
+        overlay.appendChild(panel);
+        getAppShell().appendChild(overlay);
+        setTimeout(() => {
+            panel.classList.remove('scale-95', 'opacity-0');
+            panel.classList.add('scale-100', 'opacity-100');
+        }, 10);
+    };
+
+    return { overlay, panel, closeModal, mountAndAnimate };
+}
+
+function showManualConfigModal(nodeType, path, lines) {
+    const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-config-modal');
+
+    const title = document.createElement('h3');
+    title.className = 'text-xl font-bold text-white flex items-center gap-3 mb-4';
+    title.innerHTML = `<span class="text-tsyellow">⚠️</span> Manual Setup Required (Secure Mode)`;
+
+    const desc = document.createElement('p');
+    desc.className = 'text-sm text-gray-400 mb-6 leading-relaxed';
+    desc.textContent = `To comply with Umbrel's security guidelines, TunnelSats is running in Secure Mode (without root Docker socket access). Please follow these steps to configure your ${nodeType.toUpperCase()} node manually:`;
+
+    const pathLabel = document.createElement('span');
+    pathLabel.className = 'block text-xs text-gray-500 uppercase tracking-wider mb-2';
+    pathLabel.textContent = 'Target Config File Path';
+
+    const pathValContainer = document.createElement('div');
+    pathValContainer.className = 'flex items-center justify-between bg-black/40 border border-gray-800 rounded-xl p-3 font-mono text-sm text-gray-300 mb-6';
+    
+    const pathText = document.createElement('span');
+    pathText.className = 'truncate mr-2';
+    pathText.textContent = path;
+
+    const copyPathBtn = document.createElement('button');
+    copyPathBtn.className = 'text-tsgreen hover:text-green-400 font-bold text-sm cursor-pointer bg-transparent border-0';
+    copyPathBtn.textContent = 'Copy';
+    copyPathBtn.addEventListener('click', () => copyToClipboard(path, 'File path'));
+
+    pathValContainer.append(pathText, copyPathBtn);
+
+    const linesLabel = document.createElement('span');
+    linesLabel.className = 'block text-xs text-gray-500 uppercase tracking-wider mb-2';
+    linesLabel.textContent = 'Configuration Lines to Add/Update';
+
+    const linesContent = lines.join('\n');
+    const pre = document.createElement('pre');
+    pre.className = 'bg-black/60 border border-gray-800 rounded-xl p-4 font-mono text-sm text-tsgreen overflow-x-auto mb-3';
+    pre.textContent = linesContent;
+
+    const copyLinesBtn = document.createElement('button');
+    copyLinesBtn.className = 'w-full bg-gray-900 border border-gray-800 hover:border-tsgreen text-sm text-gray-300 font-bold py-2.5 rounded-lg transition-all mb-6 cursor-pointer';
+    copyLinesBtn.textContent = 'Copy Configuration Lines';
+    copyLinesBtn.addEventListener('click', () => copyToClipboard(linesContent, 'Configuration lines'));
+
+    const instructionsHeader = document.createElement('p');
+    instructionsHeader.className = 'font-bold text-sm text-white mb-2';
+    instructionsHeader.textContent = 'Instructions:';
+
+    const ol = document.createElement('ol');
+    ol.className = 'list-decimal pl-5 space-y-2 text-sm text-gray-300 mb-8 leading-relaxed';
+    if (nodeType && nodeType.toLowerCase() === "lnd") {
+        ol.innerHTML = `
+            <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
+            <li>Navigate to the configuration file path shown above.</li>
+            <li>Add (or update if already present) the configuration line under the existing <b>[Application Options]</b> section (do not create a duplicate section header or duplicate lines).</li>
+            <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
+        `;
+    } else {
+        ol.innerHTML = `
+            <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
+            <li>Navigate to the configuration file path shown above.</li>
+            <li>Add (or update if already present) each configuration line shown above (do not create duplicate lines).</li>
+            <li>Go back to the Umbrel dashboard and restart your <b>Core Lightning</b> app.</li>
+        `;
+    }
+
+    const doneBtn = document.createElement('button');
+    doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
+    doneBtn.textContent = 'Done';
+    doneBtn.addEventListener('click', closeModal);
+
+    panel.append(title, desc, pathLabel, pathValContainer, linesLabel, pre, copyLinesBtn, instructionsHeader, ol, doneBtn);
+    mountAndAnimate();
+}
+
+function showManualRestoreModal(targets) {
+    const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-restore-modal');
+
+    const title = document.createElement('h3');
+    title.className = 'text-xl font-bold text-white flex items-center gap-3 mb-4';
+    title.innerHTML = `<span class="text-tsyellow">⚠️</span> Manual Restore Required (Secure Mode)`;
+
+    const desc = document.createElement('p');
+    desc.className = 'text-sm text-gray-400 mb-6 leading-relaxed';
+    desc.textContent = `To restore your lightning node networking back to default, please comment out or delete the following configuration parameters from your config files:`;
+
+    const container = document.createElement('div');
+    container.className = 'space-y-4 mb-6';
+
+    targets.forEach(t => {
+        const itemDiv = document.createElement('div');
+        itemDiv.className = 'border border-gray-800 rounded-xl p-4 bg-black/30';
+
+        const nodeLabel = document.createElement('h4');
+        nodeLabel.className = 'text-sm font-bold text-white mb-3 uppercase tracking-wide';
+        nodeLabel.textContent = `${t.node_type.toUpperCase()} Node`;
+
+        const pathValContainer = document.createElement('div');
+        pathValContainer.className = 'flex items-center justify-between bg-black/40 border border-gray-800 rounded-lg p-2.5 font-mono text-xs text-gray-300 mb-3';
+        
+        const pathText = document.createElement('span');
+        pathText.className = 'truncate mr-2';
+        pathText.textContent = t.config_path;
+
+        const copyPathBtn = document.createElement('button');
+        copyPathBtn.className = 'text-tsgreen hover:text-green-400 font-bold text-xs cursor-pointer bg-transparent border-0';
+        copyPathBtn.textContent = 'Copy';
+        copyPathBtn.addEventListener('click', () => copyToClipboard(t.config_path, 'File path'));
+
+        pathValContainer.append(pathText, copyPathBtn);
+
+        const linesLabel = document.createElement('span');
+        linesLabel.className = 'block text-xs text-gray-500 uppercase tracking-wider mb-2';
+        linesLabel.textContent = 'Lines to delete or comment out';
+
+        const linesList = document.createElement('ul');
+        linesList.className = 'list-disc pl-5 text-sm text-gray-300 space-y-1.5';
+        t.config_lines.forEach(line => {
+            const li = document.createElement('li');
+            li.className = 'leading-relaxed text-sm';
+            li.appendChild(document.createTextNode('Remove/comment out: '));
+            const code = document.createElement('code');
+            code.className = 'bg-black/50 border border-gray-800/80 px-1.5 py-0.5 rounded text-tsyellow font-mono text-sm font-bold';
+            code.textContent = line;
+            li.appendChild(code);
+            linesList.appendChild(li);
+        });
+
+        itemDiv.append(nodeLabel, pathValContainer, linesLabel, linesList);
+        container.appendChild(itemDiv);
+    });
+
+    const instructionsHeader = document.createElement('p');
+    instructionsHeader.className = 'font-bold text-sm text-white mb-2';
+    instructionsHeader.textContent = 'Instructions:';
+
+    const ol = document.createElement('ol');
+    ol.className = 'list-decimal pl-5 space-y-2 text-sm text-gray-300 mb-8 leading-relaxed';
+    const hasLnd = targets.some(t => t.node_type === 'lnd');
+    const hasCln = targets.some(t => t.node_type === 'cln');
+    const restartApps = [];
+    if (hasLnd) restartApps.push('<b>Lightning Node</b>');
+    if (hasCln) restartApps.push('<b>Core Lightning</b>');
+    const restartStr = restartApps.length > 0 ? restartApps.join(' and ') : '<b>Lightning Node</b>';
+    ol.innerHTML = `
+        <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
+        <li>Navigate to the configuration file path(s) shown above.</li>
+        <li>Comment out (add <code>#</code> at the start of the line) or delete each configuration line.</li>
+        <li>Go back to the Umbrel dashboard and restart your ${restartStr} app${restartApps.length > 1 ? 's' : ''}.</li>
+    `;
+
+    const doneBtn = document.createElement('button');
+    doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
+    doneBtn.textContent = 'Done';
+    doneBtn.addEventListener('click', closeModal);
+
+    panel.append(title, desc, container, instructionsHeader, ol, doneBtn);
+    mountAndAnimate();
+}
+
 async function configureNode() {
     const selectedNodeType = (document.getElementById('node-type-selected') || {}).value || 'lnd';
 
-    // Warn user about restart
-    const confirmed = await confirmRestartModal(selectedNodeType);
-    if (!confirmed) return;
+    if (!window.secureModeActive) {
+        // Warn user about restart
+        const confirmed = await confirmRestartModal(selectedNodeType);
+        if (!confirmed) return;
+    }
 
     const btn = document.getElementById('btn-configure-node');
     if (btn) {
@@ -1256,8 +1571,13 @@ async function configureNode() {
         const data = await res.json();
 
         if (res.ok && data.success !== false) {
-            const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
-            setActionMessage('configure-node-msg', `Node configured successfully: ${location}`, 'success');
+            if (data.manual_mode) {
+                setActionMessage('configure-node-msg', 'Manual configuration required.', 'info');
+                showManualConfigModal(data.node_type, data.config_path, data.config_lines);
+            } else {
+                const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
+                setActionMessage('configure-node-msg', `Node configured successfully: ${location}`, 'success');
+            }
             fetchStatus();
         } else {
             setActionMessage('configure-node-msg', data.error || 'Failed to configure node.', 'error');
@@ -1273,9 +1593,11 @@ async function configureNode() {
 }
 
 async function restoreNode() {
-    // Warn user about restart
-    const confirmed = await confirmRestartModal('Lightning');
-    if (!confirmed) return;
+    if (!window.secureModeActive) {
+        // Warn user about restart
+        const confirmed = await confirmRestartModal('Lightning');
+        if (!confirmed) return;
+    }
 
     const btn = document.getElementById('btn-restore-node');
     if (btn) {
@@ -1289,9 +1611,18 @@ async function restoreNode() {
         const data = await res.json();
 
         if (res.ok) {
-            const lndState = data.lnd ? (data.lnd_changed ? 'updated' : 'no changes') : 'config not found';
-            const clnState = data.cln ? (data.cln_changed ? 'updated' : 'no changes') : 'config not found';
-            setActionMessage('restore-node-msg', `Restore complete. LND: ${lndState}. CLN: ${clnState}.`, 'success');
+            if (data.manual_mode) {
+                if (!data.targets || data.targets.length === 0) {
+                    setActionMessage('restore-node-msg', 'No active Lightning nodes detected for manual restore.', 'info');
+                } else {
+                    setActionMessage('restore-node-msg', 'Manual restore required.', 'info');
+                    showManualRestoreModal(data.targets);
+                }
+            } else {
+                const lndState = data.lnd ? (data.lnd_changed ? 'updated' : 'no changes') : 'config not found';
+                const clnState = data.cln ? (data.cln_changed ? 'updated' : 'no changes') : 'config not found';
+                setActionMessage('restore-node-msg', `Restore complete. LND: ${lndState}. CLN: ${clnState}.`, 'success');
+            }
             fetchStatus();
         } else {
             setActionMessage('restore-node-msg', data.error || 'Failed to restore node configuration.', 'error');
