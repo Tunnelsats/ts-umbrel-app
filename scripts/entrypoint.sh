@@ -1048,18 +1048,21 @@ cleanup_dataplane() {
     local attempt=0
 
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-        if [[ "${SECURE_MODE}" == "true" ]] && [ -n "${DOCKER_TARGET_IP:-}" ]; then
-            # Discover target's bridge network subnet dynamically
-            local subnet
-            subnet=$(get_target_subnet)
-            
-            ip rule del from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1 || true
-            ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        if [[ "${SECURE_MODE}" == "true" ]]; then
+            for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+                [ -n "${cleanup_ip}" ] || continue
+                local cleanup_subnet
+                cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
+                ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+                ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            done
         else
             ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
             # Also remove any legacy IP-source rules from older deployments.
-            ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
-            ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if [ -n "${DOCKER_TARGET_IP:-}" ]; then
+                ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
+                ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            fi
         fi
     else
         # Remove local bypass rule (pref 32500)
