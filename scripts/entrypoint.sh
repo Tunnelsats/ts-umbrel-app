@@ -673,7 +673,7 @@ ensure_policy_routing() {
         if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${subnet} lookup main"; then
             ip rule del from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1; then
-                if ! ip rule show pref 32500 | grep -q "from ${DOCKER_TARGET_IP}"; then
+                if ! ip rule show pref 32500 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
                     LAST_ERROR="SecureMode: Failed to add local bypass rule"
                     return 1
                 fi
@@ -685,7 +685,7 @@ ensure_policy_routing() {
         if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
             ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
-                if ! ip rule show pref 32764 | grep -q "from ${DOCKER_TARGET_IP}"; then
+                if ! ip rule show pref 32764 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
                     LAST_ERROR="SecureMode: Failed to add policy routing rule"
                     return 1
                 fi
@@ -951,7 +951,7 @@ rules_are_synced() {
                 log WARN "rules_are_synced: SecureMode local bypass rule FAIL"
                 return 1
             fi
-            if ! ip rule show | grep -F "from ${DOCKER_TARGET_IP}" | grep -q "lookup 51820"; then
+            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
                 log WARN "rules_are_synced: SecureMode policy routing rule FAIL"
                 return 1
             fi
