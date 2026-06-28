@@ -294,16 +294,19 @@ run_promote() {
         target_dir="/tmp/tunnelsats_promote_dry_run"
         rm -rf "${target_dir}"
         mkdir -p "${target_dir}"
-        rsync -a --exclude=".gitkeep" "${REPO_ROOT}/tunnelsats/" "${target_dir}/"
+        rsync -a --exclude="/icon.svg" --exclude="/gallery" "${REPO_ROOT}/tunnelsats/" "${target_dir}/"
     else
         log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
-        rsync -av --delete --exclude=".gitkeep" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
+        rsync -av --delete --exclude="/icon.svg" --exclude="/gallery" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
     fi
 
-    log_info "Pinning image digest and setting SECURE_MODE default to true in docker-compose.yml..."
+    log_info "Pinning image digest, adjusting data volume path, and setting SECURE_MODE default to true in docker-compose.yml..."
     local target_compose="${target_dir}/docker-compose.yml"
     sed -E -e "s#(ts-umbrel-app:)v?[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
            -e "s/SECURE_MODE=.*/SECURE_MODE=\\\${SECURE_MODE:-true}/" \
+           -e "s#\.\./tunnelsats-data#data#" \
+           -e "s#(:/lightning-data/lnd)#\1:ro#" \
+           -e "s#(:/lightning-data/cln)#\1:ro#" \
            -e "/# Host socket/d" \
            -e "/\/var\/run\/docker.sock/d" \
            "${target_compose}" > "${target_compose}.tmp" && mv "${target_compose}.tmp" "${target_compose}"
@@ -316,18 +319,19 @@ run_promote() {
     # Remove trailing period from tagline
     sed -E 's/^(tagline:.*)\.$/\1/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
-    # Inject submitter and submission PR URL (if provided)
+    # Inject submitter and submission PR URL (Always required for new app validation checks)
+    local sub_url="${SUBMISSION_URL:-https://github.com/getumbrel/umbrel-apps/pull/4919}"
     if grep -qE "^submitter:" "${target_manifest}"; then
         log_info "submitter/submission already present, skipping injection."
-    elif [ -n "${SUBMISSION_URL:-}" ]; then
-        sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${SUBMISSION_URL}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
+    else
+        sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
     fi
 
-    # Clear releaseNotes
+    # Clear releaseNotes (Must be empty for new app submissions to pass official validation checks)
     sed -e '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d } }' \
         -e 's/^releaseNotes:.*/releaseNotes: ""/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
-    # Clear icon and gallery for monorepo submission
+    # Clear icon and gallery for monorepo submission (assets must not be committed to the store)
     sed -e 's/^icon:.*/icon: ""/' \
         -e '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d } }' \
         -e 's/^gallery:.*/gallery: []/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
