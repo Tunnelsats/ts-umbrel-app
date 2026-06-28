@@ -328,7 +328,7 @@ detect_lightning_container() {
             cln_ok=1
         fi
 
-        # Load metadata node type configuration if available to break ties or fallback
+        # Load metadata node type configuration if available to break ties
         local meta_node=""
         if [ -f "/data/tunnelsats-meta.json" ]; then
             meta_node=$(jq -r '.nodeType // empty' /data/tunnelsats-meta.json 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -340,50 +340,6 @@ detect_lightning_container() {
                 cln_ok=0
             elif [ "${meta_node}" = "cln" ]; then
                 lnd_ok=0
-            fi
-        fi
-        
-        # 3. Check metadata configuration file if both TCP probes fail
-        if [ "${lnd_ok}" -eq 0 ] && [ "${cln_ok}" -eq 0 ]; then
-            if [ "${meta_node}" = "lnd" ]; then
-                lnd_ok=1
-            elif [ "${meta_node}" = "cln" ]; then
-                cln_ok=1
-            fi
-        fi
-
-        # 4. Check for active config file signature (only one configured for TunnelSats)
-        if [ "${lnd_ok}" -eq 0 ] && [ "${cln_ok}" -eq 0 ]; then
-            local lnd_has_ts=0
-            local cln_has_ts=0
-            if [ -f "/lightning-data/lnd/lnd.conf" ] && grep -qE "^[[:space:]]*externalhosts=" "/lightning-data/lnd/lnd.conf" 2>/dev/null; then
-                lnd_has_ts=1
-            fi
-            if { [ -f "/lightning-data/cln/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/bitcoin/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/bitcoin/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/testnet/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/testnet/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/signet/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/signet/config" 2>/dev/null; } || \
-               { [ -f "/lightning-data/cln/regtest/config" ] && grep -qE "^[[:space:]]*announce-addr=" "/lightning-data/cln/regtest/config" 2>/dev/null; }; then
-                cln_has_ts=1
-            fi
-            
-            if [ "${lnd_has_ts}" -eq 1 ] && [ "${cln_has_ts}" -eq 0 ]; then
-                lnd_ok=1
-            elif [ "${cln_has_ts}" -eq 1 ] && [ "${lnd_has_ts}" -eq 0 ]; then
-                cln_ok=1
-            fi
-        fi
-
-        # 5. Fallback to raw file existence
-        if [ "${lnd_ok}" -eq 0 ] && [ "${cln_ok}" -eq 0 ]; then
-            if [ -f "/lightning-data/lnd/lnd.conf" ]; then
-                lnd_ok=1
-            elif [ -f "/lightning-data/cln/config" ] || \
-                 [ -f "/lightning-data/cln/bitcoin/config" ] || \
-                 [ -f "/lightning-data/cln/testnet/config" ] || \
-                 [ -f "/lightning-data/cln/signet/config" ] || \
-                 [ -f "/lightning-data/cln/regtest/config" ]; then
-                cln_ok=1
             fi
         fi
 
@@ -919,7 +875,9 @@ ensure_nat_forward_rules() {
     else
         masq_src="${DOCKER_NETWORK_SUBNET}"
     fi
-    if ! iptables -t nat -S POSTROUTING 1 | grep -F "tunnelsats-masq" | grep -F -- "-s ${masq_src}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
+    local first_rule
+    first_rule=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -v '^-P' | head -n 1 || true)
+    if ! echo "${first_rule}" | grep -F "tunnelsats-masq" | grep -F -- "-s ${masq_src}" | grep -F -- "-o ${WG_IFACE}" | grep -qF -- "-j MASQUERADE"; then
         log INFO "Rule rotation: TunnelSats MASQUERADE is not at position 1. Re-positioning for ${WG_IFACE}..."
 
         # Deterministic cleanup before re-insertion at position 1 (Grep ID 3033104618)

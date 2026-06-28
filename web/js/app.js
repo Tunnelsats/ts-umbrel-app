@@ -1363,9 +1363,9 @@ function createModalOverlay(id) {
         setTimeout(() => overlay.remove(), OVERLAY_TRANSITION_MS);
     };
 
-    overlay.onclick = (e) => {
+    overlay.addEventListener('click', (e) => {
         if (e.target === overlay) closeModal();
-    };
+    });
 
     const mountAndAnimate = () => {
         overlay.appendChild(panel);
@@ -1404,7 +1404,7 @@ function showManualConfigModal(nodeType, path, lines) {
     const copyPathBtn = document.createElement('button');
     copyPathBtn.className = 'text-tsgreen hover:text-green-400 font-bold text-sm cursor-pointer bg-transparent border-0';
     copyPathBtn.textContent = 'Copy';
-    copyPathBtn.onclick = () => copyToClipboard(path, 'File path');
+    copyPathBtn.addEventListener('click', () => copyToClipboard(path, 'File path'));
 
     pathValContainer.append(pathText, copyPathBtn);
 
@@ -1420,7 +1420,7 @@ function showManualConfigModal(nodeType, path, lines) {
     const copyLinesBtn = document.createElement('button');
     copyLinesBtn.className = 'w-full bg-gray-900 border border-gray-800 hover:border-tsgreen text-sm text-gray-300 font-bold py-2.5 rounded-lg transition-all mb-6 cursor-pointer';
     copyLinesBtn.textContent = 'Copy Configuration Lines';
-    copyLinesBtn.onclick = () => copyToClipboard(linesContent, 'Configuration lines');
+    copyLinesBtn.addEventListener('click', () => copyToClipboard(linesContent, 'Configuration lines'));
 
     const instructionsHeader = document.createElement('p');
     instructionsHeader.className = 'font-bold text-sm text-white mb-2';
@@ -1447,7 +1447,7 @@ function showManualConfigModal(nodeType, path, lines) {
     const doneBtn = document.createElement('button');
     doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
     doneBtn.textContent = 'Done';
-    doneBtn.onclick = closeModal;
+    doneBtn.addEventListener('click', closeModal);
 
     panel.append(title, desc, pathLabel, pathValContainer, linesLabel, pre, copyLinesBtn, instructionsHeader, ol, doneBtn);
     mountAndAnimate();
@@ -1485,7 +1485,7 @@ function showManualRestoreModal(targets) {
         const copyPathBtn = document.createElement('button');
         copyPathBtn.className = 'text-tsgreen hover:text-green-400 font-bold text-xs cursor-pointer bg-transparent border-0';
         copyPathBtn.textContent = 'Copy';
-        copyPathBtn.onclick = () => copyToClipboard(t.config_path, 'File path');
+        copyPathBtn.addEventListener('click', () => copyToClipboard(t.config_path, 'File path'));
 
         pathValContainer.append(pathText, copyPathBtn);
 
@@ -1532,7 +1532,7 @@ function showManualRestoreModal(targets) {
     const doneBtn = document.createElement('button');
     doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
     doneBtn.textContent = 'Done';
-    doneBtn.onclick = closeModal;
+    doneBtn.addEventListener('click', closeModal);
 
     panel.append(title, desc, container, instructionsHeader, ol, doneBtn);
     mountAndAnimate();
