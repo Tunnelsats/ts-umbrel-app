@@ -1063,22 +1063,18 @@ cleanup_dataplane() {
     local max_attempts=10
     local attempt=0
 
+    # Clean up all potential node target IP routing rules in Secure Mode unconditionally to prevent stale rules persisting across mode toggles or restores
+    for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        [ -n "${cleanup_ip}" ] || continue
+        local cleanup_subnet
+        cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
+        ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+    done
+
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-        if [[ "${SECURE_MODE}" == "true" ]]; then
-            for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
-                [ -n "${cleanup_ip}" ] || continue
-                local cleanup_subnet
-                cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
-                ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
-                ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
-            done
-        else
+        if [[ "${SECURE_MODE}" != "true" ]]; then
             ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
-            # Also remove any legacy IP-source rules from older deployments.
-            if [ -n "${DOCKER_TARGET_IP:-}" ]; then
-                ip rule del from "${DOCKER_TARGET_IP}" to "${DOCKER_TARGET_IP}" table main pref 32500 >/dev/null 2>&1 || true
-                ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
-            fi
         fi
     else
         # Remove local bypass rule (pref 32500)
