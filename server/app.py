@@ -791,6 +791,9 @@ def _set_restart_pending(meta_path, _ignored_meta, key, is_pending):
         except (IOError, OSError, json.JSONDecodeError):
             return False
 
+        if not isinstance(meta, dict):
+            return False
+
         has_key = key in meta
         current_pending = bool(meta.get(key))
 
@@ -1775,10 +1778,11 @@ def renew_subscription():
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
-                if not payload.get("serverId") and "serverId" in meta:
-                    payload["serverId"] = meta["serverId"]
-                if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
-                    payload["wgPublicKey"] = meta["wgPublicKey"]
+                if isinstance(meta, dict):
+                    if not payload.get("serverId") and "serverId" in meta:
+                        payload["serverId"] = meta["serverId"]
+                    if not payload.get("wgPublicKey") and "wgPublicKey" in meta:
+                        payload["wgPublicKey"] = meta["wgPublicKey"]
         except FileNotFoundError:
             pass
         except (IOError, json.JSONDecodeError) as exc:
@@ -1900,9 +1904,10 @@ def local_status():
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
-                server_domain = meta.get("serverDomain", "")
-                expires_at = meta.get("expiresAt", "")
-                vpn_port = meta.get("vpnPort", "")
+                if isinstance(meta, dict):
+                    server_domain = meta.get("serverDomain", "")
+                    expires_at = meta.get("expiresAt", "")
+                    vpn_port = meta.get("vpnPort", "")
         except FileNotFoundError:
             pass
         except (IOError, OSError, json.JSONDecodeError) as exc:
@@ -2125,8 +2130,11 @@ def get_metadata():
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta_data = json.load(fp)
-                meta_data.pop("presharedKey", None)
-                meta_data.pop("paymentHash", None)
+                if isinstance(meta_data, dict):
+                    meta_data.pop("presharedKey", None)
+                    meta_data.pop("paymentHash", None)
+                else:
+                    meta_data = {}
         except FileNotFoundError:
             pass
         except (json.JSONDecodeError, IOError) as exc:
@@ -2148,6 +2156,8 @@ def configure_node():
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
+            if not isinstance(meta, dict):
+                return jsonify({"success": False, "error": "Invalid tunnelsats metadata format."}), 400
         except FileNotFoundError:
             return jsonify({"success": False, "error": "Missing tunnelsats metadata file."}), 400
         except (IOError, OSError, json.JSONDecodeError):
