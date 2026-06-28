@@ -94,7 +94,7 @@ UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
 
 run_sudo() {
     if [ -n "${SSHPASS}" ]; then
-        echo "${SSHPASS}" | sudo -S "$@"
+        printf '%s\n' "${SSHPASS}" | sudo -S "$@"
     else
         sudo "$@"
     fi
