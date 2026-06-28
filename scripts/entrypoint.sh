@@ -1047,7 +1047,11 @@ rules_are_synced() {
 }
 
 cleanup_dataplane() {
-    log INFO "Cleaning dataplane rules"
+    local keep_tunnel=false
+    if [[ "${1:-}" == "--keep-tunnel" ]]; then
+        keep_tunnel=true
+    fi
+    log INFO "Cleaning dataplane rules (keep_tunnel=${keep_tunnel})"
     remove_tagged_iptables_rules nat PREROUTING "tunnelsats-dnat"
     remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
@@ -1091,10 +1095,12 @@ cleanup_dataplane() {
         done
     fi
 
-    ip route flush table 51820 >/dev/null 2>&1 || true
+    if [ "${keep_tunnel}" = false ]; then
+        ip route flush table 51820 >/dev/null 2>&1 || true
 
-    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
-        wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+        if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+            wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -1157,7 +1163,7 @@ reconcile_once() {
 
     if ! detect_lightning_container; then
         LAST_ERROR="${LAST_ERROR:-No running LND/CLN container detected}"
-        cleanup_dataplane
+        cleanup_dataplane "--keep-tunnel"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false

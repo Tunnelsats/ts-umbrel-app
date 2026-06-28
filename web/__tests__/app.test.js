@@ -141,6 +141,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('delegated data-scroll-to click prevents default and smooth-scrolls when target exists', () => {
+        jest.useFakeTimers();
         const faq3 = document.getElementById('faq-3');
         const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
         faq3.scrollIntoView = jest.fn();
@@ -149,8 +150,10 @@ describe('UI Routing and Initialization', () => {
         tocLink.dispatchEvent(clickEvent);
 
         expect(clickEvent.defaultPrevented).toBe(true);
+        jest.runAllTimers();
         expect(faq3.scrollIntoView).toHaveBeenCalledTimes(1);
         expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
+        jest.useRealTimers();
     });
 
     test('delegated data-scroll-to click does not prevent default when target does not exist', () => {
@@ -169,6 +172,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('delegated data-scroll-to click switches tab when target is inside a hidden section', () => {
+        jest.useFakeTimers();
         const faq3 = document.getElementById('faq-3');
         const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
         faq3.scrollIntoView = jest.fn();
@@ -182,10 +186,12 @@ describe('UI Routing and Initialization', () => {
 
         expect(clickEvent.defaultPrevented).toBe(true);
         expect(window.switchTab).toHaveBeenCalledWith('faq');
+        jest.runAllTimers();
         expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
 
         faqView.classList.remove('hidden');
         delete window.switchTab;
+        jest.useRealTimers();
     });
 
     test('hash routing switches to FAQ tab on load/hashchange', () => {

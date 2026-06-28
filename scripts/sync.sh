@@ -84,10 +84,9 @@ run_node() {
 
     # 3. Recreate → Inject → Restart (the deploy.py pattern)
     log_info "Injecting (rm → up → cp → restart)..."
-    ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new -T umbrel@${UMBREL_HOST} bash -s "${SSHPASS}" << 'EOF'
-SSHPASS="$1"
-export SSHPASS
-
+    (
+        echo "SSHPASS=\"${SSHPASS}\""
+        cat << 'EOF'
 APP_ID="tunnelsats"
 UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
 UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
@@ -115,6 +114,7 @@ run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${APP_ID}":
 run_sudo docker exec "${APP_ID}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null
 run_sudo docker restart "${APP_ID}"
 EOF
+    ) | ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new -T umbrel@${UMBREL_HOST} bash
 
     log_info "Deploy successful! tunnelsats hot-patched on ${UMBREL_HOST}."
 }

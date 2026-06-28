@@ -233,7 +233,12 @@ def resolve_node_config(node_type):
         # too if the test needs a consistent (container_path, host_path) pair.
         if CLN_CONFIG_PATH != "/lightning-data/cln/config":
             container_path = CLN_CONFIG_PATH
+        elif not os.path.exists(container_path) and os.path.exists("/lightning-data/cln/config"):
+            container_path = "/lightning-data/cln/config"
+
         host_path = f"/home/umbrel/umbrel/app-data/core-lightning/data/lightningd/{net}/config"
+        if container_path == "/lightning-data/cln/config":
+            host_path = "/home/umbrel/umbrel/app-data/core-lightning/data/lightningd/config"
         return container_path, host_path
     return None, None
 
@@ -1860,7 +1865,10 @@ def local_status():
     try:
         with open(LND_CONFIG_PATH, "r", encoding="utf-8") as f:
             for line in f:
-                if line.lstrip().startswith("externalhosts="):
+                cleaned = line.strip()
+                if cleaned.startswith("#"):
+                    continue
+                if re.match(r"^externalhosts\s*=\s*", cleaned):
                     lnd_routing_active = True
                     break
     except FileNotFoundError:
@@ -1874,7 +1882,10 @@ def local_status():
         try:
             with open(cln_container_config, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.lstrip().startswith("announce-addr="):
+                    cleaned = line.strip()
+                    if cleaned.startswith("#"):
+                        continue
+                    if re.match(r"^announce-addr\s*=\s*", cleaned):
                         cln_routing_active = True
                         break
         except FileNotFoundError:

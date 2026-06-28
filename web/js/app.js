@@ -448,13 +448,21 @@ function handleScrollToClick(e) {
     if (el) {
         e.preventDefault();
         const section = el.closest('main section');
+        let needsDelay = false;
         if (section && section.classList.contains('hidden')) {
             const tabId = section.id.replace('view-', '');
             if (typeof switchTab === 'function') {
                 switchTab(tabId);
+                needsDelay = true;
             }
         }
-        el.scrollIntoView({ behavior: 'smooth' });
+        if (needsDelay) {
+            setTimeout(() => {
+                el.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
+        } else {
+            el.scrollIntoView({ behavior: 'smooth' });
+        }
     }
 }
 
