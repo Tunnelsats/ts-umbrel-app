@@ -302,8 +302,8 @@ run_promote() {
 
     log_info "Pinning image digest and setting SECURE_MODE default to true in docker-compose.yml..."
     local target_compose="${target_dir}/docker-compose.yml"
-    sed -E -e "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
-           -e "s/SECURE_MODE=\\\$\{SECURE_MODE:-false\}/SECURE_MODE=\\\$\{SECURE_MODE:-true\}/" \
+    sed -E -e "s#(ts-umbrel-app:)v?[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
+           -e "s/SECURE_MODE=.*/SECURE_MODE=\\\${SECURE_MODE:-true}/" \
            -e "/# Host socket/d" \
            -e "/\/var\/run\/docker.sock/d" \
            "${target_compose}" > "${target_compose}.tmp" && mv "${target_compose}.tmp" "${target_compose}"

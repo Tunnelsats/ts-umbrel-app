@@ -855,34 +855,32 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-            # Mangle rules for conntrack fwmark routing.
-            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK restore rule"
-                remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-                if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                    -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                    LAST_ERROR="Failed to add CONNMARK restore-mark rule"
-                    return 1
-                fi
-                changed=1
+        # Mangle rules for conntrack fwmark routing.
+        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+            log INFO "Syncing mangle CONNMARK restore rule"
+            remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
+                LAST_ERROR="Failed to add CONNMARK restore-mark rule"
+                return 1
             fi
+            changed=1
+        fi
 
-            # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+        # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
+        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
 
-            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK set-mark rule"
-                remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-                if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                    -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                    LAST_ERROR="Failed to add CONNMARK set-mark rule"
-                    return 1
-                fi
-                changed=1
+        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+            log INFO "Syncing mangle CONNMARK set-mark rule"
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
+                LAST_ERROR="Failed to add CONNMARK set-mark rule"
+                return 1
             fi
+            changed=1
         fi
     else
         # Docker mode: bridge-interface FORWARD rules.

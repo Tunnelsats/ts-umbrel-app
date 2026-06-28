@@ -687,7 +687,7 @@ function applySecureModeUI(isSecureMode) {
                 <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.</li>
                 <li>Click the <strong>Restore Node Networking</strong> button.</li>
                 <li>Follow the modal instructions to manually comment out or delete the configuration parameters from your lightning node config files.</li>
-                <li>Restart your <strong>Lightning Node or Core-Lightning</strong> app from the Umbrel dashboard.</li>
+                <li>Restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard.</li>
             `
             : `
                 <li>Go to the <strong>Uninstall</strong> tab in the TunnelSats App navigation.</li>
@@ -1440,7 +1440,7 @@ function showManualConfigModal(nodeType, path, lines) {
             <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
             <li>Navigate to the configuration file path shown above.</li>
             <li>Add (or update if already present) each configuration line shown above (do not create duplicate lines).</li>
-            <li>Go back to the Umbrel dashboard and restart your <b>Core-Lightning</b> app.</li>
+            <li>Go back to the Umbrel dashboard and restart your <b>Core Lightning</b> app.</li>
         `;
     }
 
@@ -1520,7 +1520,7 @@ function showManualRestoreModal(targets) {
     const hasCln = targets.some(t => t.node_type === 'cln');
     const restartApps = [];
     if (hasLnd) restartApps.push('<b>Lightning Node</b>');
-    if (hasCln) restartApps.push('<b>Core-Lightning</b>');
+    if (hasCln) restartApps.push('<b>Core Lightning</b>');
     const restartStr = restartApps.length > 0 ? restartApps.join(' and ') : '<b>Lightning Node</b>';
     ol.innerHTML = `
         <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
