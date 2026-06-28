@@ -625,8 +625,20 @@ ensure_policy_routing() {
         local subnet
         subnet=$(get_target_subnet)
         
+        # 1b. Sweep stale source-IP rules for the other possible node IP to prevent route leakage
+        local other_ip
+        if [ "${DOCKER_TARGET_IP}" = "10.21.21.9" ]; then
+            other_ip="10.21.21.96"
+        else
+            other_ip="10.21.21.9"
+        fi
+        local other_subnet
+        other_subnet=$(get_target_subnet "${other_ip}")
+        ip rule del from "${other_ip}" to "${other_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+        ip rule del from "${other_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+
         # 2. Local-to-Local bypass rule (so LND can talk to local Bitcoind/Tor on 10.21.x.x)
-        if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${subnet} lookup main"; then
+        if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${subnet//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
             ip rule del from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" to "${subnet}" table main pref 32500 >/dev/null 2>&1; then
                 if ! ip rule show pref 32500 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
@@ -638,7 +650,7 @@ ensure_policy_routing() {
         fi
         
         # 3. Route external traffic through the VPN table 51820
-        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
+        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
             ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
                 if ! ip rule show pref 32764 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
@@ -905,17 +917,17 @@ rules_are_synced() {
             local subnet
             subnet=$(get_target_subnet)
 
-            if ! ip rule show | grep -qF "from ${DOCKER_TARGET_IP} to ${subnet} lookup main"; then
+            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${subnet//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
                 log WARN "rules_are_synced: SecureMode local bypass rule FAIL"
                 return 1
             fi
-            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+lookup[[:space:]]+51820"; then
+            if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820"; then
                 log WARN "rules_are_synced: SecureMode policy routing rule FAIL"
                 return 1
             fi
         else
             # 1. fwmark policy routing rule
-            if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
+            if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*(lookup|table)[[:space:]]+51820"; then
                 log WARN "rules_are_synced: k3s fwmark rule FAIL"
                 return 1
             fi
