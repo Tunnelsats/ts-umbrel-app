@@ -319,12 +319,27 @@ run_promote() {
     # Remove trailing period from tagline
     sed -E 's/^(tagline:.*)\.$/\1/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
-    # Inject submitter and submission PR URL (Always required for new app validation checks)
-    local sub_url="${SUBMISSION_URL:-https://github.com/getumbrel/umbrel-apps/pull/4919}"
-    if grep -qE "^submitter:" "${target_manifest}"; then
-        log_info "submitter/submission already present, skipping injection."
+    # Validate and determine submission URL
+    if [ -z "${SUBMISSION_URL:-}" ]; then
+        if [ "${dry_run}" = "false" ]; then
+            log_error "SUBMISSION_URL environment variable is required for promotion."
+            return 1
+        fi
+        local sub_url="https://github.com/getumbrel/umbrel-apps/pull/CHANGE_ME"
     else
-        sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats\nsubmission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
+        local sub_url="${SUBMISSION_URL}"
+    fi
+
+    # Inject submitter and submission PR URL
+    if grep -qE "^submitter:" "${target_manifest}" && grep -qE "^submission:" "${target_manifest}"; then
+        log_info "submitter and submission already present, skipping injection."
+    else
+        if ! grep -qE "^submitter:" "${target_manifest}"; then
+            sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
+        fi
+        if ! grep -qE "^submission:" "${target_manifest}"; then
+            sed -E "s@^(website:.*)@\1\nsubmission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
+        fi
     fi
 
     # Clear releaseNotes (Must be empty for new app submissions to pass official validation checks)
