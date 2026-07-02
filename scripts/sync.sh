@@ -305,8 +305,8 @@ run_promote() {
     sed -E -e "s#(ts-umbrel-app:)v?[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
            -e "s/SECURE_MODE=.*/SECURE_MODE=\\\${SECURE_MODE:-true}/" \
            -e "s#\.\./tunnelsats-data#data#" \
-           -e "s#(:/lightning-data/lnd)#\1:ro#" \
-           -e "s#(:/lightning-data/cln)#\1:ro#" \
+           -e "s#(:/lightning-data/lnd)\$#\1:ro#" \
+           -e "s#(:/lightning-data/cln)\$#\1:ro#" \
            -e "/# Host socket/d" \
            -e "/\/var\/run\/docker.sock/d" \
            "${target_compose}" > "${target_compose}.tmp" && mv "${target_compose}.tmp" "${target_compose}"
@@ -330,25 +330,23 @@ run_promote() {
         local sub_url="${SUBMISSION_URL}"
     fi
 
-    # Inject submitter and submission PR URL
-    if grep -qE "^submitter:" "${target_manifest}" && grep -qE "^submission:" "${target_manifest}"; then
-        log_info "submitter and submission already present, skipping injection."
+    # Inject submitter and submission PR URL (or update if already present)
+    if ! grep -qE "^submitter:" "${target_manifest}"; then
+        sed -E "s@^(website:.*)@\1\\"$'\n'"submitter: Tunnelsats@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
+    fi
+    if grep -qE "^submission:" "${target_manifest}"; then
+        sed -E "s@^submission:.*@submission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
     else
-        if ! grep -qE "^submitter:" "${target_manifest}"; then
-            sed -E "s@^(website:.*)@\1\nsubmitter: Tunnelsats@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-        fi
-        if ! grep -qE "^submission:" "${target_manifest}"; then
-            sed -E "s@^(website:.*)@\1\nsubmission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-        fi
+        sed -E "s@^(website:.*)@\1\\"$'\n'"submission: ${sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
     fi
 
     # Clear releaseNotes (Must be empty for new app submissions to pass official validation checks)
-    sed -e '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d } }' \
+    sed -e '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d; } }' \
         -e 's/^releaseNotes:.*/releaseNotes: ""/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
     # Clear icon and gallery for monorepo submission (assets must not be committed to the store)
     sed -e 's/^icon:.*/icon: ""/' \
-        -e '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d } }' \
+        -e '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d; } }' \
         -e 's/^gallery:.*/gallery: []/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
     if [ "${dry_run}" = "true" ]; then
