@@ -859,7 +859,7 @@ def _sanitize_wireguard_config(config_text: str) -> Tuple[Optional[str], Optiona
         if not line:
             continue
 
-        if line.startswith("#"):
+        if line.startswith("#") or line.startswith(";"):
             comments.append(line)
             continue
 

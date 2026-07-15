@@ -953,6 +953,32 @@ class TestDataplaneAndRegressionFixes:
         saved = (data_dir / 'tunnelsats.conf').read_text()
         assert saved.count("PersistentKeepalive = 25") == 1
 
+    @patch('app.requests.post', side_effect=requests.RequestException("No network in tests"))
+    @patch('app.subprocess.run')
+    def test_upload_config_accepts_semicolon_comments(self, mock_run, mock_post, client, data_dir):
+        mock_proc = MagicMock()
+        mock_proc.stdout = 'derivedPubKeyBase64==\n'
+        mock_proc.returncode = 0
+        mock_run.return_value = mock_proc
+
+        config_text = (
+            "; TunnelSats WireGuard Configuration\n"
+            "# Port Forwarding: 35825\n"
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "\n"
+            "; Peer settings\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 200
+        saved = (data_dir / 'tunnelsats.conf').read_text()
+        assert "; TunnelSats WireGuard Configuration" in saved
+        assert "; Peer settings" in saved
+
     @pytest.mark.parametrize("directive", ["PreUp", "PostUp", "PreDown", "PostDown"])
     @patch('app.subprocess.run')
     def test_upload_config_rejects_wireguard_exec_hooks_before_deriving_key(self, mock_run, directive, client, data_dir):
@@ -2248,4 +2274,3 @@ class TestSecureModeToggle:
                 net3 = app.detect_cln_network()
                 assert net3 == "bitcoin"
                 assert mock_mtime.call_count == 8
-
