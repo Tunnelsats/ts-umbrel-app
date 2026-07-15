@@ -825,6 +825,100 @@ def _has_required_wireguard_blocks(config_text):
     return has_interface and has_peer
 
 
+WIREGUARD_SECTION_NAMES = {"interface": "Interface", "peer": "Peer"}
+WIREGUARD_ALLOWED_KEYS = {
+    "interface": {
+        "address": "Address",
+        "dns": "DNS",
+        "listenport": "ListenPort",
+        "mtu": "MTU",
+        "privatekey": "PrivateKey",
+    },
+    "peer": {
+        "allowedips": "AllowedIPs",
+        "endpoint": "Endpoint",
+        "persistentkeepalive": "PersistentKeepalive",
+        "presharedkey": "PresharedKey",
+        "publickey": "PublicKey",
+    },
+}
+WIREGUARD_OUTPUT_ORDER = {
+    "interface": ("PrivateKey", "Address", "DNS", "ListenPort", "MTU"),
+    "peer": ("PublicKey", "PresharedKey", "AllowedIPs", "Endpoint", "PersistentKeepalive"),
+}
+WIREGUARD_EXEC_DIRECTIVES = {"preup", "postup", "predown", "postdown"}
+
+
+def _sanitize_wireguard_config(config_text: str) -> Tuple[Optional[str], Optional[str]]:
+    comments: List[str] = []
+    sections: Dict[str, Dict[str, str]] = {}
+    current_section: Optional[str] = None
+
+    for line_number, raw_line in enumerate(config_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            comments.append(line)
+            continue
+
+        section_match = re.match(r"^\[([A-Za-z][A-Za-z0-9_-]*)\]$", line)
+        if section_match:
+            section = section_match.group(1).lower()
+            if section not in WIREGUARD_SECTION_NAMES:
+                return None, f"Unsupported WireGuard section [{section_match.group(1)}]."
+            if section in sections:
+                return None, f"Duplicate WireGuard section [{WIREGUARD_SECTION_NAMES[section]}]."
+            sections[section] = {}
+            current_section = section
+            continue
+
+        directive_match = re.match(r"^([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+        if not directive_match:
+            return None, f"Invalid WireGuard directive on line {line_number}."
+        if current_section is None:
+            return None, f"WireGuard directive appears before a section on line {line_number}."
+
+        key_raw = directive_match.group(1)
+        key = key_raw.lower()
+        if key in WIREGUARD_EXEC_DIRECTIVES:
+            return None, f"Unsafe WireGuard directive {key_raw} is not allowed."
+        canonical_key = WIREGUARD_ALLOWED_KEYS[current_section].get(key)
+        if canonical_key is None:
+            return None, f"Unsupported WireGuard directive {key_raw} in [{WIREGUARD_SECTION_NAMES[current_section]}]."
+        if canonical_key in sections[current_section]:
+            return None, f"Duplicate WireGuard directive {canonical_key} in [{WIREGUARD_SECTION_NAMES[current_section]}]."
+
+        value = directive_match.group(2).strip()
+        if not value:
+            return None, f"WireGuard directive {canonical_key} cannot be empty."
+        sections[current_section][canonical_key] = value
+
+    if "interface" not in sections or "peer" not in sections:
+        return None, "Invalid WireGuard configuration format. Missing [Interface] or [Peer] block."
+    if not sections["interface"].get("PrivateKey"):
+        return None, "Invalid WireGuard configuration format. Missing Interface PrivateKey."
+    if not sections["peer"].get("PublicKey"):
+        return None, "Invalid WireGuard configuration format. Missing Peer PublicKey."
+
+    output_lines: List[str] = []
+    output_lines.extend(comments)
+    if output_lines:
+        output_lines.append("")
+
+    for section in ("interface", "peer"):
+        output_lines.append(f"[{WIREGUARD_SECTION_NAMES[section]}]")
+        for key in WIREGUARD_OUTPUT_ORDER[section]:
+            value = sections[section].get(key)
+            if value is not None:
+                output_lines.append(f"{key} = {value}")
+        if section != "peer":
+            output_lines.append("")
+
+    return "\n".join(output_lines) + "\n", None
+
+
 def _extract_interface_private_key(config_text):
     in_interface = False
     for raw_line in config_text.splitlines():
@@ -1734,6 +1828,12 @@ def claim_subscription():
                 app.logger.error("Upstream claim returned a config that is missing [Interface] or [Peer] blocks.")
                 return jsonify({"success": False, "error": "Invalid upstream payload: WireGuard config missing [Interface] or [Peer] block"}), 400
 
+            sanitized_full_config, sanitize_error = _sanitize_wireguard_config(full_config)
+            if sanitize_error:
+                app.logger.error(f"Upstream claim returned unsafe WireGuard config: {sanitize_error}")
+                return jsonify({"success": False, "error": "Invalid upstream payload: Unsafe WireGuard configuration"}), 400
+            full_config = sanitized_full_config or ""
+
             sub = data.get("subscription")
             subscription_data = sub if isinstance(sub, dict) else {}
             srv = data.get("server")
@@ -1994,6 +2094,11 @@ def upload_config():
             ),
             400,
         )
+
+    sanitized_config_text, sanitize_error = _sanitize_wireguard_config(config_text)
+    if sanitize_error:
+        return jsonify({"success": False, "error": sanitize_error}), 400
+    config_text = sanitized_config_text or ""
 
     private_key = _extract_interface_private_key(config_text)
     if not private_key:

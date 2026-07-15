@@ -445,6 +445,35 @@ class TestClaimSavesConfig:
         assert len(confs) == 0
 
     @patch('app.requests.post')
+    def test_claim_returns_400_when_upstream_config_contains_exec_hook(self, mock_post, client, data_dir):
+        malicious_response = MOCK_CLAIM_RESPONSE.copy()
+        malicious_response["config"] = (
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "PostUp = touch /tmp/pwned\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = malicious_response
+        mock_resp.content = json.dumps(malicious_response).encode()
+        mock_resp.headers = {'Content-Type': 'application/json'}
+        mock_post.return_value = mock_resp
+
+        res = client.post('/api/subscription/claim',
+                          json={"paymentHash": "test-hash-123", "referralCode": None},
+                          content_type='application/json')
+
+        assert res.status_code == 400
+        assert b"Unsafe WireGuard configuration" in res.data
+        confs = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(confs) == 0
+
+    @patch('app.requests.post')
     def test_claim_returns_400_when_upstream_returns_non_object_json(self, mock_post, client, data_dir):
         """If upstream returns JSON but not an object, claim endpoint should reject with 400."""
         mock_resp = MagicMock()
@@ -703,7 +732,19 @@ class TestDataplaneAndRegressionFixes:
             "AllowedIPs = 0.0.0.0/0\n"
             "Endpoint = de2.tunnelsats.com:51820\n"
         )
-        expected_saved_config = config_text + "PersistentKeepalive = 25\n"
+        expected_saved_config = (
+            "# Port Forwarding: 35825\n"
+            "# Valid Until: 2030-04-05T10:30:00.000Z\n"
+            "\n"
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "AllowedIPs = 0.0.0.0/0\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+            "PersistentKeepalive = 25\n"
+        )
 
         res = client.post('/api/local/upload-config', json={"config": config_text})
         assert res.status_code == 200
@@ -911,6 +952,70 @@ class TestDataplaneAndRegressionFixes:
 
         saved = (data_dir / 'tunnelsats.conf').read_text()
         assert saved.count("PersistentKeepalive = 25") == 1
+
+    @pytest.mark.parametrize("directive", ["PreUp", "PostUp", "PreDown", "PostDown"])
+    @patch('app.subprocess.run')
+    def test_upload_config_rejects_wireguard_exec_hooks_before_deriving_key(self, mock_run, directive, client, data_dir):
+        config_text = (
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            f"{directive} = touch /tmp/pwned\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "AllowedIPs = 0.0.0.0/0\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == f"Unsafe WireGuard directive {directive} is not allowed."
+        assert not os.path.exists(data_dir / "tunnelsats.conf")
+        mock_run.assert_not_called()
+
+    @patch('app.subprocess.run')
+    def test_upload_config_rejects_unsupported_wireguard_section_before_deriving_key(self, mock_run, client, data_dir):
+        config_text = (
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+            "\n"
+            "[Script]\n"
+            "Command = touch /tmp/pwned\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == "Unsupported WireGuard section [Script]."
+        assert not os.path.exists(data_dir / "tunnelsats.conf")
+        mock_run.assert_not_called()
+
+    @patch('app.subprocess.run')
+    def test_upload_config_rejects_unsupported_wireguard_directive_before_deriving_key(self, mock_run, client, data_dir):
+        config_text = (
+            "[Interface]\n"
+            "PrivateKey = clientPrivateKeyBase64==\n"
+            "Table = auto\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = serverPublicKeyBase64==\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
+        )
+
+        res = client.post('/api/local/upload-config', json={"config": config_text})
+        assert res.status_code == 400
+        payload = json.loads(res.data)
+        assert payload["success"] is False
+        assert payload["error"] == "Unsupported WireGuard directive Table in [Interface]."
+        assert not os.path.exists(data_dir / "tunnelsats.conf")
+        mock_run.assert_not_called()
 
     def test_upload_config_rejects_missing_required_blocks(self, client):
         config_text = "[Interface]\nPrivateKey = clientPrivateKeyBase64==\n"
@@ -2143,7 +2248,4 @@ class TestSecureModeToggle:
                 net3 = app.detect_cln_network()
                 assert net3 == "bitcoin"
                 assert mock_mtime.call_count == 8
-
-
-
 
