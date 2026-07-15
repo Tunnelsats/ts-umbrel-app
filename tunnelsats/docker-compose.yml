@@ -13,6 +13,8 @@ services:
     volumes:
       # Persistent peer directory (Uninstall-safe)
       - ${APP_DATA_DIR}/../tunnelsats-data:/data
+      # Read-only legacy config source for one-time upgrades from older layouts
+      - ${APP_DATA_DIR}/.:/migration_source:ro
       # Lightning Node config mounts (Graceful discovery via relative paths)
       # These use relative paths to avoid the strict Umbrel "AND" dependency requirement
       - ${APP_DATA_DIR}/../lightning/data/lnd:/lightning-data/lnd:ro
