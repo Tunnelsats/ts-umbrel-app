@@ -3,7 +3,7 @@ version: "3.7"
 services:
   tunnelsats:
     # Use the specific version tag for production
-    image: tunnelsats/ts-umbrel-app:3.3.0
+    image: tunnelsats/ts-umbrel-app:3.3.1
     container_name: tunnelsats
     restart: on-failure
     network_mode: "host"
@@ -17,7 +17,7 @@ services:
     volumes:
       # Persistent peer directory (Uninstall-safe)
       - ${APP_DATA_DIR}/../tunnelsats-data:/data
-      # Migration source support for legacy users
+      # Read-only legacy config source for one-time upgrades from older layouts
       - ${APP_DATA_DIR}/.:/migration_source:ro
       # Lightning Node config mounts (Graceful discovery via relative paths)
       # These use relative paths to avoid the strict Umbrel "AND" dependency requirement

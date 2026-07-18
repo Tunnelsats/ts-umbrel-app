@@ -65,12 +65,18 @@ jobs:
       - name: Assert Container Starts Successfully
         run: |
           sleep 10
-          docker logs tunnelsats
-          if ! docker logs tunnelsats 2>&1 | grep -q "Starting internal dashboard"; then
+          TUNNELSATS_CONTAINER="$(docker compose ps -q tunnelsats)"
+          if [ -z "$TUNNELSATS_CONTAINER" ]; then
+            echo "ERROR: Tunnelsats compose service did not create a container."
+            docker compose ps
+            exit 1
+          fi
+          docker logs "$TUNNELSATS_CONTAINER"
+          if ! docker logs "$TUNNELSATS_CONTAINER" 2>&1 | grep -q "Starting internal dashboard"; then
             echo "ERROR: Tunnelsats entrypoint failed to start the dashboard server."
             exit 1
           fi
-          if docker logs tunnelsats | grep -q "Tunnelsats container running"; then
+          if docker logs "$TUNNELSATS_CONTAINER" | grep -q "Tunnelsats container running"; then
              echo "Container started successfully."
           fi
 
