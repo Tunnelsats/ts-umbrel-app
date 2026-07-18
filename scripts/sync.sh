@@ -300,11 +300,15 @@ run_promote() {
         rsync -av --delete --exclude="/icon.svg" --exclude="/gallery" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
     fi
 
-    log_info "Pinning image digest, adjusting data volume path, and setting SECURE_MODE default to true in docker-compose.yml..."
+    log_info "Pinning image digest and applying official-store hardening in docker-compose.yml..."
     local target_compose="${target_dir}/docker-compose.yml"
     sed -E -e "s#(ts-umbrel-app:)v?[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
            -e "s/SECURE_MODE=.*/SECURE_MODE=\\\${SECURE_MODE:-true}/" \
            -e "s#\.\./tunnelsats-data#data#" \
+           -e "/container_name: tunnelsats/d" \
+           -e "/NET_RAW/d" \
+           -e "/security_opt:/d" \
+           -e "/apparmor:unconfined/d" \
            -e 's#(:/lightning-data/lnd)$#\1:ro#' \
            -e 's#(:/lightning-data/cln)$#\1:ro#' \
            -e "/# Host socket/d" \
