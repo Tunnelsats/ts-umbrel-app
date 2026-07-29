@@ -1310,6 +1310,27 @@ describe('Phase 3b: Install Config', () => {
         );
     });
 
+    test('configureNode handles HTML error pages gracefully without throwing syntax error', async () => {
+        global.fetch.mockImplementationOnce((url) => {
+            if (url === '/api/local/configure-node') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 500,
+                    headers: { get: (h) => (h.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+                    text: () => Promise.resolve('<!DOCTYPE html><html><body>Internal Server Error</body></html>')
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+
+        window.setNodeType('lnd');
+        await window.configureNode();
+
+        const msg = document.getElementById('configure-node-msg').textContent;
+        expect(msg).toContain('Server error (HTTP 500)');
+        expect(msg).not.toContain('Unexpected token');
+    });
+
     test('restoreNode calls backend and renders result summary', async () => {
         await window.restoreNode();
 
@@ -1321,6 +1342,26 @@ describe('Phase 3b: Install Config', () => {
         const msg = document.getElementById('restore-node-msg').textContent;
         expect(msg).toContain('LND');
         expect(msg).toContain('CLN');
+    });
+
+    test('restoreNode rejects an HTML response even when its HTTP status is 200', async () => {
+        global.fetch.mockImplementationOnce((url) => {
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    headers: { get: (h) => (h.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+                    text: () => Promise.resolve('<!DOCTYPE html><html><body>Proxy login page</body></html>')
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+
+        await window.restoreNode();
+
+        const msg = document.getElementById('restore-node-msg').textContent;
+        expect(msg).toContain('Server error (HTTP 200)');
+        expect(msg).not.toContain('Restore complete');
     });
 
     test('restoreNode reports missing configs clearly', async () => {

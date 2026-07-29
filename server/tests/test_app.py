@@ -186,6 +186,41 @@ def test_security_headers_present(client):
     assert res.headers.get('X-Content-Type-Options') == 'nosniff'
 
 
+def test_exception_handler_does_not_expose_internal_details():
+    with app.test_request_context('/api/test'):
+        response, status = app_module.handle_exception(
+            RuntimeError('secret=/data/private/token')
+        )
+
+    assert status == 500
+    assert response.get_json() == {
+        'success': False,
+        'error': 'Internal server error',
+    }
+    assert b'secret' not in response.data
+
+
+def test_denied_api_request_returns_json_with_original_status(client):
+    res = client.get(
+        '/api/local/status',
+        environ_base={'REMOTE_ADDR': '203.0.113.10'},
+    )
+
+    assert res.status_code == 403
+    assert res.is_json
+    assert res.get_json() == {
+        'success': False,
+        'error': 'Forbidden',
+    }
+
+
+def test_missing_static_asset_remains_404(client):
+    res = client.get('/js/missing.js')
+
+    assert res.status_code == 404
+    assert b'<title>TunnelSats</title>' not in res.data
+
+
 def test_localized_vendor_assets_are_reachable(client):
     """Test that localized 3D assets in /web/vendor are correctly served."""
     vendor_files = [
@@ -708,6 +743,26 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 200
 
+    def test_local_api_allows_tailscale_cgnat_address(self, client):
+        for ip in ['100.64.0.1', '100.117.194.79', '100.127.255.254']:
+            res = client.get('/api/local/status', environ_base={
+                'REMOTE_ADDR': ip
+            })
+            assert res.status_code == 200, f"Expected 200 for Tailscale CGNAT IP {ip}"
+
+    def test_local_api_allows_ipv4_mapped_tailscale_address(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': '::ffff:100.64.1.2'
+        })
+        assert res.status_code == 200
+
+    def test_local_api_rejects_non_cgnat_100_address(self, client):
+        for ip in ['100.63.255.255', '100.128.0.1']:
+            res = client.get('/api/local/status', environ_base={
+                'REMOTE_ADDR': ip
+            })
+            assert res.status_code == 403, f"Expected 403 for non-CGNAT 100.x IP {ip}"
+
     @patch('app.requests.post', side_effect=requests.RequestException("No network in tests"))
     @patch('app.subprocess.run')
     def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, mock_post, client, data_dir):
@@ -1178,7 +1233,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
+            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
@@ -1231,9 +1286,9 @@ class TestDataplaneAndRegressionFixes:
     def test_restart_container_by_pattern_sequential_lnd_sequence(self, mock_logger, mock_sleep, mock_post, mock_id, client):
         # Mock IDs for middleware and daemon
         def side_effect(pattern):
-            if pattern == r"^lightning[_-]app[_-]\d+$":
+            if pattern == app_module.LND_MIDDLEWARE_PATTERN:
                 return "middleware_id_long_identifier"
-            if pattern == r"^lightning[_-]lnd[_-]\d+$":
+            if pattern == app_module.LND_CONTAINER_PATTERN:
                 return "daemon_id_long_identifier"
             return ""
         mock_id.side_effect = side_effect
@@ -1259,9 +1314,6 @@ class TestDataplaneAndRegressionFixes:
         second_call = mock_post.call_args_list[1]
         assert second_call.args[0] == "/containers/daemon_id_long_identifier/restart"
 
-        # Verify verbose logging with truncated IDs (12 chars strictly)
-        # middleware_id_long_identifier -> middleware_i (12 chars: m-i-d-d-l-e-w-a-r-e-_-i)
-        # daemon_id_long_identifier -> daemon_id_lo (12 chars: d-a-e-m-o-n-_-i-d-_-l-o)
         mock_logger.info.assert_any_call("Found LND middleware container (ID: middleware_i). Restarting...")
         mock_logger.info.assert_any_call("Found LND daemon container (ID: daemon_id_lo). Restarting...")
 
@@ -1269,17 +1321,69 @@ class TestDataplaneAndRegressionFixes:
     @patch('app.docker_api_post')
     @patch('app.app.logger')
     def test_restart_container_by_pattern_sequential_middleware_failure(self, mock_logger, mock_post, mock_id, client):
-        # Mocking ID for middleware
         mock_id.return_value = "middleware_id"
-        mock_post.return_value = False # Simulate failure
+        mock_post.return_value = False
 
         from app import restart_container_by_pattern
         result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True)
 
         assert result is False
-        mock_logger.error.assert_called_with("LND middleware restart failed. Aborting sequential restart.")
-        # Ensure it didn't proceed to sleep or daemon restart (mock_post only called once)
-        assert mock_post.call_count == 1
+        mock_logger.error.assert_called_with("LND middleware restart failed. Aborting restart sequence.")
+        mock_post.assert_called_once_with("/containers/middleware_id/restart")
+        mock_id.assert_called_once_with(app_module.LND_MIDDLEWARE_PATTERN)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lnd",
+            "lnd_1",
+            "lnd-1",
+            "lightning_lnd",
+            "lightning-lnd-1",
+            "umbrel_lightning_lnd_1",
+        ],
+    )
+    def test_lnd_container_pattern_matches_daemon_names(self, name):
+        assert app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lnd_app_1",
+            "lnd-proxy-1",
+            "lnd-rest-1",
+            "foo-lnd-backup-1",
+            "lightning_app_1",
+        ],
+    )
+    def test_lnd_container_pattern_rejects_helper_names(self, name):
+        assert not app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lightning_app_1",
+            "lightning-app-1",
+            "umbrel_lightning_app_1",
+            "lnd_app_1",
+            "lightning_ui_1",
+        ],
+    )
+    def test_lnd_middleware_pattern_matches_middleware_names(self, name):
+        assert app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lightning_app_proxy_1",
+            "umbrel-lightning-app-proxy-1",
+            "lnd_app_proxy_1",
+            "lightning_ui_proxy_1",
+            "lightning_app_backup_1",
+        ],
+    )
+    def test_lnd_middleware_pattern_rejects_helper_names(self, name):
+        assert not app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
@@ -1331,7 +1435,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert os.path.exists(lnd_path)
-            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
+            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
@@ -1362,7 +1466,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(r'(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)')
+            mock_restart.assert_called_once_with(app_module.CLN_CONTAINER_PATTERN)
 
             with open(cln_path, 'r') as f:
                 cln_content = f.read()
@@ -1454,7 +1558,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
+            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_returns_500_when_restart_fails(self, mock_ids, client):
@@ -1503,7 +1607,7 @@ class TestDataplaneAndRegressionFixes:
             payload = json.loads(res.data)
             assert payload['success'] is True
             assert payload['lnd_changed'] is False
-            mock_restart.assert_called_once_with(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
+            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
 
             with open(meta_path, 'r') as f:
                 updated_meta = json.load(f)
@@ -1664,8 +1768,8 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is True
             # Should have called restart for both LND and CLN
             assert mock_restart.call_count == 2
-            mock_restart.assert_any_call(r'^lightning[_-]lnd[_-]\d+$', is_lnd=True)
-            mock_restart.assert_any_call(r'(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)')
+            mock_restart.assert_any_call(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
+            mock_restart.assert_any_call(app_module.CLN_CONTAINER_PATTERN)
 
     @patch('app.read_dataplane_state')
     @patch('app.docker_api')
