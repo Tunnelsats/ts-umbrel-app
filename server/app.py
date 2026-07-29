@@ -15,7 +15,7 @@ from urllib.parse import quote
 import requests
 import yaml
 from flask import Flask, abort, jsonify, request, send_from_directory
-from werkzeug.exceptions import HTTPException, Forbidden
+from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
@@ -104,7 +104,7 @@ LND_PROBE_PORT = 9735
 CLN_PROBE_IP = "10.21.21.96"
 CLN_PROBE_PORT = 9736
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
-LND_CONTAINER_PATTERN = r"(^|[_-])(lightning[_-]lnd|lnd(?![_-]?(app|proxy|tor|web|ui)))([_-]|\d|$)"
+LND_CONTAINER_PATTERN = r"(^|[_-])(lightning[_-]lnd|lnd)(?:[_-]?\d+)?$"
 LND_MIDDLEWARE_PATTERN = r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)([_-]|\d|$)"
 CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|\d|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
@@ -1325,7 +1325,8 @@ def restart_container_by_pattern(pattern, is_lnd=False):
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
             if not res:
-                app.logger.warning("LND middleware restart failed; proceeding to daemon restart.")
+                app.logger.error("LND middleware restart failed. Aborting restart sequence.")
+                return False
             else:
                 app.logger.info("LND middleware restart successful.")
                 app.logger.info(f"Waiting {LND_RESTART_DELAY} seconds for middleware configuration generation...")
@@ -1537,9 +1538,7 @@ def handle_exception(e):
     if isinstance(e, HTTPException):
         return e
     app.logger.error(f"Unhandled exception on {request.path}: {e}", exc_info=True)
-    if request.path.startswith("/api/"):
-        return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
-    return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
+    return jsonify({"success": False, "error": "Internal server error"}), 500
 
 
 # --- API PROXY ROUTES ---

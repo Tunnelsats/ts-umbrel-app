@@ -186,6 +186,20 @@ def test_security_headers_present(client):
     assert res.headers.get('X-Content-Type-Options') == 'nosniff'
 
 
+def test_exception_handler_does_not_expose_internal_details():
+    with app.test_request_context('/api/test'):
+        response, status = app_module.handle_exception(
+            RuntimeError('secret=/data/private/token')
+        )
+
+    assert status == 500
+    assert response.get_json() == {
+        'success': False,
+        'error': 'Internal server error',
+    }
+    assert b'secret' not in response.data
+
+
 def test_localized_vendor_assets_are_reachable(client):
     """Test that localized 3D assets in /web/vendor are correctly served."""
     vendor_files = [
@@ -1266,21 +1280,43 @@ class TestDataplaneAndRegressionFixes:
     @patch('app.docker_api_post')
     @patch('app.app.logger')
     def test_restart_container_by_pattern_sequential_middleware_failure(self, mock_logger, mock_post, mock_id, client):
-        def side_effect(pattern):
-            if pattern == app_module.LND_MIDDLEWARE_PATTERN:
-                return "middleware_id"
-            if pattern == app_module.LND_CONTAINER_PATTERN:
-                return "daemon_id"
-            return ""
-        mock_id.side_effect = side_effect
-        mock_post.side_effect = [False, True]
+        mock_id.return_value = "middleware_id"
+        mock_post.return_value = False
 
         from app import restart_container_by_pattern
         result = restart_container_by_pattern(r"(^|[_-])lnd([_-]|$)", is_lnd=True)
 
-        assert result is True
-        mock_logger.warning.assert_called_with("LND middleware restart failed; proceeding to daemon restart.")
-        assert mock_post.call_count == 2
+        assert result is False
+        mock_logger.error.assert_called_with("LND middleware restart failed. Aborting restart sequence.")
+        mock_post.assert_called_once_with("/containers/middleware_id/restart")
+        mock_id.assert_called_once_with(app_module.LND_MIDDLEWARE_PATTERN)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lnd",
+            "lnd_1",
+            "lnd-1",
+            "lightning_lnd",
+            "lightning-lnd-1",
+            "umbrel_lightning_lnd_1",
+        ],
+    )
+    def test_lnd_container_pattern_matches_daemon_names(self, name):
+        assert app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lnd_app_1",
+            "lnd-proxy-1",
+            "lnd-rest-1",
+            "foo-lnd-backup-1",
+            "lightning_app_1",
+        ],
+    )
+    def test_lnd_container_pattern_rejects_helper_names(self, name):
+        assert not app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
