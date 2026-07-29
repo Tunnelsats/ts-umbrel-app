@@ -313,7 +313,12 @@ run_promote() {
            -e 's#(:/lightning-data/cln)$#\1:ro#' \
            -e "/# Host socket/d" \
            -e "/\/var\/run\/docker.sock/d" \
+           -e "/migration_source/d" \
+           -e "/# Read-only legacy/d" \
            "${target_compose}" > "${target_compose}.tmp" && mv "${target_compose}.tmp" "${target_compose}"
+
+    # Strip scripts dir (verify.sh etc.) — not needed in official store
+    rm -rf "${target_dir}/scripts"
 
     local target_manifest="${target_dir}/umbrel-app.yml"
 
@@ -354,7 +359,7 @@ run_promote() {
         -e 's/^releaseNotes:.*/releaseNotes: ""/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
     # Clear icon and gallery for monorepo submission (assets must not be committed to the store)
-    sed -e 's/^icon:.*/icon: ""/' \
+    sed -e '/^icon:/d' \
         -e '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d; } }' \
         -e 's/^gallery:.*/gallery: []/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 

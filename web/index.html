@@ -807,6 +807,13 @@
                                     <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
                                     <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> or <strong>Core Lightning</strong> app settings, and click <strong>Restart</strong>.</li>
                                 </ol>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">Running Diagnostic Verification:</h4>
+                                <p>To test inbound/outbound connectivity in Official Store installations (where host scripts are stripped for store compliance), run our verification script over SSH:</p>
+                                <div class="bg-gray-900 border border-gray-800 rounded px-3 py-2 font-mono text-xs text-tsgreen select-all overflow-x-auto space-y-1">
+                                     <div>wget -q https://raw.githubusercontent.com/Tunnelsats/tunnelsats/59a866dcfa2a7d9ef344963a3fa630fac0e7568a/scripts/verify-umbrel.sh -O verify-umbrel.sh</div>
+                                     <div>sudo bash verify-umbrel.sh</div>
+                                 </div>
                             </div>
                         </div>
 
