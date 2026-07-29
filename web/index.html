@@ -810,9 +810,10 @@
 
                                 <h4 class="text-white font-semibold mt-4 mb-2">Running Diagnostic Verification:</h4>
                                 <p>To test inbound/outbound connectivity in Official Store installations (where host scripts are stripped for store compliance), run our verification script over SSH:</p>
-                                <div class="bg-gray-900 border border-gray-800 rounded px-3 py-2 font-mono text-xs text-tsgreen select-all overflow-x-auto">
-                                    wget -qO- https://raw.githubusercontent.com/Tunnelsats/tunnelsats/main/scripts/verify-umbrel.sh | sudo bash
-                                </div>
+                                <div class="bg-gray-900 border border-gray-800 rounded px-3 py-2 font-mono text-xs text-tsgreen select-all overflow-x-auto space-y-1">
+                                     <div>wget -q https://raw.githubusercontent.com/Tunnelsats/tunnelsats/main/scripts/verify-umbrel.sh -O verify-umbrel.sh</div>
+                                     <div>sudo bash verify-umbrel.sh</div>
+                                 </div>
                             </div>
                         </div>
 
