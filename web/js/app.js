@@ -1546,6 +1546,35 @@ function showManualRestoreModal(targets) {
     mountAndAnimate();
 }
 
+async function safeFetchJson(res) {
+    const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || '';
+    if (contentType.includes('application/json') || (!contentType && typeof res.json === 'function')) {
+        try {
+            const data = await res.json();
+            if (data !== undefined && data !== null) {
+                return data;
+            }
+        } catch (e) {
+            // Fall through to text handling if json() throws a SyntaxError (e.g. HTML response)
+        }
+    }
+    let text = '';
+    if (typeof res.text === 'function') {
+        try {
+            text = await res.text();
+        } catch (e) {
+            text = '';
+        }
+    }
+    const cleanText = text.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim();
+    const shortText = cleanText.length > 120 ? cleanText.substring(0, 120) + '...' : cleanText;
+    const statusStr = res.status ? ` (HTTP ${res.status})` : '';
+    return {
+        success: false,
+        error: shortText ? `Server error${statusStr}: ${shortText}` : `Server error${statusStr}`
+    };
+}
+
 async function configureNode() {
     const selectedNodeType = (document.getElementById('node-type-selected') || {}).value || 'lnd';
 
@@ -1568,7 +1597,7 @@ async function configureNode() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nodeType: selectedNodeType })
         });
-        const data = await res.json();
+        const data = await safeFetchJson(res);
 
         if (res.ok && data.success !== false) {
             if (data.manual_mode) {
@@ -1608,7 +1637,7 @@ async function restoreNode() {
 
     try {
         const res = await fetch('/api/local/restore-node', { method: 'POST' });
-        const data = await res.json();
+        const data = await safeFetchJson(res);
 
         if (res.ok) {
             if (data.manual_mode) {

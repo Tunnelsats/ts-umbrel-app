@@ -26,7 +26,7 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.3.1"
+APP_VERSION = "v3.3.2"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -103,9 +103,9 @@ LND_PROBE_PORT = 9735
 CLN_PROBE_IP = "10.21.21.96"
 CLN_PROBE_PORT = 9736
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
-LND_CONTAINER_PATTERN = r"^lightning[_-]lnd[_-]\d+$"
-LND_MIDDLEWARE_PATTERN = r"^lightning[_-]app[_-]\d+$"
-CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|$)"
+LND_CONTAINER_PATTERN = r"(^|[_-])(lightning[_-]lnd|lnd)([_-]|\d|$)"
+LND_MIDDLEWARE_PATTERN = r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)([_-]|\d|$)"
+CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|\d|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 
@@ -1316,26 +1316,23 @@ def restart_container_by_pattern(pattern, is_lnd=False):
 
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
     if is_lnd:
-        app.logger.info("Triggering sequential LND restart (middleware -> daemon)")
+        app.logger.info("Triggering LND container restart sequence")
         
-        # 1. Restart middleware (strictly lightning_app_1, excluding proxy)
+        # 1. Restart middleware if present (excluding proxy)
         middleware_id = container_id_by_match(LND_MIDDLEWARE_PATTERN)
         if middleware_id:
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
             if not res:
-                app.logger.error("LND middleware restart failed. Aborting sequential restart.")
-                return False
-            app.logger.info("LND middleware restart successful.")
+                app.logger.warning("LND middleware restart failed; proceeding to daemon restart.")
+            else:
+                app.logger.info("LND middleware restart successful.")
+                app.logger.info(f"Waiting {LND_RESTART_DELAY} seconds for middleware configuration generation...")
+                time.sleep(LND_RESTART_DELAY)
         else:
-            app.logger.error("Failed to locate LND middleware container.")
-            return False
+            app.logger.info("No LND middleware container found; proceeding directly to daemon restart.")
         
-        # 2. Wait for middleware to ingest lnd.conf and generate umbrel-lnd.conf
-        app.logger.info(f"Waiting {LND_RESTART_DELAY} seconds for middleware configuration generation...")
-        time.sleep(LND_RESTART_DELAY)
-        
-        # 3. Restart LND daemon
+        # 2. Restart LND daemon
         daemon_id = container_id_by_match(LND_CONTAINER_PATTERN)
         if daemon_id:
             app.logger.info(f"Found LND daemon container (ID: {daemon_id[:12]}). Restarting...")
@@ -1511,6 +1508,35 @@ def serve_index():
 def serve_static(path):
     static_folder = app.static_folder or "../web"
     return send_from_directory(static_folder, path)
+
+
+@app.errorhandler(404)
+def handle_404(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "API endpoint not found"}), 404
+    static_folder = app.static_folder or "../web"
+    return send_from_directory(static_folder, "index.html")
+
+
+@app.errorhandler(405)
+def handle_405(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "Method not allowed"}), 405
+    return jsonify({"success": False, "error": "Method not allowed"}), 405
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    app.logger.error(f"Unhandled 500 error on {request.path}: {e}")
+    return jsonify({"success": False, "error": "Internal server error"}), 500
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    app.logger.error(f"Unhandled exception on {request.path}: {e}", exc_info=True)
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
+    return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
 
 
 # --- API PROXY ROUTES ---
