@@ -105,7 +105,7 @@ CLN_PROBE_IP = "10.21.21.96"
 CLN_PROBE_PORT = 9736
 LND_RESTART_DELAY = 3  # Seconds to wait for middleware to generate umbrel-lnd.conf
 LND_CONTAINER_PATTERN = r"(^|[_-])(lightning[_-]lnd|lnd)(?:[_-]?\d+)?$"
-LND_MIDDLEWARE_PATTERN = r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)([_-]|\d|$)"
+LND_MIDDLEWARE_PATTERN = r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)(?:[_-]?\d+)?$"
 CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|\d|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
@@ -1516,8 +1516,7 @@ def serve_static(path):
 def handle_404(e):
     if request.path.startswith("/api/"):
         return jsonify({"success": False, "error": "API endpoint not found"}), 404
-    static_folder = app.static_folder or "../web"
-    return send_from_directory(static_folder, "index.html")
+    return e
 
 
 @app.errorhandler(405)
@@ -1536,6 +1535,8 @@ def handle_500(e):
 @app.errorhandler(Exception)
 def handle_exception(e):
     if isinstance(e, HTTPException):
+        if request.path.startswith("/api/"):
+            return jsonify({"success": False, "error": e.name}), e.code or 500
         return e
     app.logger.error(f"Unhandled exception on {request.path}: {e}", exc_info=True)
     return jsonify({"success": False, "error": "Internal server error"}), 500

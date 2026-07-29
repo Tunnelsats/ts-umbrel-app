@@ -1344,6 +1344,26 @@ describe('Phase 3b: Install Config', () => {
         expect(msg).toContain('CLN');
     });
 
+    test('restoreNode rejects an HTML response even when its HTTP status is 200', async () => {
+        global.fetch.mockImplementationOnce((url) => {
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    headers: { get: (h) => (h.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+                    text: () => Promise.resolve('<!DOCTYPE html><html><body>Proxy login page</body></html>')
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+
+        await window.restoreNode();
+
+        const msg = document.getElementById('restore-node-msg').textContent;
+        expect(msg).toContain('Server error (HTTP 200)');
+        expect(msg).not.toContain('Restore complete');
+    });
+
     test('restoreNode reports missing configs clearly', async () => {
         global.fetch = jest.fn((url) => {
             if (url === '/api/local/restore-node') {

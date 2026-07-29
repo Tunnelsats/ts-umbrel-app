@@ -1639,7 +1639,7 @@ async function restoreNode() {
         const res = await fetch('/api/local/restore-node', { method: 'POST' });
         const data = await safeFetchJson(res);
 
-        if (res.ok) {
+        if (res.ok && data.success !== false) {
             if (data.manual_mode) {
                 if (!data.targets || data.targets.length === 0) {
                     setActionMessage('restore-node-msg', 'No active Lightning nodes detected for manual restore.', 'info');

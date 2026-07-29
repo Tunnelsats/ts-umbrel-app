@@ -200,6 +200,27 @@ def test_exception_handler_does_not_expose_internal_details():
     assert b'secret' not in response.data
 
 
+def test_denied_api_request_returns_json_with_original_status(client):
+    res = client.get(
+        '/api/local/status',
+        environ_base={'REMOTE_ADDR': '203.0.113.10'},
+    )
+
+    assert res.status_code == 403
+    assert res.is_json
+    assert res.get_json() == {
+        'success': False,
+        'error': 'Forbidden',
+    }
+
+
+def test_missing_static_asset_remains_404(client):
+    res = client.get('/js/missing.js')
+
+    assert res.status_code == 404
+    assert b'<title>TunnelSats</title>' not in res.data
+
+
 def test_localized_vendor_assets_are_reachable(client):
     """Test that localized 3D assets in /web/vendor are correctly served."""
     vendor_files = [
@@ -1317,6 +1338,32 @@ class TestDataplaneAndRegressionFixes:
     )
     def test_lnd_container_pattern_rejects_helper_names(self, name):
         assert not app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lightning_app_1",
+            "lightning-app-1",
+            "umbrel_lightning_app_1",
+            "lnd_app_1",
+            "lightning_ui_1",
+        ],
+    )
+    def test_lnd_middleware_pattern_matches_middleware_names(self, name):
+        assert app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "lightning_app_proxy_1",
+            "umbrel-lightning-app-proxy-1",
+            "lnd_app_proxy_1",
+            "lightning_ui_proxy_1",
+            "lightning_app_backup_1",
+        ],
+    )
+    def test_lnd_middleware_pattern_rejects_helper_names(self, name):
+        assert not app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
