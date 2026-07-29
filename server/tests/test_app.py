@@ -743,6 +743,26 @@ class TestDataplaneAndRegressionFixes:
         })
         assert res.status_code == 200
 
+    def test_local_api_allows_tailscale_cgnat_address(self, client):
+        for ip in ['100.64.0.1', '100.117.194.79', '100.127.255.254']:
+            res = client.get('/api/local/status', environ_base={
+                'REMOTE_ADDR': ip
+            })
+            assert res.status_code == 200, f"Expected 200 for Tailscale CGNAT IP {ip}"
+
+    def test_local_api_allows_ipv4_mapped_tailscale_address(self, client):
+        res = client.get('/api/local/status', environ_base={
+            'REMOTE_ADDR': '::ffff:100.64.1.2'
+        })
+        assert res.status_code == 200
+
+    def test_local_api_rejects_non_cgnat_100_address(self, client):
+        for ip in ['100.63.255.255', '100.128.0.1']:
+            res = client.get('/api/local/status', environ_base={
+                'REMOTE_ADDR': ip
+            })
+            assert res.status_code == 403, f"Expected 403 for non-CGNAT 100.x IP {ip}"
+
     @patch('app.requests.post', side_effect=requests.RequestException("No network in tests"))
     @patch('app.subprocess.run')
     def test_upload_config_saves_tunnelsats_conf_and_meta(self, mock_run, mock_post, client, data_dir):

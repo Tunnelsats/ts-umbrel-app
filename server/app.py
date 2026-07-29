@@ -284,6 +284,7 @@ _metadata_lock = threading.Lock()
 ALLOWED_NETWORKS = (
     ip_network("127.0.0.0/8"),
     ip_network("10.0.0.0/8"),
+    ip_network("100.64.0.0/10"),  # RFC 6598 Shared Address Space (Tailscale/Headscale CGNAT)
     ip_network("172.16.0.0/12"),
     ip_network("192.168.0.0/16"),
     ip_network("::1/128"),
