@@ -120,7 +120,7 @@ cd web && npm test
 - Run the available Inbound / Outbound Connection script:
 ```bash
 # Official Store (or remote run)
-wget -q https://raw.githubusercontent.com/Tunnelsats/tunnelsats/main/scripts/verify-umbrel.sh -O verify-umbrel.sh
+wget -q https://raw.githubusercontent.com/Tunnelsats/tunnelsats/59a866dcfa2a7d9ef344963a3fa630fac0e7568a/scripts/verify-umbrel.sh -O verify-umbrel.sh
 sudo bash verify-umbrel.sh
 
 # Community Store (bundled on host)
