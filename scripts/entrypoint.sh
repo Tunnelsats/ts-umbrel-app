@@ -577,6 +577,51 @@ get_target_subnet() {
     echo "${subnet}"
 }
 
+ensure_fallback_blackhole_rule() {
+    local source_prefix="$1"
+    local error_message="$2"
+    local escaped_source="${source_prefix//./\\.}"
+    local source_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}([[:space:]]|$)"
+    local exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}[[:space:]]+blackhole[[:space:]]*$"
+    local matching_rules
+    local matching_count
+
+    BLACKHOLE_CHANGED="0"
+    matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
+    matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+
+    if [ "${matching_count}" -eq 1 ] && printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
+        return 0
+    fi
+
+    local rule_line
+    local rule_spec
+    local -a rule_parts
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        read -r -a rule_parts <<< "${rule_spec}"
+        [ "${#rule_parts[@]}" -gt 0 ] || continue
+        ip rule del "${rule_parts[@]}" pref 32765 >/dev/null 2>&1 || true
+    done <<< "${matching_rules}"
+
+    if ip rule show pref 32765 2>/dev/null | grep -qE "${source_pattern}"; then
+        LAST_ERROR="${error_message}: failed to remove conflicting pref 32765 rule"
+        return 1
+    fi
+
+    ip rule add from "${source_prefix}" blackhole pref 32765 >/dev/null 2>&1 || true
+    matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
+    matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+    if [ "${matching_count}" -ne 1 ] || ! printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="${error_message}"
+        return 1
+    fi
+
+    BLACKHOLE_CHANGED="1"
+    return 0
+}
+
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
@@ -636,6 +681,7 @@ ensure_policy_routing() {
         other_subnet=$(get_target_subnet "${other_ip}")
         ip rule del from "${other_ip}" to "${other_subnet}" table main pref 32500 >/dev/null 2>&1 || true
         ip rule del from "${other_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        ip rule del from "${other_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
 
         # 2. Local-to-Local bypass rule (so LND can talk to local Bitcoind/Tor on 10.21.x.x)
         if ! ip rule show | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${subnet//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
@@ -662,14 +708,12 @@ ensure_policy_routing() {
         fi
 
         # 3b. Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
-        if ! ip rule show pref 32765 | grep -qE "^32765:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
-            ip rule del from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1 || true
-            if ! ip rule add from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1; then
-                if ! ip rule show pref 32765 | grep -qE "^32765:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole"; then
-                    LAST_ERROR="SecureMode: Failed to add fallback blackhole rule"
-                    return 1
-                fi
-            fi
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_TARGET_IP}" \
+            "SecureMode: Failed to add fallback blackhole rule"; then
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
             changed=1
         fi
     else
@@ -697,14 +741,12 @@ ensure_policy_routing() {
         fi
 
         # Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
-        if ! ip rule show pref 32765 | grep -qE "^32765:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
-            ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
-            if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1; then
-                if ! ip rule show pref 32765 | grep -qE "^32765:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+blackhole"; then
-                    LAST_ERROR="Failed to add fallback blackhole rule for subnet ${DOCKER_NETWORK_SUBNET}"
-                    return 1
-                fi
-            fi
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_NETWORK_SUBNET}" \
+            "Failed to add fallback blackhole rule for subnet ${DOCKER_NETWORK_SUBNET}"; then
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
             changed=1
         fi
 
@@ -1335,6 +1377,10 @@ main_loop() {
         sleep 2
     done
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 trap cleanup SIGTERM SIGINT
 

@@ -29,12 +29,19 @@ dev@env:~/ts-umbrel-app$ rsync -av --delete tunnelsats/ umbrel@umbrel.local:~/um
 We utilize an automated release promotion workflow to maintain total parity between our local repository and the official `umbrel-apps` GitHub fork.
 
 When a new version is ready:
-1. Ensure `tunnelsats/umbrel-app.yml` contains the correct new `version: "x.y.z"`.
-2. Ensure the Docker image is built and pushed to Docker Hub (`tunnelsats/ts-umbrel-app:vX.Y.Z`).
-3. Run the automation by specifying the `SUBMISSION_URL` environment variable:
-```bash
-SUBMISSION_URL="https://github.com/getumbrel/umbrel-apps/pull/<PR_NUMBER>" npm run promote
-```
+1. Update every canonical version location, release notes, and `CHANGELOG.md` through the transactional version command:
+
+   ```bash
+   ./scripts/sync.sh version X.Y.Z --notes "Summary of this release"
+   ```
+
+2. Run the test suite and review the generated changes.
+3. Ensure the Docker image is built and pushed to Docker Hub (`tunnelsats/ts-umbrel-app:X.Y.Z`).
+4. Run the promotion automation by specifying the `SUBMISSION_URL` environment variable:
+
+   ```bash
+   SUBMISSION_URL="https://github.com/getumbrel/umbrel-apps/pull/<PR_NUMBER>" npm run promote
+   ```
 > [!IMPORTANT]
 > The `SUBMISSION_URL` environment variable is required for production promotions to ensure proper provenance and metadata in the app store. Without it, the promotion script will exit with an error.
 

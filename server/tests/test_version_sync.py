@@ -1,8 +1,7 @@
 import os
 import re
-import json
+
 import yaml
-import pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -11,6 +10,7 @@ COMPOSE_PATH = os.path.join(REPO_ROOT, "tunnelsats", "docker-compose.yml")
 APP_PY_PATH = os.path.join(REPO_ROOT, "server", "app.py")
 INDEX_HTML_PATH = os.path.join(REPO_ROOT, "web", "index.html")
 DEPLOYMENT_K3S_PATH = os.path.join(REPO_ROOT, "k3s", "deployment.yaml")
+CHANGELOG_PATH = os.path.join(REPO_ROOT, "CHANGELOG.md")
 
 LEGACY_STATIC_RELEASE_NOTES = "Rebuilt from the ground up to support the new umbrelOS immutable architecture"
 
@@ -55,6 +55,27 @@ def get_k3s_deployment_version():
     return match.group(1).strip()
 
 
+def get_changelog_notes(version):
+    assert os.path.exists(CHANGELOG_PATH), f"CHANGELOG.md missing at {CHANGELOG_PATH}"
+    with open(CHANGELOG_PATH, "r", encoding="utf-8") as f:
+        content = f.read()
+    pattern = (
+        rf"^##[ \t]+\[{re.escape(version)}\][^\n]*\n"
+        rf"(?s:.*?)(?=^##[ \t]+\[|\Z)"
+    )
+    sections = re.findall(pattern, content, flags=re.MULTILINE)
+    assert len(sections) == 1, (
+        f"Expected exactly one CHANGELOG.md section for version {version}, "
+        f"found {len(sections)}"
+    )
+    match = re.fullmatch(
+        rf"##[ \t]+\[{re.escape(version)}\][^\n]*\n\n-[ \t]+([^\r\n]+)\n?",
+        sections[0],
+    )
+    assert match, f"Could not extract release notes for version {version}"
+    return match.group(1).strip()
+
+
 def test_all_version_locations_are_in_sync():
     manifest_ver, notes = get_manifest_version_and_notes()
     compose_ver = get_compose_version()
@@ -70,8 +91,11 @@ def test_all_version_locations_are_in_sync():
 
 
 def test_manifest_release_notes_are_dynamic_and_non_empty():
-    _, notes = get_manifest_version_and_notes()
+    version, notes = get_manifest_version_and_notes()
     assert len(notes) > 0, "Manifest releaseNotes field is empty"
     assert LEGACY_STATIC_RELEASE_NOTES not in notes, (
         "Manifest releaseNotes contains static legacy text rather than version-specific notes"
+    )
+    assert get_changelog_notes(version) == notes, (
+        "CHANGELOG.md notes for the current version do not match manifest releaseNotes"
     )
