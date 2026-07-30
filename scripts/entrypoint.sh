@@ -659,7 +659,9 @@ ensure_policy_routing() {
                 fi
             fi
             changed=1
-              # 3b. Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
+        fi
+
+        # 3b. Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
         if ! ip rule show pref 32765 | grep -qE "^32765:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
             ip rule del from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1; then
