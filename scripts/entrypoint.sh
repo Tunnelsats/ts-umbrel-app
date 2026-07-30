@@ -660,6 +660,18 @@ ensure_policy_routing() {
             fi
             changed=1
         fi
+
+        # 3b. Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
+        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
+            ip rule del from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" blackhole pref 32765 >/dev/null 2>&1; then
+                if ! ip rule show pref 32765 | grep -qE "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}"; then
+                    LAST_ERROR="SecureMode: Failed to add fallback blackhole rule"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
     else
         # Docker mode: subnet-based rules for the bridge network.
         # Priority 32500: Local-to-Local bypass.
@@ -678,6 +690,17 @@ ensure_policy_routing() {
             if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" table 51820 pref 32764 >/dev/null 2>&1; then
                 if ! ip rule show pref 32764 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
                     LAST_ERROR="Failed to add policy routing rule for subnet ${DOCKER_NETWORK_SUBNET}"
+                    return 1
+                fi
+            fi
+            changed=1
+        fi
+
+        # Fallback blackhole policy rule (pref 32765) to harden kill-switch against route table fallthrough
+        if ! ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
+            if ! ip rule add from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1; then
+                if ! ip rule show pref 32765 | grep -q "from ${DOCKER_NETWORK_SUBNET}"; then
+                    LAST_ERROR="Failed to add fallback blackhole rule for subnet ${DOCKER_NETWORK_SUBNET}"
                     return 1
                 fi
             fi
@@ -1070,6 +1093,7 @@ cleanup_dataplane() {
         cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
         ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
         ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
     done
 
     if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
@@ -1084,6 +1108,8 @@ cleanup_dataplane() {
         local bridge_gw
         bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
         ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
+        ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
 
         while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
             ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
