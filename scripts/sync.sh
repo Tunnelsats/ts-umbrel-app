@@ -43,7 +43,8 @@ usage() {
     echo "  node     Hot-patch the running tunnelsats container (docker cp + restart)"
     echo "  monorepo Push to remote repository"
     echo "  vendor   Update vendor assets"
-    echo "  version  Update version string"
+    echo "  version VERSION --notes TEXT"
+    echo "           Update all version locations and release notes"
     echo "  promote  Release promotion workflow"
     exit 1
 }
@@ -248,18 +249,7 @@ run_vendor() {
 }
 
 run_version() {
-    if [ "$#" -lt 1 ]; then log_error "Version argument required"; return 1; fi
-    NEW_VERSION="${1#v}"
-    if [[ "$NEW_VERSION" =~ [^a-zA-Z0-9._-] ]]; then
-        log_error "Invalid version string: $NEW_VERSION (only alphanumeric, '.', '_', '-' allowed)"
-        return 1
-    fi
-    log_info "Updating version to ${NEW_VERSION}..."
-    sed "s/version: .*/version: \"${NEW_VERSION}\"/" "${REPO_ROOT}/tunnelsats/umbrel-app.yml" > "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/umbrel-app.yml.tmp" "${REPO_ROOT}/tunnelsats/umbrel-app.yml"
-    sed -E "s#(ts-umbrel-app:v?)[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${NEW_VERSION}#" "${REPO_ROOT}/tunnelsats/docker-compose.yml" > "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" && mv "${REPO_ROOT}/tunnelsats/docker-compose.yml.tmp" "${REPO_ROOT}/tunnelsats/docker-compose.yml"
-    if [ -f "${REPO_ROOT}/web/index.html" ]; then
-        sed -E "s/(id=\"app-version\"[^>]*>v?)[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*(<\/span>)/\1${NEW_VERSION}\2/" "${REPO_ROOT}/web/index.html" > "${REPO_ROOT}/web/index.html.tmp" && mv "${REPO_ROOT}/web/index.html.tmp" "${REPO_ROOT}/web/index.html"
-    fi
+    python3 "${REPO_ROOT}/scripts/bump_version.py" "$@"
 }
 
 run_promote() {
