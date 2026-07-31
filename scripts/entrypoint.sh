@@ -732,17 +732,21 @@ print(max(matches, key=lambda network: network.prefixlen) if matches else "")
 remove_k3s_subnet_quarantine() {
     local rule_line
     local rule_spec
+    local rule_source
 
     while IFS= read -r rule_line; do
         [ -n "${rule_line}" ] || continue
         rule_spec="${rule_line#*:}"
         [[ "${rule_spec}" == *"blackhole"* ]] || continue
         k3s_policy_rule_is_owned "${rule_spec}" || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [[ "${rule_source}" == */* ]] || continue
+        [[ "${rule_source}" != */32 ]] || continue
         delete_policy_rule_line "${rule_line}"
     done < <(ip rule show pref 32765 2>/dev/null || true)
 
     if ip rule show pref 32765 2>/dev/null | grep -qE \
-        "proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
+        "from[[:space:]]+[^[:space:]]+/([0-9]|[12][0-9]|3[01])[[:space:]]+blackhole.*proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
         LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
         return 1
     fi

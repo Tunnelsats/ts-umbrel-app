@@ -886,7 +886,7 @@ def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rule
 source "$1"
 
 K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
-RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 201\n'
+RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 DELETED=""
 
 ip() {
@@ -914,7 +914,7 @@ remove_k3s_subnet_quarantine
 [[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
 [[ "${DELETED}" != *"proto 201"* ]]
 [[ "${RULES}" == *"proto 201"* ]]
-[[ "${RULES}" != *"proto 200"* ]]
+[[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
 '''
     )
 
