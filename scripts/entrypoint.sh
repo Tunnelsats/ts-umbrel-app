@@ -424,13 +424,49 @@ ensure_k3s_emergency_network_policy() {
 
 remove_k3s_emergency_network_policy() {
     local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_path
+    local policy_selector
+    local existing
+    local policy_uid
+    local delete_payload
     local status
 
     [ -n "${K3S_TARGET_POD_NAMESPACE}" ] || return 0
-    status="$(k8s_api_write_status DELETE \
-        "/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies/${policy_name}")"
+    policy_path="/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies/${policy_name}"
+    if ! existing="$(k8s_api "${policy_path}")"; then
+        status="$(k8s_api_write_status GET "${policy_path}")"
+        if [ "${status}" = "404" ]; then
+            return 0
+        fi
+        LAST_ERROR="k3s: Failed to inspect emergency deny-egress NetworkPolicy"
+        return 1
+    fi
+    if ! policy_selector="$(k3s_network_policy_selector)"; then
+        LAST_ERROR="k3s: Failed to rebuild emergency NetworkPolicy selector for safe cleanup"
+        return 1
+    fi
+    if ! printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
+        .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+        and .spec.podSelector == $selector
+        and .spec.policyTypes == ["Egress"]
+        and .spec.egress == []
+    ' >/dev/null 2>&1; then
+        log WARN "k3s: Preserving foreign NetworkPolicy at ${K3S_TARGET_POD_NAMESPACE}/${policy_name}"
+        return 0
+    fi
+    policy_uid="$(printf '%s' "${existing}" | jq -r '.metadata.uid // empty')"
+    if [ -z "${policy_uid}" ]; then
+        LAST_ERROR="k3s: Emergency NetworkPolicy UID unavailable; refusing unsafe deletion"
+        return 1
+    fi
+    delete_payload="$(jq -cn --arg uid "${policy_uid}" '{preconditions:{uid:$uid}}')"
+    status="$(k8s_api_write_status DELETE "${policy_path}" "${delete_payload}")"
     case "${status}" in
         200|202|404) return 0 ;;
+        409)
+            log WARN "k3s: Emergency NetworkPolicy changed before deletion; preserving replacement"
+            return 0
+            ;;
         *)
             LAST_ERROR="k3s: Failed to remove emergency deny-egress NetworkPolicy"
             return 1

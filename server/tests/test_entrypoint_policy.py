@@ -401,6 +401,7 @@ k8s_api_write_status() {
     fi
     if [[ "$1" == "DELETE" ]]; then
         [[ "$2" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]
+        [[ "$(printf '%s' "$3" | jq -r '.preconditions.uid')" == "owned-policy-uid" ]]
         touch "${DELETE_FILE}"
         printf '%s' "200"
         return 0
@@ -408,7 +409,7 @@ k8s_api_write_status() {
     return 1
 }
 k8s_api() {
-    cat "${PAYLOAD_FILE}"
+    jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
 }
 
 ensure_k3s_emergency_network_policy
@@ -421,6 +422,33 @@ cat "${PAYLOAD_FILE}" | jq -e '
 
 remove_k3s_emergency_network_policy
 [[ -f "${DELETE_FILE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_emergency_network_policy_release_preserves_foreign_fixed_name():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+DELETE_FILE="${POLICY_TEST_STATE_FILE}.foreign-policy-deleted"
+
+k8s_api() {
+    printf '%s' '{"metadata":{"name":"tunnelsats-emergency-egress-deny","uid":"foreign-uid","annotations":{"managed-by":"another-controller"}},"spec":{"podSelector":{"matchLabels":{"app":"other"}},"policyTypes":["Egress"],"egress":[]}}'
+}
+k8s_api_write_status() {
+    if [[ "$1" == "DELETE" ]]; then
+        touch "${DELETE_FILE}"
+    fi
+    printf '%s' "200"
+}
+
+remove_k3s_emergency_network_policy
+[[ ! -f "${DELETE_FILE}" ]]
 '''
     )
 
