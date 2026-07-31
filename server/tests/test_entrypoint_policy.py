@@ -387,6 +387,7 @@ def test_k3s_emergency_network_policy_covers_replacement_pods_until_release():
 source "$1"
 
 K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
 K3S_TARGET_POD_LABELS='{"app":"lnd","controller-revision-hash":"lnd-7f8d"}'
 PAYLOAD_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy"
 DELETE_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy-deleted"
@@ -413,7 +414,7 @@ k8s_api() {
 ensure_k3s_emergency_network_policy
 cat "${PAYLOAD_FILE}" | jq -e '
     .spec.podSelector.matchLabels.app == "lnd"
-    and .spec.podSelector.matchLabels["controller-revision-hash"] == "lnd-7f8d"
+    and (.spec.podSelector.matchLabels | has("controller-revision-hash") | not)
     and .spec.policyTypes == ["Egress"]
     and .spec.egress == []
 ' >/dev/null

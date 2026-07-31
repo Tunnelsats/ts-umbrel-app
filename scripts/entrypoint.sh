@@ -121,7 +121,7 @@ FORWARDING_PORT=""
 BRIDGE_NAME=""
 K3S_TARGET_POD_NAME=""
 K3S_TARGET_POD_NAMESPACE=""
-K3S_TARGET_POD_LABELS="{}"
+K3S_TARGET_POD_SELECTOR=""
 RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
@@ -303,22 +303,89 @@ k8s_api_write_status() {
         "${K8S_API_URL}${path}" 2>/dev/null || true
 }
 
+k3s_network_policy_selector() {
+    K8S_LABEL_SELECTOR="${K3S_TARGET_POD_SELECTOR}" python3 -c '
+import json
+import os
+import re
+
+raw = os.environ.get("K8S_LABEL_SELECTOR", "").strip()
+if not raw:
+    raise SystemExit("empty label selector")
+
+clauses = []
+start = 0
+depth = 0
+for index, char in enumerate(raw):
+    if char == "(":
+        depth += 1
+    elif char == ")":
+        depth -= 1
+        if depth < 0:
+            raise SystemExit("unbalanced label selector")
+    elif char == "," and depth == 0:
+        clauses.append(raw[start:index].strip())
+        start = index + 1
+if depth != 0:
+    raise SystemExit("unbalanced label selector")
+clauses.append(raw[start:].strip())
+
+match_labels = {}
+expressions = []
+for clause in clauses:
+    if not clause:
+        raise SystemExit("empty label-selector clause")
+    set_match = re.fullmatch(r"([^\s!=(),]+)\s+(in|notin)\s*\(([^)]*)\)", clause)
+    if set_match:
+        key, operator, raw_values = set_match.groups()
+        values = [value.strip() for value in raw_values.split(",") if value.strip()]
+        if not values:
+            raise SystemExit("empty label-selector set")
+        expressions.append({
+            "key": key,
+            "operator": "In" if operator == "in" else "NotIn",
+            "values": values,
+        })
+    elif clause.startswith("!"):
+        expressions.append({"key": clause[1:], "operator": "DoesNotExist"})
+    elif "!=" in clause:
+        key, value = (part.strip() for part in clause.split("!=", 1))
+        expressions.append({"key": key, "operator": "NotIn", "values": [value]})
+    elif "==" in clause:
+        key, value = (part.strip() for part in clause.split("==", 1))
+        match_labels[key] = value
+    elif "=" in clause:
+        key, value = (part.strip() for part in clause.split("=", 1))
+        match_labels[key] = value
+    else:
+        expressions.append({"key": clause, "operator": "Exists"})
+
+selector = {}
+if match_labels:
+    selector["matchLabels"] = match_labels
+if expressions:
+    selector["matchExpressions"] = expressions
+print(json.dumps(selector, separators=(",", ":")))
+'
+}
+
 ensure_k3s_emergency_network_policy() {
     local policy_name="tunnelsats-emergency-egress-deny"
     local policy_path
     local payload
+    local policy_selector
     local status
     local existing
 
     if [ -z "${K3S_TARGET_POD_NAMESPACE}" ] || \
-       ! printf '%s' "${K3S_TARGET_POD_LABELS}" | jq -e 'type == "object" and length > 0' >/dev/null 2>&1; then
-        log ERROR "k3s: Cannot create emergency NetworkPolicy without target namespace and labels"
+       ! policy_selector="$(k3s_network_policy_selector)"; then
+        log ERROR "k3s: Cannot create emergency NetworkPolicy without a valid stable target selector"
         return 1
     fi
     policy_path="/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies"
     payload="$(jq -cn \
         --arg name "${policy_name}" \
-        --argjson labels "${K3S_TARGET_POD_LABELS}" \
+        --argjson selector "${policy_selector}" \
         '{
             apiVersion: "networking.k8s.io/v1",
             kind: "NetworkPolicy",
@@ -327,7 +394,7 @@ ensure_k3s_emergency_network_policy() {
                 annotations: {"tunnelsats.io/emergency-egress-deny": "true"}
             },
             spec: {
-                podSelector: {matchLabels: $labels},
+                podSelector: $selector,
                 policyTypes: ["Egress"],
                 egress: []
             }
@@ -343,9 +410,9 @@ ensure_k3s_emergency_network_policy() {
     esac
 
     if ! existing="$(k8s_api "${policy_path}/${policy_name}")" || \
-       ! printf '%s' "${existing}" | jq -e --argjson labels "${K3S_TARGET_POD_LABELS}" '
+       ! printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
             .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
-            and .spec.podSelector.matchLabels == $labels
+            and .spec.podSelector == $selector
             and .spec.policyTypes == ["Egress"]
             and .spec.egress == []
        ' >/dev/null 2>&1; then
@@ -538,7 +605,7 @@ resolve_k3s_target_pod() {
     DOCKER_TARGET_IP="${pod_ip}"
     K3S_TARGET_POD_NAMESPACE="${namespace}"
     K3S_TARGET_POD_NAME="${pod_name}"
-    K3S_TARGET_POD_LABELS="$(printf '%s' "${pod}" | jq -c '.metadata.labels // {}')"
+    K3S_TARGET_POD_SELECTOR="${selector}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -550,7 +617,7 @@ detect_k3s_target() {
     DOCKER_TARGET_IP=""
     K3S_TARGET_POD_NAME=""
     K3S_TARGET_POD_NAMESPACE=""
-    K3S_TARGET_POD_LABELS="{}"
+    K3S_TARGET_POD_SELECTOR=""
 
     local svc_name svc_fqdn svc_ip
 
