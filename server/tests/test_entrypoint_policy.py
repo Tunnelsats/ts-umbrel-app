@@ -74,7 +74,7 @@ resolve_svc_ip() {
     printf '%s\n' "10.43.0.10"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9"}},{"metadata":{"name":"lnd-local"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7"}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-local"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 detect_k3s_target
@@ -105,7 +105,7 @@ resolve_svc_ip() {
     printf '%s\n' "10.43.0.11"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"cln-0"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.8"}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"cln-0"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.8","conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 detect_k3s_target
@@ -229,6 +229,27 @@ if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
     exit 1
 fi
 [[ "${LAST_ERROR}" == *"No Running LND pod found"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_target_resolution_rejects_unready_or_terminating_local_pods():
+    result = run_bash(
+        r'''
+source "$1"
+
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+k8s_api() {
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}}]}'
+}
+
+if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"No Ready non-terminating LND pod is co-located"* ]]
+[[ "${LAST_ERROR}" == *"TunnelSats node=worker-a"* ]]
 '''
     )
 

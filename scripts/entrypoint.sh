@@ -268,18 +268,48 @@ resolve_k3s_target_pod() {
     fi
 
     # During a rollout the selector can temporarily match multiple Running pods.
-    # Prefer a complete pod on this node instead of trusting Kubernetes API order;
-    # otherwise a remote old/new replica could falsely trip the co-location guard.
-    if ! pod=$(printf '%s' "${running_pods}" | jq -ce --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
-        '. as $pods
-         | ([$pods[]
-             | select(
-                 .spec.nodeName == $node
-                 and (.metadata.name // "") != ""
-                 and (.status.podIP // "") != ""
-             )] | first)
-           // $pods[0]
-           // empty' 2>/dev/null); then
+    # Prefer a complete, Ready, non-terminating pod on this node instead of
+    # trusting Kubernetes API order.
+    pod=$(printf '%s' "${running_pods}" | jq -ce --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
+        '[.[]
+          | select(
+              .spec.nodeName == $node
+              and (.metadata.deletionTimestamp // null) == null
+              and any(.status.conditions[]?; .type == "Ready" and .status == "True")
+              and (.metadata.name // "") != ""
+              and (.status.podIP // "") != ""
+          )]
+         | first
+         // empty' 2>/dev/null || true)
+
+    # Preserve the detailed incomplete-metadata error when the only otherwise
+    # usable local candidate lacks a name or pod IP.
+    if [ -z "${pod}" ]; then
+        pod=$(printf '%s' "${running_pods}" | jq -ce --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
+            '[.[]
+              | select(
+                  .spec.nodeName == $node
+                  and (.metadata.deletionTimestamp // null) == null
+                  and any(.status.conditions[]?; .type == "Ready" and .status == "True")
+              )]
+             | first
+             // empty' 2>/dev/null || true)
+    fi
+
+    if [ -z "${pod}" ] && printf '%s' "${running_pods}" | jq -e --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
+        'any(.[]; .spec.nodeName == $node)' >/dev/null 2>&1; then
+        LAST_ERROR="k3s: No Ready non-terminating ${impl^^} pod is co-located on TunnelSats node=${TUNNELSATS_K8S_NODE_NAME} (namespace=${namespace}, selector=${selector})"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    # No local candidate exists. Keep one remote candidate so the normal
+    # co-location error below can report its pod and node.
+    if [ -z "${pod}" ]; then
+        pod=$(printf '%s' "${running_pods}" | jq -ce 'first // empty' 2>/dev/null || true)
+    fi
+
+    if [ -z "${pod}" ]; then
         LAST_ERROR="k3s: No Running ${impl^^} pod found (namespace=${namespace}, selector=${selector})"
         log ERROR "${LAST_ERROR}"
         return 1
