@@ -338,6 +338,7 @@ source "$1"
 K3S_MODE="true"
 SECURE_MODE="false"
 DELETE_COUNT=0
+NETWORK_POLICY_COUNT=0
 STATE_ERROR=""
 
 detect_lightning_container() {
@@ -354,6 +355,10 @@ ensure_fallback_blackhole_rule() {
     return 1
 }
 ensure_k3s_subnet_quarantine() { return 1; }
+ensure_k3s_emergency_network_policy() {
+    NETWORK_POLICY_COUNT=$((NETWORK_POLICY_COUNT + 1))
+    return 0
+}
 delete_k3s_target_pod() {
     [[ "${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}" == "lightning/lnd-0" ]]
     DELETE_COUNT=$((DELETE_COUNT + 1))
@@ -368,7 +373,53 @@ if reconcile_once "test"; then
 fi
 
 [[ "${DELETE_COUNT}" == "1" ]]
+[[ "${NETWORK_POLICY_COUNT}" == "1" ]]
 [[ "${STATE_ERROR}" == *"deleted target pod lightning/lnd-0 to fail closed"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_emergency_network_policy_covers_replacement_pods_until_release():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_LABELS='{"app":"lnd","controller-revision-hash":"lnd-7f8d"}'
+PAYLOAD_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy"
+DELETE_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy-deleted"
+
+k8s_api_write_status() {
+    if [[ "$1" == "POST" ]]; then
+        [[ "$2" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies" ]]
+        printf '%s' "$3" > "${PAYLOAD_FILE}"
+        printf '%s' "201"
+        return 0
+    fi
+    if [[ "$1" == "DELETE" ]]; then
+        [[ "$2" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]
+        touch "${DELETE_FILE}"
+        printf '%s' "200"
+        return 0
+    fi
+    return 1
+}
+k8s_api() {
+    cat "${PAYLOAD_FILE}"
+}
+
+ensure_k3s_emergency_network_policy
+cat "${PAYLOAD_FILE}" | jq -e '
+    .spec.podSelector.matchLabels.app == "lnd"
+    and .spec.podSelector.matchLabels["controller-revision-hash"] == "lnd-7f8d"
+    and .spec.policyTypes == ["Egress"]
+    and .spec.egress == []
+' >/dev/null
+
+remove_k3s_emergency_network_policy
+[[ -f "${DELETE_FILE}" ]]
 '''
     )
 

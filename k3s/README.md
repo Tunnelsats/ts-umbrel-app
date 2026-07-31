@@ -23,9 +23,13 @@ kubectl delete -k k3s/
 
 ## 1. Namespace & RBAC
 
-TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API. To
-do that, its ServiceAccount needs `get`/`list`/`delete` on `pods` **in the
-namespace where LND/CLN run** (`role.yaml` + `rolebinding.yaml`).
+TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API.
+Its ServiceAccount needs `get`/`list`/`delete` on `pods` and
+`get`/`create`/`delete` on `networkpolicies` **in the namespace where LND/CLN
+run** (`role.yaml` + `rolebinding.yaml`). The NetworkPolicy permission is a
+last-resort fail-closed boundary: if every node-level isolation mechanism
+fails, it denies egress for the selected Lightning workload and also covers a
+controller-created replacement pod until routing recovers.
 
 These are **namespaced** Role/RoleBinding objects, so pay attention to *where*
 they land:

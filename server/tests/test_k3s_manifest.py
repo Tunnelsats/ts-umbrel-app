@@ -5,6 +5,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOYMENT_PATH = REPO_ROOT / "k3s" / "deployment.yaml"
+ROLE_PATH = REPO_ROOT / "k3s" / "role.yaml"
 
 
 def load_deployment():
@@ -39,3 +40,18 @@ def test_k3s_manifest_exposes_tunnelsats_node_name_to_runtime():
     }
     assert env["LND_K8S_POD_SELECTOR"]["value"] == "app=lnd"
     assert env["K3S_BYPASS_CIDRS"]["value"] == "10.42.0.0/16,10.43.0.0/16"
+
+
+def test_k3s_role_can_install_last_resort_network_policy():
+    with ROLE_PATH.open(encoding="utf-8") as manifest:
+        role = yaml.safe_load(manifest)
+
+    rules = {
+        (tuple(rule["apiGroups"]), tuple(rule["resources"])): set(rule["verbs"])
+        for rule in role["rules"]
+    }
+    assert rules[(("networking.k8s.io",), ("networkpolicies",))] == {
+        "get",
+        "create",
+        "delete",
+    }

@@ -121,6 +121,7 @@ FORWARDING_PORT=""
 BRIDGE_NAME=""
 K3S_TARGET_POD_NAME=""
 K3S_TARGET_POD_NAMESPACE=""
+K3S_TARGET_POD_LABELS="{}"
 RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
@@ -279,6 +280,93 @@ delete_k3s_target_pod() {
             ;;
         *)
             log ERROR "k3s: Failed to delete unsafe target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} (HTTP ${http_code:-unavailable})"
+            return 1
+            ;;
+    esac
+}
+
+k8s_api_write_status() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    local token
+    local -a data_args=()
+
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || return 1
+    if [ -n "${data}" ]; then
+        data_args=(-H "Content-Type: application/json" -d "${data}")
+    fi
+    curl -sS --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -o /dev/null -w '%{http_code}' -X "${method}" \
+        -H "Authorization: Bearer ${token}" \
+        "${data_args[@]}" \
+        "${K8S_API_URL}${path}" 2>/dev/null || true
+}
+
+ensure_k3s_emergency_network_policy() {
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_path
+    local payload
+    local status
+    local existing
+
+    if [ -z "${K3S_TARGET_POD_NAMESPACE}" ] || \
+       ! printf '%s' "${K3S_TARGET_POD_LABELS}" | jq -e 'type == "object" and length > 0' >/dev/null 2>&1; then
+        log ERROR "k3s: Cannot create emergency NetworkPolicy without target namespace and labels"
+        return 1
+    fi
+    policy_path="/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies"
+    payload="$(jq -cn \
+        --arg name "${policy_name}" \
+        --argjson labels "${K3S_TARGET_POD_LABELS}" \
+        '{
+            apiVersion: "networking.k8s.io/v1",
+            kind: "NetworkPolicy",
+            metadata: {
+                name: $name,
+                annotations: {"tunnelsats.io/emergency-egress-deny": "true"}
+            },
+            spec: {
+                podSelector: {matchLabels: $labels},
+                policyTypes: ["Egress"],
+                egress: []
+            }
+        }')" || return 1
+
+    status="$(k8s_api_write_status POST "${policy_path}" "${payload}")"
+    case "${status}" in
+        200|201|409) ;;
+        *)
+            log ERROR "k3s: Failed to create emergency NetworkPolicy (HTTP ${status:-unavailable})"
+            return 1
+            ;;
+    esac
+
+    if ! existing="$(k8s_api "${policy_path}/${policy_name}")" || \
+       ! printf '%s' "${existing}" | jq -e --argjson labels "${K3S_TARGET_POD_LABELS}" '
+            .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+            and .spec.podSelector.matchLabels == $labels
+            and .spec.policyTypes == ["Egress"]
+            and .spec.egress == []
+       ' >/dev/null 2>&1; then
+        log ERROR "k3s: Emergency NetworkPolicy could not be verified"
+        return 1
+    fi
+    log ERROR "k3s: Emergency deny-egress NetworkPolicy protects current and replacement target pods"
+    return 0
+}
+
+remove_k3s_emergency_network_policy() {
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local status
+
+    [ -n "${K3S_TARGET_POD_NAMESPACE}" ] || return 0
+    status="$(k8s_api_write_status DELETE \
+        "/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies/${policy_name}")"
+    case "${status}" in
+        200|202|404) return 0 ;;
+        *)
+            LAST_ERROR="k3s: Failed to remove emergency deny-egress NetworkPolicy"
             return 1
             ;;
     esac
@@ -450,6 +538,7 @@ resolve_k3s_target_pod() {
     DOCKER_TARGET_IP="${pod_ip}"
     K3S_TARGET_POD_NAMESPACE="${namespace}"
     K3S_TARGET_POD_NAME="${pod_name}"
+    K3S_TARGET_POD_LABELS="$(printf '%s' "${pod}" | jq -c '.metadata.labels // {}')"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -461,6 +550,7 @@ detect_k3s_target() {
     DOCKER_TARGET_IP=""
     K3S_TARGET_POD_NAME=""
     K3S_TARGET_POD_NAMESPACE=""
+    K3S_TARGET_POD_LABELS="{}"
 
     local svc_name svc_fqdn svc_ip
 
@@ -908,7 +998,10 @@ release_k3s_reconcile_guards() {
 
     # Remove every tagged guard, including stale IPs from failed prior
     # reconciliations, only after the unguarded routing policy is verified.
-    remove_k3s_egress_guards
+    if ! remove_k3s_egress_guards; then
+        return 1
+    fi
+    remove_k3s_emergency_network_policy
 }
 
 get_target_subnet() {
@@ -2107,8 +2200,14 @@ reconcile_once() {
                 local isolation_error="${LAST_ERROR}"
                 if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
                     LAST_ERROR="${isolation_error}; quarantined pod CIDR ${K3S_QUARANTINE_CIDR}"
+                elif ensure_k3s_emergency_network_policy; then
+                    if delete_k3s_target_pod; then
+                        LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; emergency NetworkPolicy retained and deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} to fail closed"
+                    else
+                        LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; emergency NetworkPolicy retained because target pod deletion failed"
+                    fi
                 elif delete_k3s_target_pod; then
-                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} to fail closed"
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable, pod-CIDR quarantine and emergency NetworkPolicy failed; deleted current target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}"
                 else
                     LAST_ERROR="${isolation_error}; temporary egress guard unavailable, pod-CIDR quarantine failed, and emergency target pod deletion failed"
                 fi
