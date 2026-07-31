@@ -744,6 +744,39 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_rule_owner_upgrade_retains_legacy_protocol_until_cleanup():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+K3S_RULE_PROTOCOL_FILE="${POLICY_TEST_STATE_FILE}.protocol-upgrade"
+printf '%s 199\n' "$(cat /proc/sys/kernel/random/boot_id)" > "${K3S_RULE_PROTOCOL_FILE}"
+unset K3S_RULE_PROTOCOL
+unset K3S_RULE_PREF_BASE
+ip() {
+    if [[ "$*" == "-N rule show" ]]; then
+        printf '%s\n' $'32765:\tfrom 10.42.0.0/16 blackhole proto 199'
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s\n' $'32765:\tfrom 10.42.0.0/16 blackhole proto 199'
+        return 0
+    fi
+    return 1
+}
+
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" != "199" ]]
+[[ "${K3S_LEGACY_RULE_PROTOCOL}" == "199" ]]
+[[ "$(awk '{print $4}' "${K3S_RULE_PROTOCOL_FILE}")" == "199" ]]
+[[ "${K3S_BLACKHOLE_RULE_PREF}" -lt 32766 ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_policy_routes_external_traffic_with_only_explicit_local_bypasses():
     result = run_bash(
         r'''
@@ -1173,6 +1206,59 @@ remove_k3s_subnet_quarantine
 [[ "${RULES}" == *"proto 201"* ]]
 [[ "${RULES}" == *"from 10.88.0.0/16 blackhole proto 201"* ]]
 [[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_recovery_removes_owned_legacy_quarantine_with_random_preferences():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_RULE_PROTOCOL="200"
+K3S_RULE_PREF_BASE="10000"
+K3S_BYPASS_RULE_PREF="10000"
+K3S_QUARANTINE_RULE_PREF="10263"
+K3S_TUNNEL_RULE_PREF="10264"
+K3S_BLACKHOLE_RULE_PREF="10265"
+K3S_LEGACY_RULE_PROTOCOL="199"
+RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 199\n32765:\tfrom 10.88.0.0/16 blackhole proto 198\n10265:\tfrom 10.42.1.7 blackhole proto 200\n'
+DELETED=""
+CLEARED=0
+
+ip() {
+    if [[ "$*" == "rule show pref 10263" ]]; then
+        printf '%s' "${RULES}" | grep '^10263:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        if [[ "$*" == *"proto 199 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 199\n'/}"
+        fi
+        return 0
+    fi
+    return 1
+}
+clear_k3s_legacy_rule_protocol() {
+    K3S_LEGACY_RULE_PROTOCOL=""
+    CLEARED=1
+}
+
+remove_k3s_subnet_quarantine
+[[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 199 pref 32765"* ]]
+[[ "${DELETED}" != *"proto 198"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7"* ]]
+[[ "${RULES}" == *"proto 198"* ]]
+[[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+[[ "${CLEARED}" == "1" ]]
+[[ -z "${K3S_LEGACY_RULE_PROTOCOL}" ]]
 '''
     )
 

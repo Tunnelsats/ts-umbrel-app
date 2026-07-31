@@ -41,6 +41,7 @@ export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
 # of four rule preferences. A component that later reuses our protocol cannot
 # have an unrelated rule claimed during reconciliation or cleanup.
 K3S_RULE_PROTOCOL_FILE="${K3S_RULE_PROTOCOL_FILE:-/data/tunnelsats-k3s-rule-protocol}"
+K3S_LEGACY_RULE_PROTOCOL=""
 initialize_k3s_rule_protocol() {
     local configured_protocol="${K3S_RULE_PROTOCOL:-}"
     local configured_pref_base="${K3S_RULE_PREF_BASE:-}"
@@ -50,6 +51,7 @@ initialize_k3s_rule_protocol() {
     local saved_boot=""
     local saved_protocol=""
     local saved_pref_base=""
+    local saved_legacy_protocol=""
     local used_protocols
     local used_priorities
 
@@ -57,10 +59,16 @@ initialize_k3s_rule_protocol() {
         current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
         [ -n "${current_boot}" ] || return 1
         if [ -f "${K3S_RULE_PROTOCOL_FILE}" ]; then
-            read -r saved_boot saved_protocol saved_pref_base < "${K3S_RULE_PROTOCOL_FILE}" || true
+            read -r saved_boot saved_protocol saved_pref_base saved_legacy_protocol < "${K3S_RULE_PROTOCOL_FILE}" || true
             if [ "${saved_boot}" = "${current_boot}" ] && [ -n "${saved_pref_base}" ]; then
                 configured_protocol="${saved_protocol}"
                 configured_pref_base="${saved_pref_base}"
+                K3S_LEGACY_RULE_PROTOCOL="${saved_legacy_protocol}"
+            elif [ "${saved_boot}" = "${current_boot}" ] && [[ "${saved_protocol}" =~ ^[0-9]+$ ]]; then
+                # Upgrade from the protocol-only owner record. Keep the former
+                # protocol solely for one-time legacy quarantine cleanup while
+                # allocating a fresh compound owner below.
+                K3S_LEGACY_RULE_PROTOCOL="${saved_protocol}"
             fi
         fi
     fi
@@ -109,7 +117,7 @@ else:
         [ "${protocol_dir}" != "${K3S_RULE_PROTOCOL_FILE}" ] || protocol_dir="."
         mkdir -p "${protocol_dir}" || return 1
         protocol_tmp="$(mktemp "${K3S_RULE_PROTOCOL_FILE}.tmp.XXXXXX")" || return 1
-        if ! printf '%s %s %s\n' "${current_boot}" "${configured_protocol}" "${configured_pref_base}" > "${protocol_tmp}" || \
+        if ! printf '%s %s %s %s\n' "${current_boot}" "${configured_protocol}" "${configured_pref_base}" "${K3S_LEGACY_RULE_PROTOCOL}" > "${protocol_tmp}" || \
            ! chmod 600 "${protocol_tmp}" || \
            ! mv -f "${protocol_tmp}" "${K3S_RULE_PROTOCOL_FILE}"; then
             rm -f "${protocol_tmp}"
@@ -123,6 +131,10 @@ else:
     configured_pref_base="${configured_pref_base:-32500}"
     [[ "${configured_protocol}" =~ ^[0-9]+$ ]] || return 1
     [ "${configured_protocol}" -ge 1 ] && [ "${configured_protocol}" -le 252 ] || return 1
+    if [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ]; then
+        [[ "${K3S_LEGACY_RULE_PROTOCOL}" =~ ^[0-9]+$ ]] || return 1
+        [ "${K3S_LEGACY_RULE_PROTOCOL}" -ge 1 ] && [ "${K3S_LEGACY_RULE_PROTOCOL}" -le 252 ] || return 1
+    fi
     [[ "${configured_pref_base}" =~ ^[0-9]+$ ]] || return 1
     [ "${configured_pref_base}" -ge 1 ] && [ "${configured_pref_base}" -le 32500 ] || return 1
     K3S_RULE_PROTOCOL="${configured_protocol}"
@@ -131,6 +143,27 @@ else:
     K3S_QUARANTINE_RULE_PREF="$((configured_pref_base + 263))"
     K3S_TUNNEL_RULE_PREF="$((configured_pref_base + 264))"
     K3S_BLACKHOLE_RULE_PREF="$((configured_pref_base + 265))"
+}
+
+clear_k3s_legacy_rule_protocol() {
+    local current_boot
+    local protocol_dir
+    local protocol_tmp
+
+    [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] || return 0
+    current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    [ -n "${current_boot}" ] || return 1
+    protocol_dir="${K3S_RULE_PROTOCOL_FILE%/*}"
+    [ "${protocol_dir}" != "${K3S_RULE_PROTOCOL_FILE}" ] || protocol_dir="."
+    mkdir -p "${protocol_dir}" || return 1
+    protocol_tmp="$(mktemp "${K3S_RULE_PROTOCOL_FILE}.tmp.XXXXXX")" || return 1
+    if ! printf '%s %s %s\n' "${current_boot}" "${K3S_RULE_PROTOCOL}" "${K3S_RULE_PREF_BASE}" > "${protocol_tmp}" || \
+       ! chmod 600 "${protocol_tmp}" || \
+       ! mv -f "${protocol_tmp}" "${K3S_RULE_PROTOCOL_FILE}"; then
+        rm -f "${protocol_tmp}"
+        return 1
+    fi
+    K3S_LEGACY_RULE_PROTOCOL=""
 }
 
 if ! initialize_k3s_rule_protocol; then
@@ -1113,6 +1146,7 @@ remove_k3s_subnet_quarantine() {
     local rule_spec
     local rule_source
     local quarantine_pref
+    local owned_quarantine
 
     # Also remove pre-upgrade CIDR-wide quarantines from pref 32765. A /32 at
     # that legacy preference is the persistent per-pod fallback and must stay.
@@ -1121,7 +1155,15 @@ remove_k3s_subnet_quarantine() {
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             [[ "${rule_spec}" == *"blackhole"* ]] || continue
-            k3s_policy_rule_is_owned "${rule_line}" || continue
+            owned_quarantine=false
+            if k3s_policy_rule_is_owned "${rule_line}"; then
+                owned_quarantine=true
+            elif [ "${quarantine_pref}" = "32765" ] && \
+                 [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] && \
+                 [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]]; then
+                owned_quarantine=true
+            fi
+            [ "${owned_quarantine}" = true ] || continue
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
             if [ "${quarantine_pref}" = "32765" ]; then
                 [[ "${rule_source}" == */* ]] || continue
@@ -1138,7 +1180,15 @@ remove_k3s_subnet_quarantine() {
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             [[ "${rule_spec}" == *"blackhole"* ]] || continue
-            k3s_policy_rule_is_owned "${rule_line}" || continue
+            owned_quarantine=false
+            if k3s_policy_rule_is_owned "${rule_line}"; then
+                owned_quarantine=true
+            elif [ "${quarantine_pref}" = "32765" ] && \
+                 [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] && \
+                 [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]]; then
+                owned_quarantine=true
+            fi
+            [ "${owned_quarantine}" = true ] || continue
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
             if [ "${quarantine_pref}" = "32765" ]; then
                 [[ "${rule_source}" == */* ]] || continue
@@ -1148,6 +1198,10 @@ remove_k3s_subnet_quarantine() {
             return 1
         done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
     done
+    if ! clear_k3s_legacy_rule_protocol; then
+        LAST_ERROR="k3s: Failed to retire legacy quarantine ownership marker"
+        return 1
+    fi
     return 0
 }
 
