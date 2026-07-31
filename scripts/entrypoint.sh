@@ -32,9 +32,150 @@ export CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
 export LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
 export CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
 export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
+# Destinations that must remain inside the cluster instead of using WireGuard.
+# These are the default k3s pod/service CIDRs; custom clusters must override
+# this with their exact internal CIDRs.
+export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
+# Persist a compound, boot-scoped policy-rule owner tag. Linux exposes only an
+# 8-bit protocol field, so ownership also includes a randomly allocated block
+# of four rule preferences. A component that later reuses our protocol cannot
+# have an unrelated rule claimed during reconciliation or cleanup.
+K3S_RULE_PROTOCOL_FILE="${K3S_RULE_PROTOCOL_FILE:-/data/tunnelsats-k3s-rule-protocol}"
+K3S_LEGACY_RULE_PROTOCOL=""
+initialize_k3s_rule_protocol() {
+    local configured_protocol="${K3S_RULE_PROTOCOL:-}"
+    local configured_pref_base="${K3S_RULE_PREF_BASE:-}"
+    local current_boot=""
+    local protocol_dir
+    local protocol_tmp
+    local saved_boot=""
+    local saved_protocol=""
+    local saved_pref_base=""
+    local saved_legacy_protocol=""
+    local used_protocols
+    local used_priorities
+
+    if [ -z "${configured_protocol}" ] && [ "${K3S_MODE}" = "true" ]; then
+        current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+        [ -n "${current_boot}" ] || return 1
+        if [ -f "${K3S_RULE_PROTOCOL_FILE}" ]; then
+            read -r saved_boot saved_protocol saved_pref_base saved_legacy_protocol < "${K3S_RULE_PROTOCOL_FILE}" || true
+            if [ "${saved_boot}" = "${current_boot}" ] && [ -n "${saved_pref_base}" ]; then
+                configured_protocol="${saved_protocol}"
+                configured_pref_base="${saved_pref_base}"
+                K3S_LEGACY_RULE_PROTOCOL="${saved_legacy_protocol}"
+            elif [ "${saved_boot}" = "${current_boot}" ] && [[ "${saved_protocol}" =~ ^[0-9]+$ ]]; then
+                # Upgrade from the protocol-only owner record. Keep the former
+                # protocol solely for one-time legacy quarantine cleanup while
+                # allocating a fresh compound owner below.
+                K3S_LEGACY_RULE_PROTOCOL="${saved_protocol}"
+            fi
+        fi
+    fi
+
+    if [ -z "${configured_protocol}" ] && [ "${K3S_MODE}" = "true" ]; then
+        used_protocols="$(ip -N rule show 2>/dev/null | awk '
+            { for (i = 1; i < NF; i++) if ($i == "proto" || $i == "protocol") print $(i + 1) }
+        ' | paste -sd, - || true)"
+        configured_protocol="$(USED_PROTOCOLS="${used_protocols}" python3 -c '
+import os
+import secrets
+
+used = {
+    int(value)
+    for value in os.environ.get("USED_PROTOCOLS", "").split(",")
+    if value.isdigit()
+}
+candidates = [value for value in range(100, 253) if value not in used]
+if not candidates:
+    raise SystemExit("no unused routing protocol is available")
+print(secrets.choice(candidates))
+' 2>/dev/null)" || return 1
+
+        used_priorities="$(ip rule show 2>/dev/null | awk -F: '/^[0-9]+:/ {gsub(/[[:space:]]/, "", $1); print $1}' | paste -sd, - || true)"
+        configured_pref_base="$(USED_PRIORITIES="${used_priorities}" python3 -c '
+import os
+import secrets
+
+used = {
+    int(value)
+    for value in os.environ.get("USED_PRIORITIES", "").split(",")
+    if value.isdigit()
+}
+offsets = (0, 263, 264, 265)
+for _ in range(4096):
+    # All four rules must run before the built-in main-table rule at 32766.
+    base = 1000 + secrets.randbelow(31500)
+    if all(base + offset not in used for offset in offsets):
+        print(base)
+        break
+else:
+    raise SystemExit("no unused routing preference block is available")
+' 2>/dev/null)" || return 1
+
+        protocol_dir="${K3S_RULE_PROTOCOL_FILE%/*}"
+        [ "${protocol_dir}" != "${K3S_RULE_PROTOCOL_FILE}" ] || protocol_dir="."
+        mkdir -p "${protocol_dir}" || return 1
+        protocol_tmp="$(mktemp "${K3S_RULE_PROTOCOL_FILE}.tmp.XXXXXX")" || return 1
+        if ! printf '%s %s %s %s\n' "${current_boot}" "${configured_protocol}" "${configured_pref_base}" "${K3S_LEGACY_RULE_PROTOCOL}" > "${protocol_tmp}" || \
+           ! chmod 600 "${protocol_tmp}" || \
+           ! mv -f "${protocol_tmp}" "${K3S_RULE_PROTOCOL_FILE}"; then
+            rm -f "${protocol_tmp}"
+            return 1
+        fi
+    fi
+
+    # Docker/Secure Mode do not use protocol ownership, but retaining the old
+    # value there keeps those code paths deterministic without touching /data.
+    configured_protocol="${configured_protocol:-200}"
+    configured_pref_base="${configured_pref_base:-32500}"
+    [[ "${configured_protocol}" =~ ^[0-9]+$ ]] || return 1
+    [ "${configured_protocol}" -ge 1 ] && [ "${configured_protocol}" -le 252 ] || return 1
+    if [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ]; then
+        [[ "${K3S_LEGACY_RULE_PROTOCOL}" =~ ^[0-9]+$ ]] || return 1
+        [ "${K3S_LEGACY_RULE_PROTOCOL}" -ge 1 ] && [ "${K3S_LEGACY_RULE_PROTOCOL}" -le 252 ] || return 1
+    fi
+    [[ "${configured_pref_base}" =~ ^[0-9]+$ ]] || return 1
+    [ "${configured_pref_base}" -ge 1 ] && [ "${configured_pref_base}" -le 32500 ] || return 1
+    K3S_RULE_PROTOCOL="${configured_protocol}"
+    K3S_RULE_PREF_BASE="${configured_pref_base}"
+    K3S_BYPASS_RULE_PREF="${configured_pref_base}"
+    K3S_QUARANTINE_RULE_PREF="$((configured_pref_base + 263))"
+    K3S_TUNNEL_RULE_PREF="$((configured_pref_base + 264))"
+    K3S_BLACKHOLE_RULE_PREF="$((configured_pref_base + 265))"
+}
+
+clear_k3s_legacy_rule_protocol() {
+    local current_boot
+    local protocol_dir
+    local protocol_tmp
+
+    [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] || return 0
+    current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    [ -n "${current_boot}" ] || return 1
+    protocol_dir="${K3S_RULE_PROTOCOL_FILE%/*}"
+    [ "${protocol_dir}" != "${K3S_RULE_PROTOCOL_FILE}" ] || protocol_dir="."
+    mkdir -p "${protocol_dir}" || return 1
+    protocol_tmp="$(mktemp "${K3S_RULE_PROTOCOL_FILE}.tmp.XXXXXX")" || return 1
+    if ! printf '%s %s %s\n' "${current_boot}" "${K3S_RULE_PROTOCOL}" "${K3S_RULE_PREF_BASE}" > "${protocol_tmp}" || \
+       ! chmod 600 "${protocol_tmp}" || \
+       ! mv -f "${protocol_tmp}" "${K3S_RULE_PROTOCOL_FILE}"; then
+        rm -f "${protocol_tmp}"
+        return 1
+    fi
+    K3S_LEGACY_RULE_PROTOCOL=""
+}
+
+if ! initialize_k3s_rule_protocol; then
+    printf '%s\n' "Failed to initialize the k3s policy-rule ownership protocol" >&2
+    exit 1
+fi
+# Emergency CIDR quarantine remains distinct from the persistent per-pod
+# fallback. This matters when a configured pod CIDR is itself a /32.
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
+K3S_ISOLATION_RETRY_INTERVAL="${K3S_ISOLATION_RETRY_INTERVAL:-2}"
 
 API_PID=""
 LAST_RECONCILE_EPOCH=0
@@ -44,10 +185,14 @@ TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
 FORWARDING_PORT=""
 BRIDGE_NAME=""
+K3S_TARGET_POD_NAME=""
+K3S_TARGET_POD_NAMESPACE=""
+K3S_TARGET_POD_SELECTOR=""
 RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
+K3S_BYPASS_CIDRS_NORMALIZED=""
 
 log() {
     local level="$1"
@@ -98,6 +243,7 @@ write_state() {
         --arg docker_network_name "${DOCKER_NETWORK_NAME}" \
         --arg docker_network_subnet "${DOCKER_NETWORK_SUBNET}" \
         --arg bridge_name "${BRIDGE_NAME:-}" \
+        --arg k3s_bypass_cidrs "${K3S_BYPASS_CIDRS_NORMALIZED:-}" \
         --arg last_reconcile_at "$(date -u +%FT%TZ)" \
         '{
             dataplane_mode: $dataplane_mode,
@@ -106,6 +252,12 @@ write_state() {
             target_impl: $target_impl,
             forwarding_port: $forwarding_port,
             rules_synced: $rules_synced,
+            k3s_bypass_cidrs: (
+                if $k3s_bypass_cidrs == ""
+                then []
+                else ($k3s_bypass_cidrs | split(","))
+                end
+            ),
             last_reconcile_at: $last_reconcile_at,
             last_error: (if $last_error == "" then null else $last_error end),
             docker_network: {
@@ -166,6 +318,272 @@ k8s_api() {
     curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
         -H "Authorization: Bearer ${token}" \
         "${K8S_API_URL}${path}"
+}
+
+delete_k3s_target_pod() {
+    local token
+    local http_code
+
+    if [ -z "${K3S_TARGET_POD_NAMESPACE}" ] || [ -z "${K3S_TARGET_POD_NAME}" ]; then
+        log ERROR "k3s: Cannot delete target pod because its identity is unavailable"
+        return 1
+    fi
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || {
+        log ERROR "k3s: Cannot read service account token to delete unsafe target pod"
+        return 1
+    }
+    http_code="$(curl -sS --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -o /dev/null -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d '{"gracePeriodSeconds":0,"propagationPolicy":"Background"}' \
+        "${K8S_API_URL}/api/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/pods/${K3S_TARGET_POD_NAME}" \
+        2>/dev/null || true)"
+    case "${http_code}" in
+        200|202|404)
+            log ERROR "k3s: Deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} after total isolation failure"
+            return 0
+            ;;
+        *)
+            log ERROR "k3s: Failed to delete unsafe target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} (HTTP ${http_code:-unavailable})"
+            return 1
+            ;;
+    esac
+}
+
+wait_for_k3s_emergency_isolation() {
+    local isolation_error="$1"
+    local attempt=0
+    local target_deleted=false
+
+    # Returning control to the ordinary reconcile loop while every isolation
+    # mechanism is absent would leave the Lightning workload on clear-net
+    # egress for an entire interval. Stay in a fail-stop retry loop until one
+    # independent control is verified or the unsafe pod is deleted.
+    while true; do
+        attempt=$((attempt + 1))
+        # Stop the unsafe workload before spending time re-establishing slower
+        # API and dataplane controls. When every mechanism is unavailable, do
+        # not add a backoff window in which clear egress can continue.
+        if [ "${target_deleted}" = false ] && delete_k3s_target_pod; then
+            target_deleted=true
+            LAST_ERROR="${isolation_error}; target pod deleted; waiting for replacement-wide isolation"
+        fi
+        if [ "${target_deleted}" = false ]; then
+            if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
+                LAST_ERROR="${isolation_error}; egress guard installed after retry ${attempt}"
+                return 0
+            fi
+            if ensure_fallback_blackhole_rule \
+                "${DOCKER_TARGET_IP}" \
+                "k3s: Failed to protect selected pod during isolation retry" \
+                "${K3S_RULE_PROTOCOL}"; then
+                LAST_ERROR="${isolation_error}; source blackhole installed after retry ${attempt}"
+                return 0
+            fi
+        fi
+        if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
+            LAST_ERROR="${isolation_error}; pod CIDR quarantined after retry ${attempt}"
+            return 0
+        fi
+        if ensure_k3s_emergency_network_policy; then
+            LAST_ERROR="${isolation_error}; emergency NetworkPolicy installed after retry ${attempt}"
+            return 0
+        fi
+
+        LAST_ERROR="${isolation_error}; all emergency isolation controls unavailable; fail-stop retry ${attempt}"
+        write_state
+    done
+}
+
+k8s_api_write_status() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    local token
+    local -a data_args=()
+
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || return 1
+    if [ -n "${data}" ]; then
+        data_args=(-H "Content-Type: application/json" -d "${data}")
+    fi
+    curl -sS --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -o /dev/null -w '%{http_code}' -X "${method}" \
+        -H "Authorization: Bearer ${token}" \
+        "${data_args[@]}" \
+        "${K8S_API_URL}${path}" 2>/dev/null || true
+}
+
+k3s_network_policy_selector() {
+    K8S_LABEL_SELECTOR="${K3S_TARGET_POD_SELECTOR}" python3 -c '
+import json
+import os
+import re
+
+raw = os.environ.get("K8S_LABEL_SELECTOR", "").strip()
+if not raw:
+    raise SystemExit("empty label selector")
+
+clauses = []
+start = 0
+depth = 0
+for index, char in enumerate(raw):
+    if char == "(":
+        depth += 1
+    elif char == ")":
+        depth -= 1
+        if depth < 0:
+            raise SystemExit("unbalanced label selector")
+    elif char == "," and depth == 0:
+        clauses.append(raw[start:index].strip())
+        start = index + 1
+if depth != 0:
+    raise SystemExit("unbalanced label selector")
+clauses.append(raw[start:].strip())
+
+match_labels = {}
+expressions = []
+for clause in clauses:
+    if not clause:
+        raise SystemExit("empty label-selector clause")
+    set_match = re.fullmatch(r"([^\s!=(),]+)\s+(in|notin)\s*\(([^)]*)\)", clause)
+    if set_match:
+        key, operator, raw_values = set_match.groups()
+        values = [value.strip() for value in raw_values.split(",") if value.strip()]
+        if not values:
+            raise SystemExit("empty label-selector set")
+        expressions.append({
+            "key": key,
+            "operator": "In" if operator == "in" else "NotIn",
+            "values": values,
+        })
+    elif clause.startswith("!"):
+        expressions.append({"key": clause[1:], "operator": "DoesNotExist"})
+    elif "!=" in clause:
+        key, value = (part.strip() for part in clause.split("!=", 1))
+        expressions.append({"key": key, "operator": "NotIn", "values": [value]})
+    elif "==" in clause:
+        key, value = (part.strip() for part in clause.split("==", 1))
+        match_labels[key] = value
+    elif "=" in clause:
+        key, value = (part.strip() for part in clause.split("=", 1))
+        match_labels[key] = value
+    else:
+        expressions.append({"key": clause, "operator": "Exists"})
+
+selector = {}
+if match_labels:
+    selector["matchLabels"] = match_labels
+if expressions:
+    selector["matchExpressions"] = expressions
+print(json.dumps(selector, separators=(",", ":")))
+'
+}
+
+ensure_k3s_emergency_network_policy() {
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_path
+    local payload
+    local policy_selector
+    local status
+    local existing
+
+    if [ -z "${K3S_TARGET_POD_NAMESPACE}" ] || \
+       ! policy_selector="$(k3s_network_policy_selector)"; then
+        log ERROR "k3s: Cannot create emergency NetworkPolicy without a valid stable target selector"
+        return 1
+    fi
+    policy_path="/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies"
+    payload="$(jq -cn \
+        --arg name "${policy_name}" \
+        --argjson selector "${policy_selector}" \
+        '{
+            apiVersion: "networking.k8s.io/v1",
+            kind: "NetworkPolicy",
+            metadata: {
+                name: $name,
+                annotations: {"tunnelsats.io/emergency-egress-deny": "true"}
+            },
+            spec: {
+                podSelector: $selector,
+                policyTypes: ["Egress"],
+                egress: []
+            }
+        }')" || return 1
+
+    status="$(k8s_api_write_status POST "${policy_path}" "${payload}")"
+    case "${status}" in
+        200|201|409) ;;
+        *)
+            log ERROR "k3s: Failed to create emergency NetworkPolicy (HTTP ${status:-unavailable})"
+            return 1
+            ;;
+    esac
+
+    if ! existing="$(k8s_api "${policy_path}/${policy_name}")" || \
+       ! printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
+            .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+            and .spec.podSelector == $selector
+            and .spec.policyTypes == ["Egress"]
+            and .spec.egress == []
+       ' >/dev/null 2>&1; then
+        log ERROR "k3s: Emergency NetworkPolicy could not be verified"
+        return 1
+    fi
+    log ERROR "k3s: Emergency deny-egress NetworkPolicy protects current and replacement target pods"
+    return 0
+}
+
+remove_k3s_emergency_network_policy() {
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_path
+    local policy_selector
+    local existing
+    local policy_uid
+    local delete_payload
+    local status
+
+    [ -n "${K3S_TARGET_POD_NAMESPACE}" ] || return 0
+    policy_path="/apis/networking.k8s.io/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/networkpolicies/${policy_name}"
+    if ! existing="$(k8s_api "${policy_path}")"; then
+        status="$(k8s_api_write_status GET "${policy_path}")"
+        if [ "${status}" = "404" ]; then
+            return 0
+        fi
+        LAST_ERROR="k3s: Failed to inspect emergency deny-egress NetworkPolicy"
+        return 1
+    fi
+    if ! policy_selector="$(k3s_network_policy_selector)"; then
+        LAST_ERROR="k3s: Failed to rebuild emergency NetworkPolicy selector for safe cleanup"
+        return 1
+    fi
+    if ! printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
+        .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+        and .spec.podSelector == $selector
+        and .spec.policyTypes == ["Egress"]
+        and .spec.egress == []
+    ' >/dev/null 2>&1; then
+        log WARN "k3s: Preserving foreign NetworkPolicy at ${K3S_TARGET_POD_NAMESPACE}/${policy_name}"
+        return 0
+    fi
+    policy_uid="$(printf '%s' "${existing}" | jq -r '.metadata.uid // empty')"
+    if [ -z "${policy_uid}" ]; then
+        LAST_ERROR="k3s: Emergency NetworkPolicy UID unavailable; refusing unsafe deletion"
+        return 1
+    fi
+    delete_payload="$(jq -cn --arg uid "${policy_uid}" '{preconditions:{uid:$uid}}')"
+    status="$(k8s_api_write_status DELETE "${policy_path}" "${delete_payload}")"
+    case "${status}" in
+        200|202|404) return 0 ;;
+        409)
+            LAST_ERROR="k3s: Emergency NetworkPolicy changed during deletion; retrying cleanup"
+            return 1
+            ;;
+        *)
+            LAST_ERROR="k3s: Failed to remove emergency deny-egress NetworkPolicy"
+            return 1
+            ;;
+    esac
 }
 
 # Percent-encode a string for safe use inside a URL query parameter. Used for
@@ -332,6 +750,9 @@ resolve_k3s_target_pod() {
     fi
 
     DOCKER_TARGET_IP="${pod_ip}"
+    K3S_TARGET_POD_NAMESPACE="${namespace}"
+    K3S_TARGET_POD_NAME="${pod_name}"
+    K3S_TARGET_POD_SELECTOR="${selector}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -341,6 +762,9 @@ detect_k3s_target() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
     DOCKER_TARGET_IP=""
+    K3S_TARGET_POD_NAME=""
+    K3S_TARGET_POD_NAMESPACE=""
+    K3S_TARGET_POD_SELECTOR=""
 
     local svc_name svc_fqdn svc_ip
 
@@ -619,11 +1043,13 @@ remove_tagged_iptables_rules() {
     local chain="$2"
     local marker="$3"
 
+    IPTABLES_RULES_REMOVED="0"
     local rules
     rules=$(iptables -t "${table}" -S "${chain}" | grep "${marker}" || true)
     if [ -z "${rules}" ]; then
         return 0
     fi
+    IPTABLES_RULES_REMOVED="1"
 
     while IFS= read -r rule; do
         [ -z "${rule}" ] && continue
@@ -633,6 +1059,238 @@ remove_tagged_iptables_rules() {
     done <<EOF_RULES
 ${rules}
 EOF_RULES
+}
+
+ensure_k3s_egress_guard() {
+    local source_ip="$1"
+    local marker="tunnelsats-k3s-egress-guard"
+
+    if ! iptables -C FORWARD -s "${source_ip}" \
+        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+        if ! iptables -I FORWARD 1 -s "${source_ip}" \
+            -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+            return 1
+        fi
+    fi
+
+    if ! iptables -C FORWARD -s "${source_ip}" \
+        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Once the current pod is independently guarded, promptly release tagged
+    # guards for historical pod IPs. Otherwise Kubernetes can recycle an old
+    # address to an unrelated workload while a failed reconciliation persists.
+    while ! remove_stale_k3s_egress_guards "${source_ip}"; do
+        log WARN "k3s: Retrying stale egress-guard cleanup"
+        sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
+    done
+    return 0
+}
+
+remove_stale_k3s_egress_guards() {
+    local current_source="$1"
+    local marker="tunnelsats-k3s-egress-guard"
+    local rules
+    local rule
+    local source
+    local index
+    local -a parts
+
+    rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        read -r -a parts <<< "${rule}"
+        source=""
+        for ((index = 0; index < ${#parts[@]} - 1; index++)); do
+            if [ "${parts[index]}" = "-s" ]; then
+                source="${parts[index + 1]}"
+                break
+            fi
+        done
+        if [ "${source%/32}" = "${current_source}" ]; then
+            continue
+        fi
+        parts[0]="-D"
+        iptables "${parts[@]}" >/dev/null 2>&1 || return 1
+    done <<< "${rules}"
+
+    rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        read -r -a parts <<< "${rule}"
+        source=""
+        for ((index = 0; index < ${#parts[@]} - 1; index++)); do
+            if [ "${parts[index]}" = "-s" ]; then
+                source="${parts[index + 1]}"
+                break
+            fi
+        done
+        [ "${source%/32}" = "${current_source}" ] || return 1
+    done <<< "${rules}"
+    return 0
+}
+
+remove_k3s_egress_guards() {
+    local marker="tunnelsats-k3s-egress-guard"
+
+    remove_tagged_iptables_rules filter FORWARD "${marker}"
+    if iptables -S FORWARD 2>/dev/null | grep -Fq -- "${marker}"; then
+        LAST_ERROR="k3s: Failed to remove temporary egress guard"
+        return 1
+    fi
+    return 0
+}
+
+ensure_k3s_subnet_quarantine() {
+    local source_ip="$1"
+    local pod_cidr
+    local escaped_cidr
+    local exact_pattern
+    local quarantine_rule
+
+    if ! normalize_k3s_bypass_cidrs; then
+        return 1
+    fi
+    pod_cidr="$(
+        SOURCE_IP="${source_ip}" \
+        BYPASS_CIDRS="${K3S_BYPASS_CIDRS_NORMALIZED}" \
+        python3 -c '
+import ipaddress
+import os
+
+source = ipaddress.ip_address(os.environ["SOURCE_IP"])
+matches = [
+    ipaddress.ip_network(value)
+    for value in os.environ["BYPASS_CIDRS"].split(",")
+    if value and source in ipaddress.ip_network(value)
+]
+print(max(matches, key=lambda network: network.prefixlen) if matches else "")
+'
+    )"
+    if [ -z "${pod_cidr}" ]; then
+        LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
+        return 1
+    fi
+    K3S_QUARANTINE_CIDR="${pod_cidr}"
+
+    # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
+    escaped_cidr="${pod_cidr%/32}"
+    escaped_cidr="${escaped_cidr//./\\.}"
+    exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+    if [ -n "${quarantine_rule}" ]; then
+        if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+            LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
+            return 1
+        fi
+        return 0
+    fi
+    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
+        return 1
+    fi
+    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+    if [ -z "${quarantine_rule}" ]; then
+        LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+        return 1
+    fi
+    return 0
+}
+
+remove_k3s_subnet_quarantine() {
+    local rule_line
+    local rule_spec
+    local rule_source
+    local quarantine_pref
+    local owned_quarantine
+
+    quarantine_pref="${K3S_QUARANTINE_RULE_PREF}"
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        owned_quarantine=false
+        if k3s_policy_rule_is_owned "${rule_line}"; then
+            owned_quarantine=true
+        fi
+        [ "${owned_quarantine}" = true ] || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        delete_policy_rule_line "${rule_line}"
+    done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        owned_quarantine=false
+        if k3s_policy_rule_is_owned "${rule_line}"; then
+            owned_quarantine=true
+        fi
+        [ "${owned_quarantine}" = true ] || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
+        return 1
+    done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    # A protocol-only pre-upgrade marker cannot distinguish our old rule from
+    # a foreign rule created with the same protocol and preference. Preserve
+    # ambiguous CIDR-wide rules and keep recovery visibly blocked rather than
+    # deleting routing state we cannot prove we own.
+    if [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ]; then
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            [[ "${rule_spec}" == *"blackhole"* ]] || continue
+            [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]] || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            [[ "${rule_source}" == */* ]] || continue
+            [[ "${rule_source}" != */32 ]] || continue
+            LAST_ERROR="k3s: Preserving ambiguous legacy pod-CIDR quarantine at pref 32765; manual cleanup required"
+            return 1
+        done < <(ip rule show pref 32765 2>/dev/null || true)
+    fi
+    if ! clear_k3s_legacy_rule_protocol; then
+        LAST_ERROR="k3s: Failed to retire legacy quarantine ownership marker"
+        return 1
+    fi
+    return 0
+}
+
+release_k3s_reconcile_guards() {
+    if ! remove_k3s_subnet_quarantine; then
+        return 1
+    fi
+
+    # Validate the effective dataplane again without the CIDR-wide fallback.
+    # If anything changed during release, restore durable quarantine before
+    # returning the failed reconciliation.
+    if ! rules_are_synced; then
+        if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
+            LAST_ERROR="k3s: Dataplane validation failed after releasing emergency quarantine; quarantine restored"
+        else
+            LAST_ERROR="k3s: Dataplane validation failed after releasing emergency quarantine; restore failed"
+        fi
+        return 1
+    fi
+
+    # Remove every tagged guard, including stale IPs from failed prior
+    # reconciliations, only after the unguarded routing policy is verified.
+    if ! remove_k3s_egress_guards; then
+        return 1
+    fi
+    # A successfully recovered dataplane must not be left behind an emergency
+    # deny policy merely because the API was temporarily unavailable. Keep the
+    # workload fail-closed while retrying, and only report recovery once the
+    # policy is gone (or a foreign replacement has been safely preserved).
+    while ! remove_k3s_emergency_network_policy; do
+        LAST_ERROR="k3s: Dataplane recovered; retrying emergency NetworkPolicy cleanup"
+        write_state
+        sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
+    done
+    return 0
 }
 
 get_target_subnet() {
@@ -658,15 +1316,22 @@ get_target_subnet() {
 ensure_fallback_blackhole_rule() {
     local source_prefix="$1"
     local error_message="$2"
+    local rule_protocol="${3:-}"
     local escaped_source="${source_prefix//./\\.}"
-    local source_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}([[:space:]]|$)"
-    local exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}[[:space:]]+blackhole[[:space:]]*$"
+    local source_pattern="^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_source}([[:space:]]|$)"
+    local exact_pattern="^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_source}[[:space:]]+blackhole"
     local matching_rules
     local matching_count
 
     BLACKHOLE_CHANGED="0"
-    matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
+    matching_rules="$(ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${source_pattern}" || true)"
     matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+
+    if [ -n "${rule_protocol}" ]; then
+        exact_pattern="${exact_pattern}([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${rule_protocol}[[:space:]]*$"
+    else
+        exact_pattern="${exact_pattern}[[:space:]]*$"
+    fi
 
     if [ "${matching_count}" -eq 1 ] && printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
         return 0
@@ -680,16 +1345,27 @@ ensure_fallback_blackhole_rule() {
         rule_spec="${rule_line#*:}"
         read -r -a rule_parts <<< "${rule_spec}"
         [ "${#rule_parts[@]}" -gt 0 ] || continue
-        ip rule del "${rule_parts[@]}" pref 32765 >/dev/null 2>&1 || true
+        if [ -n "${rule_protocol}" ]; then
+            if ! [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${rule_protocol}([[:space:]]|$) ]] || \
+               { [ "${rule_protocol}" = "${K3S_RULE_PROTOCOL}" ] && ! k3s_policy_rule_is_owned "${rule_line}"; }; then
+                LAST_ERROR="${error_message}: pref ${K3S_BLACKHOLE_RULE_PREF} is occupied by an unowned rule"
+                return 1
+            fi
+        fi
+        delete_policy_rule_line "${rule_line}" || true
     done <<< "${matching_rules}"
 
-    if ip rule show pref 32765 2>/dev/null | grep -qE "${source_pattern}"; then
-        LAST_ERROR="${error_message}: failed to remove conflicting pref 32765 rule"
+    if ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -qE "${source_pattern}"; then
+        LAST_ERROR="${error_message}: failed to remove conflicting pref ${K3S_BLACKHOLE_RULE_PREF} rule"
         return 1
     fi
 
-    ip rule add from "${source_prefix}" blackhole pref 32765 >/dev/null 2>&1 || true
-    matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
+    if [ -n "${rule_protocol}" ]; then
+        ip rule add from "${source_prefix}" blackhole protocol "${rule_protocol}" pref "${K3S_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || true
+    else
+        ip rule add from "${source_prefix}" blackhole pref "${K3S_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || true
+    fi
+    matching_rules="$(ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${source_pattern}" || true)"
     matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
     if [ "${matching_count}" -ne 1 ] || ! printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
         LAST_ERROR="${error_message}"
@@ -700,48 +1376,335 @@ ensure_fallback_blackhole_rule() {
     return 0
 }
 
-ensure_policy_routing() {
+normalize_k3s_bypass_cidrs() {
+    local normalized
+    local validation_error
+
+    if ! normalized="$(
+        K3S_BYPASS_CIDRS_VALUE="${K3S_BYPASS_CIDRS}" python3 -c '
+import ipaddress
+import os
+
+raw = os.environ.get("K3S_BYPASS_CIDRS_VALUE", "")
+networks = set()
+for value in raw.split(","):
+    value = value.strip()
+    if not value:
+        continue
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if network.version != 4:
+        raise SystemExit(f"{value!r} is not an IPv4 CIDR")
+    if network.prefixlen == 0:
+        raise SystemExit("default route 0.0.0.0/0 is not allowed")
+    networks.add(network)
+
+print(",".join(str(network) for network in sorted(
+    networks,
+    key=lambda item: (int(item.network_address), item.prefixlen),
+)))
+' 2>&1
+    )"; then
+        validation_error="${normalized//$'\n'/ }"
+        LAST_ERROR="Invalid K3S_BYPASS_CIDRS: ${validation_error}"
+        K3S_BYPASS_CIDRS_NORMALIZED=""
+        return 1
+    fi
+
+    K3S_BYPASS_CIDRS_NORMALIZED="${normalized}"
+    return 0
+}
+
+k3s_policy_rule_has_protocol() {
+    local rule_spec="${1#*:}"
+    [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$) ]]
+}
+
+k3s_policy_rule_is_owned() {
+    local priority="${1%%:*}"
+
+    # Both parts are randomly allocated from unused kernel state and remain
+    # stable only for this boot. Protocol reuse alone is never ownership proof.
+    k3s_policy_rule_has_protocol "$1" || return 1
+    case "${priority}" in
+        "${K3S_BYPASS_RULE_PREF}"|"${K3S_QUARANTINE_RULE_PREF}"|\
+        "${K3S_TUNNEL_RULE_PREF}"|"${K3S_BLACKHOLE_RULE_PREF}") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+delete_policy_rule_line() {
+    local rule_line="$1"
+    local priority="${rule_line%%:*}"
+    local rule_spec="${rule_line#*:}"
+    local -a rule_parts
+
+    read -r -a rule_parts <<< "${rule_spec}"
+    [ "${#rule_parts[@]}" -gt 0 ] || return 0
+    ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1
+}
+
+remove_stale_k3s_policy_rules() {
+    local current_source="$1"
+    local pref
+    local rule_line
+    local rule_spec
+    local rule_source
+
+    for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}"; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+
+            case "${pref}:${rule_spec}" in
+                "${K3S_BYPASS_RULE_PREF}":*" lookup main"*|"${K3S_BYPASS_RULE_PREF}":*" table main"*|\
+                "${K3S_TUNNEL_RULE_PREF}":*" lookup 51820"*|"${K3S_TUNNEL_RULE_PREF}":*" table 51820"*|\
+                "${K3S_BLACKHOLE_RULE_PREF}":*" blackhole"*)
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+
+            # The old k3s implementation used this mark at pref 32764.
+            if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
+                continue
+            fi
+
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${pref}" = "${K3S_BLACKHOLE_RULE_PREF}" ] && [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */32 ]]; then
+                # CIDR-wide emergency quarantine must survive ordinary stale
+                # per-pod cleanup; only explicit full cleanup may remove it.
+                continue
+            fi
+            if [ -n "${rule_source}" ] && \
+               [ "${rule_source}" != "${current_source}" ] && \
+               k3s_policy_rule_is_owned "${rule_line}"; then
+                delete_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip rule show pref "${pref}" 2>/dev/null || true)
+    done
+}
+
+remove_legacy_k3s_fwmark_rules() {
     local changed=0
-    POLICY_CHANGED="0"
-    
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        # k3s mode: fwmark-based routing so ONLY replies to WireGuard-originated connections
-        # are sent back through the tunnel. IP-source rules (from <pod-ip> lookup 51820) route
-        # ALL traffic from the LND pod through WG, which breaks thunderhub/lndg and causes
-        # chacha20poly1305 auth failures on LND's own outbound P2P connections.
-        # The mangle rules added in ensure_nat_forward_rules() mark incoming WG packets in
-        # FORWARD (after DNAT) and save the mark to conntrack; CONNMARK --restore-mark in
-        # PREROUTING then tags reply packets from LND so they take the fwmark routing path.
+    local legacy_rule
+    local legacy_rules
 
-        # Remove ALL IP-source rules at our reserved priorities — not just for the
-        # current pod IP. LND pod IP can change across restarts; if the old tunnelsats
-        # pod was SIGKILL'd, cleanup never ran and stale rules for the old IP remain.
-        #
-        # Only touch rules that look like ours — i.e. rules that route to table 51820 or
-        # table main. This avoids accidentally wiping unrelated rules that some other
-        # operator on the host might have parked at these prefs.
-        local _pref _line _spec
-        for _pref in 32500 32763 32764; do
-            while IFS= read -r _line; do
-                [[ -z "${_line}" ]] && continue
-                _spec=$(echo "${_line}" | sed 's/^[0-9]*:[[:space:]]*//')
-                [[ -z "${_spec}" ]] && continue
-                local -a _spec_arr
-                read -r -a _spec_arr <<< "${_spec}"
-                ip rule del "${_spec_arr[@]}" >/dev/null 2>&1 || true
-            done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" | grep -E "lookup (51820|main)" || true)
-        done
+    legacy_rules="$(ip rule show 2>/dev/null | grep -Ei \
+        "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820" || true)"
+    if [ -z "${legacy_rules}" ]; then
+        K3S_LEGACY_POLICY_CHANGED="0"
+        return 0
+    fi
 
-        # Single fwmark rule: only packets carrying fwmark 51820 go through table 51820.
-        if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
-            if ! ip rule add fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1; then
-                if ! ip rule show pref 32764 | grep -q "fwmark"; then
-                    LAST_ERROR="k3s: Failed to add fwmark policy routing rule"
-                    return 1
-                fi
+    # Untagged policy rules are not sufficient proof of ownership. Only
+    # migrate the legacy rule when its paired TunnelSats mangle rules still
+    # provide an independently tagged ownership signal.
+    if ! iptables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-conn-restore" || \
+       ! iptables -t mangle -S FORWARD 2>/dev/null | grep -Fq -- "tunnelsats-conn-save"; then
+        LAST_ERROR="k3s: Unowned legacy fwmark rule conflicts with full-outbound routing"
+        K3S_LEGACY_POLICY_CHANGED="0"
+        return 1
+    fi
+
+    while IFS= read -r legacy_rule; do
+        [ -n "${legacy_rule}" ] || continue
+        delete_policy_rule_line "${legacy_rule}"
+        changed=1
+    done <<< "${legacy_rules}"
+
+    K3S_LEGACY_POLICY_CHANGED="${changed}"
+    return 0
+}
+
+ensure_k3s_bypass_rules() {
+    local changed=0
+    local rule_line
+    local rule_spec
+    local destination
+    local cidr
+    local installed_rule
+    local bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
+    local -a bypass_cidrs=()
+
+    if [ -n "${K3S_BYPASS_CIDRS_NORMALIZED}" ]; then
+        IFS=',' read -r -a bypass_cidrs <<< "${K3S_BYPASS_CIDRS_NORMALIZED}"
+    fi
+
+    # Remove bypasses that are no longer configured.
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+        k3s_policy_rule_is_owned "${rule_line}" || continue
+        if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+            continue
+        fi
+        destination="$(awk '{for (i = 1; i <= NF; i++) if ($i == "to") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        if [ -z "${destination}" ] || [[ "${bypass_csv}" != *",${destination},"* ]]; then
+            delete_policy_rule_line "${rule_line}"
+            changed=1
+        fi
+    done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+    for cidr in "${bypass_cidrs[@]}"; do
+        if ! ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qE \
+            "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}"; then
+            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${cidr}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to add local bypass for ${cidr}"
+                return 1
+            fi
+            installed_rule="$(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -E \
+                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}" \
+                | head -n 1 || true)"
+            if [ -z "${installed_rule}" ]; then
+                LAST_ERROR="k3s: Local bypass rule was not installed"
+                return 1
             fi
             changed=1
         fi
+    done
+
+    K3S_BYPASS_CHANGED="${changed}"
+    return 0
+}
+
+ensure_k3s_policy_table_defaults() {
+    local changed=0
+    local route_line
+    local source_rule
+    local -a route_parts
+
+    # Seed the fail-closed route before inspecting or replacing any usable
+    # default in the policy table.
+    if ! ip route replace blackhole default metric 3 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to set policy table blackhole"
+        return 1
+    fi
+
+    while IFS= read -r route_line; do
+        [ -n "${route_line}" ] || continue
+        if [[ "${route_line}" == blackhole\ default* ]] && [[ "${route_line}" == *"metric 3"* ]]; then
+            continue
+        fi
+        if [[ "${route_line}" == default* ]] && \
+           [[ "${route_line}" == *"dev ${WG_IFACE}"* ]] && \
+           [[ "${route_line}" == *"metric 2"* ]]; then
+            continue
+        fi
+
+        # An unexpected default could override WireGuard. Remove the active
+        # source rule first so the source blackhole protects this repair.
+        source_rule="$(ip rule show pref "${K3S_TUNNEL_RULE_PREF}" 2>/dev/null | grep -E \
+            "^${K3S_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
+            | head -n 1 || true)"
+        if [ -n "${source_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${source_rule}"; then
+                LAST_ERROR="k3s: Refusing to remove unowned source rule while repairing table 51820"
+                return 1
+            fi
+            delete_policy_rule_line "${source_rule}" || true
+        fi
+        if ip rule show | grep -qE \
+            "^${K3S_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
+            LAST_ERROR="k3s: Failed to suspend source routing while repairing table 51820"
+            return 1
+        fi
+
+        read -r -a route_parts <<< "${route_line}"
+        if ! ip route del table 51820 "${route_parts[@]}" >/dev/null 2>&1; then
+            LAST_ERROR="k3s: Failed to remove unexpected table 51820 default"
+            return 1
+        fi
+        changed=1
+    done < <(
+        ip route show table 51820 2>/dev/null \
+            | grep -E "^(blackhole[[:space:]]+)?default([[:space:]]|$)" \
+            || true
+    )
+
+    if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to set WireGuard policy table default"
+        return 1
+    fi
+
+    K3S_TABLE_CHANGED="${changed}"
+    return 0
+}
+
+ensure_policy_routing() {
+    local changed=0
+    local installed_rule
+    POLICY_CHANGED="0"
+    
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # Install the fallback first. Even malformed bypass configuration then
+        # blocks the pod before the normal main-table rule can leak traffic.
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_TARGET_IP}" \
+            "k3s: Failed to add fallback blackhole rule" \
+            "${K3S_RULE_PROTOCOL}"; then
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        # Retire reply-only routing before inspecting table 51820. The source
+        # blackhole above keeps traffic fail-closed during migration.
+        if ! remove_legacy_k3s_fwmark_rules; then
+            return 1
+        fi
+        if [ "${K3S_LEGACY_POLICY_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        if ! normalize_k3s_bypass_cidrs; then
+            return 1
+        fi
+
+        if ! ensure_k3s_policy_table_defaults; then
+            return 1
+        fi
+        if [ "${K3S_TABLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        remove_stale_k3s_policy_rules "${DOCKER_TARGET_IP}"
+        if [ "${POLICY_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        if ! ensure_k3s_bypass_rules; then
+            return 1
+        fi
+        if [ "${K3S_BYPASS_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        # Route every remaining packet from the selected Lightning pod through
+        # WireGuard. This covers both replies and pod-initiated connections.
+        if ! ip rule show | grep -qE \
+            "^${K3S_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
+            ip rule del from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_TUNNEL_RULE_PREF}" >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_TUNNEL_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to add full-outbound policy routing rule"
+                return 1
+            fi
+            installed_rule="$(ip rule show pref "${K3S_TUNNEL_RULE_PREF}" 2>/dev/null | grep -E \
+                "^${K3S_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
+                | head -n 1 || true)"
+            if [ -z "${installed_rule}" ]; then
+                LAST_ERROR="k3s: Full-outbound rule was not installed"
+                return 1
+            fi
+            changed=1
+        fi
+
     elif [[ "${SECURE_MODE}" == "true" ]]; then
         # Secure Mode: Direct IP policy routing
         # 1. Discover target's bridge network subnet dynamically
@@ -967,32 +1930,46 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        # Mangle rules for conntrack fwmark routing.
-        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK restore rule"
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            # Source routing supersedes the old reply-only CONNMARK design.
+            # Remove all tagged remnants during migration.
+            local legacy_mangle_removed=0
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                LAST_ERROR="Failed to add CONNMARK restore-mark rule"
-                return 1
-            fi
-            changed=1
-        fi
-
-        # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK set-mark rule"
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                LAST_ERROR="Failed to add CONNMARK set-mark rule"
-                return 1
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
+            if [ "${legacy_mangle_removed}" = "1" ]; then
+                changed=1
             fi
-            changed=1
+        else
+            # Secure Mode still uses conntrack marks for reply routing.
+            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+                log INFO "Syncing mangle CONNMARK restore rule"
+                remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+                if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                    -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
+                    LAST_ERROR="Failed to add CONNMARK restore-mark rule"
+                    return 1
+                fi
+                changed=1
+            fi
+
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+
+            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+                log INFO "Syncing mangle CONNMARK set-mark rule"
+                remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+                if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                    -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
+                    LAST_ERROR="Failed to add CONNMARK set-mark rule"
+                    return 1
+                fi
+                changed=1
+            fi
         fi
     else
         # Docker mode: bridge-interface FORWARD rules.
@@ -1070,26 +2047,103 @@ rules_are_synced() {
                 return 1
             fi
         else
-            # 1. fwmark policy routing rule
-            if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*(lookup|table)[[:space:]]+51820"; then
-                log WARN "rules_are_synced: k3s fwmark rule FAIL"
+            if ! normalize_k3s_bypass_cidrs; then
+                log WARN "rules_are_synced: ${LAST_ERROR}"
+                return 1
+            fi
+
+            local bypass_cidr
+            local -a expected_bypass_cidrs=()
+            if [ -n "${K3S_BYPASS_CIDRS_NORMALIZED}" ]; then
+                IFS=',' read -r -a expected_bypass_cidrs <<< "${K3S_BYPASS_CIDRS_NORMALIZED}"
+            fi
+            for bypass_cidr in "${expected_bypass_cidrs[@]}"; do
+                if ! ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qE \
+                    "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}"; then
+                    log WARN "rules_are_synced: k3s bypass ${bypass_cidr} FAIL"
+                    return 1
+                fi
+            done
+
+            local actual_bypass_count=0
+            local bypass_rule
+            local bypass_rule_spec
+            local actual_destination
+            local expected_bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
+            while IFS= read -r bypass_rule; do
+                [ -n "${bypass_rule}" ] || continue
+                bypass_rule_spec="${bypass_rule#*:}"
+                [[ "${bypass_rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+                k3s_policy_rule_is_owned "${bypass_rule}" || continue
+                if [[ "${bypass_rule_spec}" != *" lookup main"* ]] && [[ "${bypass_rule_spec}" != *" table main"* ]]; then
+                    continue
+                fi
+                actual_destination="$(awk '{for (i = 1; i <= NF; i++) if ($i == "to") {print $(i + 1); exit}}' <<< "${bypass_rule_spec}")"
+                if [ -z "${actual_destination}" ] || [[ "${expected_bypass_csv}" != *",${actual_destination},"* ]]; then
+                    log WARN "rules_are_synced: unexpected k3s bypass ${actual_destination:-missing}"
+                    return 1
+                fi
+                actual_bypass_count=$((actual_bypass_count + 1))
+            done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+            if [ "${actual_bypass_count}" -ne "${#expected_bypass_cidrs[@]}" ]; then
+                log WARN "rules_are_synced: k3s bypass count FAIL"
+                return 1
+            fi
+
+            if ! ip rule show | grep -qE \
+                "^${K3S_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
+                log WARN "rules_are_synced: k3s full-outbound rule FAIL"
+                return 1
+            fi
+
+            if ! ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -qE \
+                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
+                log WARN "rules_are_synced: k3s source blackhole FAIL"
+                return 1
+            fi
+
+            if ip rule show | grep -qiE \
+                "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820"; then
+                log WARN "rules_are_synced: legacy k3s fwmark rule remains"
+                return 1
+            fi
+
+            local table_51820
+            table_51820="$(ip route show table 51820 2>/dev/null || true)"
+            if ! grep -qE \
+                "^default([[:space:]].*)dev[[:space:]]+${WG_IFACE}([[:space:]].*)metric[[:space:]]+2([[:space:]]|$)" \
+                <<< "${table_51820}"; then
+                log WARN "rules_are_synced: k3s WireGuard table default FAIL"
+                return 1
+            fi
+            if ! grep -qE \
+                "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+3([[:space:]]|$)" \
+                <<< "${table_51820}"; then
+                log WARN "rules_are_synced: k3s table blackhole FAIL"
+                return 1
+            fi
+            local default_route_count
+            default_route_count="$(
+                grep -cE "^(blackhole[[:space:]]+)?default([[:space:]]|$)" <<< "${table_51820}" || true
+            )"
+            if [ "${default_route_count}" -ne 2 ]; then
+                log WARN "rules_are_synced: unexpected k3s policy table default"
                 return 1
             fi
         fi
 
-        # Both K3S_MODE and SECURE_MODE use conntrack mangle rules
-        # 1b. mangle CONNMARK restore rule
-        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
-            return 1
-        fi
+        if [[ "${SECURE_MODE}" == "true" ]]; then
+            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+                log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
+                return 1
+            fi
 
-        # 1c. mangle CONNMARK set rule
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
-            return 1
+            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+                log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
+                return 1
+            fi
         fi
 
         # 2. NAT PREROUTING check (DNAT)
@@ -1190,6 +2244,48 @@ rules_are_synced() {
     return 0
 }
 
+cleanup_k3s_policy_rules() {
+    local keep_blackholes="$1"
+    local pref
+    local rule_line
+    local rule_spec
+
+    for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}"; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
+
+            if [ "${pref}" = "${K3S_BYPASS_RULE_PREF}" ]; then
+                [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+                if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                    continue
+                fi
+            elif [ "${pref}" = "${K3S_TUNNEL_RULE_PREF}" ]; then
+                if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
+                    # Legacy rules predate protocol ownership markers. Preserve
+                    # them during generic cleanup rather than claiming them by
+                    # structure alone.
+                    continue
+                elif [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] && \
+                     { [[ "${rule_spec}" == *" lookup 51820"* ]] || [[ "${rule_spec}" == *" table 51820"* ]]; }; then
+                    :
+                else
+                    continue
+                fi
+            else
+                [ "${keep_blackholes}" = "false" ] || continue
+                [[ "${rule_spec}" == *"blackhole"* ]] || continue
+                [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+            fi
+
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+
+            delete_policy_rule_line "${rule_line}"
+        done < <(ip rule show pref "${pref}" 2>/dev/null || true)
+    done
+}
+
 cleanup_dataplane() {
     local keep_tunnel=false
     if [[ "${1:-}" == "--keep-tunnel" ]]; then
@@ -1200,6 +2296,9 @@ cleanup_dataplane() {
     remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+    if [ "${keep_tunnel}" = false ]; then
+        remove_tagged_iptables_rules filter FORWARD "tunnelsats-k3s-egress-guard"
+    fi
     remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
     remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
     remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
@@ -1207,39 +2306,43 @@ cleanup_dataplane() {
     local max_attempts=10
     local attempt=0
 
-    # Clean up all potential node target IP routing rules in Secure Mode unconditionally to prevent stale rules persisting across mode toggles or restores
-    for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
-        [ -n "${cleanup_ip}" ] || continue
-        local cleanup_subnet
-        cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
-        ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
-        ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        cleanup_k3s_policy_rules "${keep_tunnel}"
         if [ "${keep_tunnel}" = false ]; then
-            ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
-        fi
-    done
-
-    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-        if [[ "${SECURE_MODE}" != "true" ]]; then
-            ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
+            remove_k3s_subnet_quarantine || true
         fi
     else
-        # Remove local bypass rule (pref 32500)
-        ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
-
-        # Remove bridge gateway tunnel rule (pref 32763)
-        local bridge_gw
-        bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
-        ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
-
-        if [ "${keep_tunnel}" = false ]; then
-            ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
-        fi
-
-        while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
-            ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
-            attempt=$((attempt + 1))
+        # Clean up all potential node target IP routing rules in Secure Mode
+        # unconditionally to prevent stale rules across mode toggles.
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+            [ -n "${cleanup_ip}" ] || continue
+            local cleanup_subnet
+            cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
+            ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+            ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
         done
+
+        if [[ "${SECURE_MODE}" != "true" ]]; then
+            # Remove local bypass rule (pref 32500)
+            ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
+
+            # Remove bridge gateway tunnel rule (pref 32763)
+            local bridge_gw
+            bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+            ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
+            if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
+
+            while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
+                ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
+                attempt=$((attempt + 1))
+            done
+        fi
     fi
 
     if [ "${keep_tunnel}" = false ]; then
@@ -1293,6 +2396,7 @@ reconcile_once() {
     local changed=0
     local policy_changed="0"
     local nat_changed="0"
+    local k3s_guard_active=false
 
     LAST_ERROR=""
     RULES_SYNCED="false"
@@ -1316,6 +2420,50 @@ reconcile_once() {
             write_reconcile_result "${request_id}" false
         fi
         return 1
+    fi
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # Keep an independent packet-filter guard in place until the complete
+        # routing policy is verified. If blackhole setup fails, this guard
+        # continues to block clear-text pod egress.
+        if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
+            k3s_guard_active=true
+        else
+            log WARN "k3s: Failed to install temporary iptables egress guard; requiring source blackhole"
+        fi
+
+        # Target discovery can select a new pod IP before WireGuard is
+        # available. Blackhole that source immediately so any later startup
+        # failure cannot fall through to the node's ordinary egress route.
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_TARGET_IP}" \
+            "k3s: Failed to protect selected pod before WireGuard startup" \
+            "${K3S_RULE_PROTOCOL}"; then
+            if [ "${k3s_guard_active}" = false ]; then
+                local isolation_error="${LAST_ERROR}"
+                if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
+                    LAST_ERROR="${isolation_error}; quarantined pod CIDR ${K3S_QUARANTINE_CIDR}"
+                elif ensure_k3s_emergency_network_policy; then
+                    if delete_k3s_target_pod; then
+                        LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; emergency NetworkPolicy retained and deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} to fail closed"
+                    else
+                        LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; emergency NetworkPolicy retained because target pod deletion failed"
+                    fi
+                elif delete_k3s_target_pod; then
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable, pod-CIDR quarantine and emergency NetworkPolicy failed; deleted current target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}"
+                else
+                    wait_for_k3s_emergency_isolation "${isolation_error}; temporary egress guard unavailable, pod-CIDR quarantine failed, emergency NetworkPolicy failed, and target pod deletion failed"
+                fi
+            fi
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
     fi
 
     if ! ensure_docker_network; then
@@ -1378,7 +2526,11 @@ reconcile_once() {
     fi
 
     if rules_are_synced; then
-        RULES_SYNCED="true"
+        if [[ "${K3S_MODE}" == "true" ]] && ! release_k3s_reconcile_guards; then
+            RULES_SYNCED="false"
+        else
+            RULES_SYNCED="true"
+        fi
     else
         LAST_ERROR="Dataplane rules are not fully synced"
     fi

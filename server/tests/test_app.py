@@ -1148,6 +1148,7 @@ class TestDataplaneAndRegressionFixes:
         assert data['version'] == 'v9.1.2'
         assert data['dataplane_mode'] == 'docker-full-parity'
         assert data['docker_network']['name'] == 'docker-tunnelsats'
+        assert data['k3s_bypass_cidrs'] == []
         assert data['rules_synced'] is False
         assert data['last_error'] is None
 

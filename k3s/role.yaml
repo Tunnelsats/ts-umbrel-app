@@ -3,10 +3,14 @@ kind: Role
 metadata:
   name: tunnelsats
   # Deploy this Role in EACH namespace that hosts an LND or CLN pod the
-  # dashboard needs to restart. If LND/CLN live in a different namespace
+  # dashboard needs to restart or protect with an emergency NetworkPolicy.
+  # If LND/CLN live in a different namespace
   # than tunnelsats, copy this file into that namespace and apply it
   # separately (kustomize cannot template namespaces).
 rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "delete"]

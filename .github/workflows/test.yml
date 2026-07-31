@@ -18,7 +18,7 @@ jobs:
 
       - name: Generate Dummy Wireguard Keypair
         run: |
-          sudo apt-get update && sudo apt-get install -y wireguard-tools
+          sudo apt-get update && sudo apt-get install -y wireguard-tools iproute2 iputils-ping
           wg genkey | tee privatekey | wg pubkey > publickey
           wg genpsk > presharedkey
           cat <<EOF > data/tunnelsats-dev.conf
@@ -41,6 +41,9 @@ jobs:
         run: |
           chmod +x scripts/test.sh
           ./scripts/test.sh entrypoint
+
+      - name: Verify k3s full-outbound routing
+        run: sudo bash scripts/test-k3s-routing.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4

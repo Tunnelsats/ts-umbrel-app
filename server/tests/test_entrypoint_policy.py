@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -7,12 +8,17 @@ ENTRYPOINT_PATH = os.path.join(REPO_ROOT, "scripts", "entrypoint.sh")
 
 
 def run_bash(script):
-    return subprocess.run(
-        ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env = os.environ.copy()
+        env["POLICY_TEST_STATE_FILE"] = os.path.join(temp_dir, "state")
+        env["K3S_RULE_PROTOCOL"] = "200"
+        return subprocess.run(
+            ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def test_fallback_blackhole_rule_removes_conflicts_and_is_idempotent():
@@ -174,6 +180,531 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_wireguard_failure_blackholes_new_target_before_returning():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+BLACKHOLE_COUNT=0
+POLICY_COUNT=0
+STATE_ERROR=""
+STATE_SYNCED=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_fallback_blackhole_rule() {
+    [[ "$1" == "10.42.1.7" ]]
+    BLACKHOLE_COUNT=$((BLACKHOLE_COUNT + 1))
+    BLACKHOLE_CHANGED="1"
+    return 0
+}
+ensure_wg_up() {
+    LAST_ERROR="Failed to bring up WireGuard"
+    return 1
+}
+ensure_policy_routing() {
+    POLICY_COUNT=$((POLICY_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+    STATE_SYNCED="${RULES_SYNCED}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${BLACKHOLE_COUNT}" == "1" ]]
+[[ "${POLICY_COUNT}" == "0" ]]
+[[ "${STATE_SYNCED}" == "false" ]]
+[[ "${STATE_ERROR}" == "Failed to bring up WireGuard" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_blackhole_failure_keeps_emergency_egress_guard():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+GUARD_COUNT=0
+GUARD_REMOVE_COUNT=0
+WG_UP_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_k3s_egress_guard() {
+    [[ "$1" == "10.42.1.7" ]]
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_wg_up() {
+    WG_UP_COUNT=$((WG_UP_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${GUARD_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "0" ]]
+[[ "${WG_UP_COUNT}" == "0" ]]
+[[ "${STATE_ERROR}" == *"Failed to protect selected pod"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_egress_guard_prunes_stale_recycled_ip_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+RULES=$'-A FORWARD -s 10.42.1.7/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.5/32 -m comment --comment foreign-guard -j DROP'
+DELETED=""
+
+iptables() {
+    if [[ "$*" == "-S FORWARD" ]]; then
+        printf '%s\n' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "-C FORWARD -s 10.42.1.7 -m comment --comment tunnelsats-k3s-egress-guard -j DROP" ]]; then
+        return 0
+    fi
+    if [[ "$1 $2" == "-D FORWARD" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_egress_guard "10.42.1.7"
+[[ "${DELETED}" == *"-D FORWARD -s 10.42.1.6/32"* ]]
+[[ "${DELETED}" != *"10.42.1.7"* ]]
+[[ "${DELETED}" != *"foreign-guard"* ]]
+[[ "${RULES}" == *"10.42.1.7/32"* ]]
+[[ "${RULES}" == *"foreign-guard"* ]]
+[[ "${RULES}" != *"10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_isolation_failure_quarantines_target_pod_cidr():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+SUBNET_QUARANTINE_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_k3s_subnet_quarantine() {
+    [[ "$1" == "10.42.1.7" ]]
+    SUBNET_QUARANTINE_COUNT=$((SUBNET_QUARANTINE_COUNT + 1))
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${SUBNET_QUARANTINE_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"quarantined pod CIDR"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_total_isolation_failure_deletes_target_pod():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DELETE_COUNT=0
+NETWORK_POLICY_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    K3S_TARGET_POD_NAMESPACE="lightning"
+    K3S_TARGET_POD_NAME="lnd-0"
+    return 0
+}
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_k3s_subnet_quarantine() { return 1; }
+ensure_k3s_emergency_network_policy() {
+    NETWORK_POLICY_COUNT=$((NETWORK_POLICY_COUNT + 1))
+    return 0
+}
+delete_k3s_target_pod() {
+    [[ "${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}" == "lightning/lnd-0" ]]
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${DELETE_COUNT}" == "1" ]]
+[[ "${NETWORK_POLICY_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"deleted target pod lightning/lnd-0 to fail closed"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_total_isolation_failure_retries_until_target_is_contained():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DELETE_COUNT=0
+GUARD_COUNT=0
+SLEEP_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    K3S_TARGET_POD_NAMESPACE="lightning"
+    K3S_TARGET_POD_NAME="lnd-0"
+    return 0
+}
+ensure_k3s_egress_guard() {
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    [[ "${GUARD_COUNT}" -ge 3 ]]
+}
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_k3s_subnet_quarantine() { return 1; }
+ensure_k3s_emergency_network_policy() { return 1; }
+delete_k3s_target_pod() {
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 1
+}
+sleep() { SLEEP_COUNT=$((SLEEP_COUNT + 1)); }
+write_state() { STATE_ERROR="${LAST_ERROR}"; }
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${GUARD_COUNT}" == "3" ]]
+[[ "${DELETE_COUNT}" == "3" ]]
+[[ "${SLEEP_COUNT}" == "0" ]]
+[[ "${STATE_ERROR}" == *"egress guard installed after retry"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_deleted_target_waits_for_replacement_wide_isolation():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_NAME="lnd-0"
+DELETE_COUNT=0
+GUARD_COUNT=0
+QUARANTINE_COUNT=0
+
+delete_k3s_target_pod() {
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 0
+}
+ensure_k3s_egress_guard() {
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    return 0
+}
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_subnet_quarantine() {
+    QUARANTINE_COUNT=$((QUARANTINE_COUNT + 1))
+    [[ "${QUARANTINE_COUNT}" -ge 2 ]]
+}
+ensure_k3s_emergency_network_policy() { return 1; }
+write_state() { :; }
+
+wait_for_k3s_emergency_isolation "initial isolation failure"
+[[ "${DELETE_COUNT}" == "1" ]]
+[[ "${GUARD_COUNT}" == "0" ]]
+[[ "${QUARANTINE_COUNT}" == "2" ]]
+[[ "${LAST_ERROR}" == *"pod CIDR quarantined after retry 2"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_emergency_network_policy_covers_replacement_pods_until_release():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+K3S_TARGET_POD_LABELS='{"app":"lnd","controller-revision-hash":"lnd-7f8d"}'
+PAYLOAD_FILE="${POLICY_TEST_STATE_FILE}.network-policy"
+DELETE_FILE="${POLICY_TEST_STATE_FILE}.network-policy-deleted"
+
+k8s_api_write_status() {
+    if [[ "$1" == "POST" ]]; then
+        [[ "$2" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies" ]]
+        printf '%s' "$3" > "${PAYLOAD_FILE}"
+        printf '%s' "201"
+        return 0
+    fi
+    if [[ "$1" == "DELETE" ]]; then
+        [[ "$2" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]
+        [[ "$(printf '%s' "$3" | jq -r '.preconditions.uid')" == "owned-policy-uid" ]]
+        touch "${DELETE_FILE}"
+        printf '%s' "200"
+        return 0
+    fi
+    return 1
+}
+k8s_api() {
+    jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
+}
+
+ensure_k3s_emergency_network_policy
+cat "${PAYLOAD_FILE}" | jq -e '
+    .spec.podSelector.matchLabels.app == "lnd"
+    and (.spec.podSelector.matchLabels | has("controller-revision-hash") | not)
+    and .spec.policyTypes == ["Egress"]
+    and .spec.egress == []
+' >/dev/null
+
+remove_k3s_emergency_network_policy
+[[ -f "${DELETE_FILE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_emergency_network_policy_release_preserves_foreign_fixed_name():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+DELETE_FILE="${POLICY_TEST_STATE_FILE}.foreign-policy-deleted"
+
+k8s_api() {
+    printf '%s' '{"metadata":{"name":"tunnelsats-emergency-egress-deny","uid":"foreign-uid","annotations":{"managed-by":"another-controller"}},"spec":{"podSelector":{"matchLabels":{"app":"other"}},"policyTypes":["Egress"],"egress":[]}}'
+}
+k8s_api_write_status() {
+    if [[ "$1" == "DELETE" ]]; then
+        touch "${DELETE_FILE}"
+    fi
+    printf '%s' "200"
+}
+
+remove_k3s_emergency_network_policy
+[[ ! -f "${DELETE_FILE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_emergency_network_policy_uid_conflict_requires_retry():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+
+k8s_api() {
+    printf '%s' '{"metadata":{"name":"tunnelsats-emergency-egress-deny","uid":"owned-uid","annotations":{"tunnelsats.io/emergency-egress-deny":"true"}},"spec":{"podSelector":{"matchLabels":{"app":"lnd"}},"policyTypes":["Egress"],"egress":[]}}'
+}
+k8s_api_write_status() {
+    [[ "$1" == "DELETE" ]]
+    printf '%s' "409"
+}
+
+if remove_k3s_emergency_network_policy; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"changed during deletion; retrying cleanup"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_guard_release_clears_stale_guards_after_revalidation():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+SUBNET_REMOVE_COUNT=0
+GUARD_REMOVE_COUNT=0
+SYNC_COUNT=0
+
+remove_k3s_subnet_quarantine() {
+    SUBNET_REMOVE_COUNT=$((SUBNET_REMOVE_COUNT + 1))
+    return 0
+}
+rules_are_synced() {
+    SYNC_COUNT=$((SYNC_COUNT + 1))
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+
+release_k3s_reconcile_guards
+[[ "${SUBNET_REMOVE_COUNT}" == "1" ]]
+[[ "${SYNC_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_guard_release_retries_emergency_policy_cleanup():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+POLICY_REMOVE_COUNT=0
+SLEEP_COUNT=0
+STATE_ERROR=""
+
+remove_k3s_subnet_quarantine() { return 0; }
+rules_are_synced() { return 0; }
+remove_k3s_egress_guards() { return 0; }
+remove_k3s_emergency_network_policy() {
+    POLICY_REMOVE_COUNT=$((POLICY_REMOVE_COUNT + 1))
+    [[ "${POLICY_REMOVE_COUNT}" -ge 2 ]]
+}
+write_state() { STATE_ERROR="${LAST_ERROR}"; }
+sleep() { SLEEP_COUNT=$((SLEEP_COUNT + 1)); }
+
+release_k3s_reconcile_guards
+[[ "${POLICY_REMOVE_COUNT}" == "2" ]]
+[[ "${SLEEP_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"retrying emergency NetworkPolicy cleanup"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_guard_release_restores_quarantine_when_revalidation_fails():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+RESTORE_COUNT=0
+GUARD_REMOVE_COUNT=0
+
+remove_k3s_subnet_quarantine() { return 0; }
+rules_are_synced() { return 1; }
+ensure_k3s_subnet_quarantine() {
+    [[ "$1" == "10.42.1.7" ]]
+    RESTORE_COUNT=$((RESTORE_COUNT + 1))
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+
+if release_k3s_reconcile_guards; then
+    exit 1
+fi
+[[ "${RESTORE_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "0" ]]
+[[ "${LAST_ERROR}" == *"failed after releasing emergency quarantine"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_target_resolution_fails_when_node_metadata_is_unavailable():
     result = run_bash(
         r'''
@@ -251,6 +782,726 @@ if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
 fi
 [[ "${LAST_ERROR}" == *"No Ready non-terminating LND pod is co-located"* ]]
 [[ "${LAST_ERROR}" == *"TunnelSats node=worker-a"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_bypass_cidrs_are_normalized_and_unsafe_values_are_rejected():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.43.0.1/16, 10.42.0.0/16,10.43.0.0/16"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "10.42.0.0/16,10.43.0.0/16" ]]
+
+K3S_BYPASS_CIDRS="10.42.0.0/16,not-a-cidr"
+if normalize_k3s_bypass_cidrs; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Invalid K3S_BYPASS_CIDRS"* ]]
+
+LAST_ERROR=""
+K3S_BYPASS_CIDRS="0.0.0.0/0"
+if normalize_k3s_bypass_cidrs; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == "Invalid K3S_BYPASS_CIDRS: default route 0.0.0.0/0 is not allowed" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rule_protocol_is_persisted_and_avoids_shared_host_tags():
+    result = run_bash(
+        r'''
+source "$1"
+
+unset K3S_RULE_PROTOCOL
+K3S_MODE="true"
+K3S_RULE_PROTOCOL_FILE="${POLICY_TEST_STATE_FILE}.protocol"
+ip() {
+    if [[ "$*" == "-N rule show" ]]; then
+        printf '%s\n' $'32764:\tfrom 10.88.0.5 lookup 51820 proto 200'
+        return 0
+    fi
+    return 1
+}
+
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" =~ ^[0-9]+$ ]]
+[[ "${K3S_RULE_PROTOCOL}" != "200" ]]
+[[ "$(awk '{print $2}' "${K3S_RULE_PROTOCOL_FILE}")" == "${K3S_RULE_PROTOCOL}" ]]
+[[ "$(awk '{print $3}' "${K3S_RULE_PROTOCOL_FILE}")" == "${K3S_RULE_PREF_BASE}" ]]
+[[ "${K3S_RULE_PREF_BASE}" != "32500" ]]
+[[ "${K3S_BLACKHOLE_RULE_PREF}" -lt 32766 ]]
+
+FIRST_PROTOCOL="${K3S_RULE_PROTOCOL}"
+FIRST_PREF_BASE="${K3S_RULE_PREF_BASE}"
+unset K3S_RULE_PROTOCOL
+unset K3S_RULE_PREF_BASE
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" == "${FIRST_PROTOCOL}" ]]
+[[ "${K3S_RULE_PREF_BASE}" == "${FIRST_PREF_BASE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rule_ownership_requires_boot_scoped_protocol_and_preference():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_RULE_PROTOCOL="200"
+K3S_BYPASS_RULE_PREF="32500"
+K3S_QUARANTINE_RULE_PREF="32763"
+K3S_TUNNEL_RULE_PREF="32764"
+K3S_BLACKHOLE_RULE_PREF="32765"
+
+k3s_policy_rule_is_owned $'32764:\tfrom 10.42.1.7 lookup 51820 proto 200'
+if k3s_policy_rule_is_owned $'32766:\tfrom 10.42.9.9 lookup 999 proto 200'; then
+    exit 1
+fi
+if k3s_policy_rule_is_owned $'32764:\tfrom 10.42.9.9 lookup 999 proto 201'; then
+    exit 1
+fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rule_owner_upgrade_retains_legacy_protocol_until_cleanup():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+K3S_RULE_PROTOCOL_FILE="${POLICY_TEST_STATE_FILE}.protocol-upgrade"
+printf '%s 199\n' "$(cat /proc/sys/kernel/random/boot_id)" > "${K3S_RULE_PROTOCOL_FILE}"
+unset K3S_RULE_PROTOCOL
+unset K3S_RULE_PREF_BASE
+ip() {
+    if [[ "$*" == "-N rule show" ]]; then
+        printf '%s\n' $'32765:\tfrom 10.42.0.0/16 blackhole proto 199'
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s\n' $'32765:\tfrom 10.42.0.0/16 blackhole proto 199'
+        return 0
+    fi
+    return 1
+}
+
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" != "199" ]]
+[[ "${K3S_LEGACY_RULE_PROTOCOL}" == "199" ]]
+[[ "$(awk '{print $4}' "${K3S_RULE_PROTOCOL_FILE}")" == "199" ]]
+[[ "${K3S_BLACKHOLE_RULE_PREF}" -lt 32766 ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_routes_external_traffic_with_only_explicit_local_bypasses():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+WG_IFACE="tunnelsatsv2"
+RULES=""
+ROUTES=""
+ADD_COUNT=0
+DELETE_LOG=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${RULES}" | grep '^32764:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$1 $2" == "rule add" ]]; then
+        ADD_COUNT=$((ADD_COUNT + 1))
+        case "$*" in
+            "rule add from 10.42.1.7 to 10.42.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 to 10.43.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 table 51820 protocol 200 pref 32764")
+                RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 blackhole protocol 200 pref 32765")
+                RULES+=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "route replace" ]]; then
+        ROUTES+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$*" == "route del 10.9.0.0/24 table 51820" ]]; then
+        return 0
+    fi
+    if [[ "$*" == "-4 addr show dev tunnelsatsv2" ]]; then
+        printf '%s\n' "7: tunnelsatsv2    inet 10.9.0.2/24 scope global tunnelsatsv2"
+        return 0
+    fi
+    return 1
+}
+
+ensure_policy_routing
+[[ "${POLICY_CHANGED}" == "1" ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main'* ]]
+[[ "${RULES}" == *$'32764:\tfrom 10.42.1.7 lookup 51820'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.1.7 blackhole'* ]]
+[[ "${RULES}" != *"fwmark"* ]]
+[[ "${ROUTES}" == *"route replace default dev tunnelsatsv2 metric 2 table 51820"* ]]
+[[ "${ROUTES}" == *"route replace blackhole default metric 3 table 51820"* ]]
+
+FIRST_ADD_COUNT="${ADD_COUNT}"
+ensure_policy_routing
+[[ "${POLICY_CHANGED}" == "0" ]]
+[[ "${ADD_COUNT}" == "${FIRST_ADD_COUNT}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_validation_failure_installs_blackhole_before_returning():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="0.0.0.0/0"
+RULES=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.1.7 blackhole protocol 200 pref 32765" ]]; then
+        RULES=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+        return 0
+    fi
+    return 0
+}
+
+if ensure_policy_routing; then
+    exit 1
+fi
+[[ "${RULES}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${LAST_ERROR}" == "Invalid K3S_BYPASS_CIDRS: default route 0.0.0.0/0 is not allowed" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_table_repair_suspends_source_rule_before_removing_default():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+WG_IFACE="tunnelsatsv2"
+SOURCE_RULE=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
+DELETE_LOG=""
+
+ip() {
+    if [[ "$*" == "route replace blackhole default metric 3 table 51820" ]] || \
+       [[ "$*" == "route replace default dev tunnelsatsv2 metric 2 table 51820" ]]; then
+        return 0
+    fi
+    if [[ "$*" == "route show table 51820" ]]; then
+        printf '%s\n' \
+            "default via 192.0.2.1 dev eth0 metric 1" \
+            "default dev tunnelsatsv2 metric 2" \
+            "blackhole default metric 3"
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${SOURCE_RULE}"
+        return 0
+    fi
+    if [[ "$*" == "rule del from 10.42.1.7 lookup 51820 proto 200 pref 32764" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        SOURCE_RULE=""
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${SOURCE_RULE}"
+        return 0
+    fi
+    if [[ "$*" == "route del table 51820 default via 192.0.2.1 dev eth0 metric 1" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_policy_table_defaults
+[[ "${K3S_TABLE_CHANGED}" == "1" ]]
+[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 lookup 51820 proto 200 pref 32764"* ]]
+[[ "${DELETE_LOG}" == *"route del table 51820 default via 192.0.2.1 dev eth0 metric 1"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rules_are_synced_requires_full_outbound_and_blackhole_routes():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+WG_IFACE="tunnelsatsv2"
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+EXTRA_DEFAULT=0
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "route show table 51820" ]]; then
+        printf '%s\n' \
+            "default dev tunnelsatsv2 metric 2" \
+            "blackhole default metric 3" \
+            "10.9.0.0/24 dev tunnelsatsv2"
+        if [ "${EXTRA_DEFAULT}" = "1" ]; then
+            printf '%s\n' "default via 192.0.2.1 dev eth0 metric 1"
+        fi
+        return 0
+    fi
+    return 1
+}
+iptables() {
+    return 0
+}
+
+rules_are_synced
+
+EXTRA_DEFAULT=1
+if rules_are_synced; then
+    exit 1
+fi
+EXTRA_DEFAULT=0
+
+RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'/}"
+if rules_are_synced; then
+    exit 1
+fi
+
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n30000:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+if rules_are_synced; then
+    exit 1
+fi
+
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 192.168.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+if rules_are_synced; then
+    exit 1
+fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_nat_reconcile_removes_legacy_connmark_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+WG_IFACE="tunnelsatsv2"
+REMOVED=""
+
+remove_tagged_iptables_rules() {
+    REMOVED+="$1/$2/$3"$'\n'
+}
+iptables() {
+    if [[ "$*" == "-t nat -S PREROUTING" ]]; then
+        printf '%s\n' \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 19735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.42.1.7:9735" \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 9735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.42.1.7:9735"
+        return 0
+    fi
+    if [[ "$*" == "-t nat -S POSTROUTING" ]]; then
+        printf '%s\n' "-A POSTROUTING -s 10.42.1.7 -o tunnelsatsv2 -m comment --comment tunnelsats-masq -j MASQUERADE"
+        return 0
+    fi
+    return 0
+}
+
+ensure_nat_forward_rules
+[[ "${REMOVED}" == *"mangle/PREROUTING/tunnelsats-conn-restore"* ]]
+[[ "${REMOVED}" == *"mangle/FORWARD/tunnelsats-conn-save"* ]]
+[[ "${REMOVED}" == *"mangle/FORWARD/tunnelsats-wg-mark"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_stale_k3s_rules_are_removed_without_touching_current_source():
+    result = run_bash(
+        r'''
+source "$1"
+
+POLICY_CHANGED="0"
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s\n' \
+            $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main proto 200' \
+            $'32500:\tfrom 10.42.0.9 to 10.99.0.0/16 lookup main proto 201' \
+            $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main' \
+            $'32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main'
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s\n' \
+            $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200' \
+            $'32764:\tfrom 10.88.0.5 lookup 51820 proto 201' \
+            $'32764:\tfrom 10.42.0.9 lookup 51820 proto 201' \
+            $'32764:\tfrom 10.42.1.7 lookup 51820' \
+            $'32764:\tfrom 10.99.0.5 lookup 51820'
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s\n' \
+            $'32765:\tfrom 10.42.0.9 blackhole proto 200' \
+            $'32765:\tfrom 10.42.0.9 blackhole proto 201' \
+            $'32765:\tfrom 10.42.0.0/16 blackhole proto 200' \
+            $'32765:\tfrom 10.42.1.7 blackhole' \
+            $'32765:\tfrom 10.99.0.5 blackhole'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 0
+}
+
+remove_stale_k3s_policy_rules "10.42.1.7"
+[[ "${POLICY_CHANGED}" == "1" ]]
+[[ "${DELETED}" == *"from 10.42.0.9 to 10.42.0.0/16 lookup main"* ]]
+[[ "${DELETED}" == *"from 10.42.0.9 lookup 51820"* ]]
+[[ "${DELETED}" == *"from 10.42.0.9 blackhole"* ]]
+[[ "${DELETED}" != *"proto 201"* ]]
+[[ "${DELETED}" != *"from 10.42.0.0/16"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"from 10.88.0.5"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_legacy_fwmark_migration_requires_tagged_ownership_evidence():
+    result = run_bash(
+        r'''
+source "$1"
+
+OWNED=0
+DELETED=""
+ip() {
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s\n' $'32764:\tfrom all fwmark 0xca6c lookup 51820'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+iptables() {
+    if [[ "${OWNED}" == "1" && "$*" == "-t mangle -S PREROUTING" ]]; then
+        printf '%s\n' "-A PREROUTING -m comment --comment tunnelsats-conn-restore"
+    elif [[ "${OWNED}" == "1" && "$*" == "-t mangle -S FORWARD" ]]; then
+        printf '%s\n' "-A FORWARD -m comment --comment tunnelsats-conn-save"
+    fi
+    return 0
+}
+
+if remove_legacy_k3s_fwmark_rules; then
+    exit 1
+fi
+[[ -z "${DELETED}" ]]
+[[ "${LAST_ERROR}" == *"Unowned legacy fwmark rule"* ]]
+
+OWNED=1
+LAST_ERROR=""
+remove_legacy_k3s_fwmark_rules
+[[ "${DELETED}" == *"fwmark 0xca6c lookup 51820"* ]]
+[[ -z "${LAST_ERROR}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+RULES=$'32763:\tfrom 10.88.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}" | grep '^32763:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_subnet_quarantine "10.42.1.7"
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${RULES}" == *"proto 200"* ]]
+
+remove_k3s_subnet_quarantine
+[[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
+[[ "${DELETED}" != *"proto 201"* ]]
+[[ "${RULES}" == *"proto 201"* ]]
+[[ "${RULES}" == *"from 10.88.0.0/16 blackhole proto 201"* ]]
+[[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_recovery_preserves_ambiguous_legacy_quarantine():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_RULE_PROTOCOL="200"
+K3S_RULE_PREF_BASE="10000"
+K3S_BYPASS_RULE_PREF="10000"
+K3S_QUARANTINE_RULE_PREF="10263"
+K3S_TUNNEL_RULE_PREF="10264"
+K3S_BLACKHOLE_RULE_PREF="10265"
+K3S_LEGACY_RULE_PROTOCOL="199"
+RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 199\n32765:\tfrom 10.88.0.0/16 blackhole proto 198\n10265:\tfrom 10.42.1.7 blackhole proto 200\n'
+DELETED=""
+CLEARED=0
+
+ip() {
+    if [[ "$*" == "rule show pref 10263" ]]; then
+        printf '%s' "${RULES}" | grep '^10263:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        if [[ "$*" == *"proto 199 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 199\n'/}"
+        fi
+        return 0
+    fi
+    return 1
+}
+clear_k3s_legacy_rule_protocol() {
+    K3S_LEGACY_RULE_PROTOCOL=""
+    CLEARED=1
+}
+
+if remove_k3s_subnet_quarantine; then
+    exit 1
+fi
+[[ "${DELETED}" != *"from 10.42.0.0/16 blackhole proto 199 pref 32765"* ]]
+[[ "${DELETED}" != *"proto 198"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7"* ]]
+[[ "${RULES}" == *"proto 199"* ]]
+[[ "${RULES}" == *"proto 198"* ]]
+[[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+[[ "${CLEARED}" == "0" ]]
+[[ "${K3S_LEGACY_RULE_PROTOCOL}" == "199" ]]
+[[ "${LAST_ERROR}" == *"ambiguous legacy pod-CIDR quarantine"* ]]
+[[ "${LAST_ERROR}" == *"manual cleanup required"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_slash_32_quarantine_is_distinct_from_persistent_pod_fallback():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.42.1.7/32"
+RULES=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}" | grep '^32763:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.1.7/32 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.1.7 blackhole proto 200\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'32763:\tfrom 10.42.1.7 blackhole proto 200\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_subnet_quarantine "10.42.1.7"
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.1.7/32" ]]
+[[ "${RULES}" == *"32763:"* ]]
+
+remove_k3s_subnet_quarantine
+[[ "${DELETED}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+[[ "${RULES}" == *"32765:"* ]]
+[[ "${RULES}" != *"32763:"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_cleanup_preserves_blackholes_only_when_tunnel_is_kept():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+DELETED=""
+FLUSHED=0
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main proto 201\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32764:\tfrom 10.99.0.5 lookup 51820 proto 201\n32764:\tfrom all fwmark 0xca6c lookup 51820\n32765:\tfrom 10.42.1.7 blackhole proto 200\n32765:\tfrom 10.99.0.5 blackhole proto 201\n'
+
+remove_tagged_iptables_rules() {
+    return 0
+}
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${RULES}" | grep '^32764:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$*" == "route flush table 51820" ]]; then
+        FLUSHED=$((FLUSHED + 1))
+        return 0
+    fi
+    return 0
+}
+wg() {
+    return 1
+}
+
+cleanup_dataplane --keep-tunnel
+[[ "${DELETED}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
+[[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7 blackhole"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"fwmark 0xca6c"* ]]
+[[ "${FLUSHED}" == "0" ]]
+
+DELETED=""
+cleanup_dataplane
+[[ "${DELETED}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"fwmark 0xca6c"* ]]
+[[ "${FLUSHED}" == "1" ]]
 '''
     )
 

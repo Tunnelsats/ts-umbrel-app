@@ -23,9 +23,13 @@ kubectl delete -k k3s/
 
 ## 1. Namespace & RBAC
 
-TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API. To
-do that, its ServiceAccount needs `get`/`list`/`delete` on `pods` **in the
-namespace where LND/CLN run** (`role.yaml` + `rolebinding.yaml`).
+TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API.
+Its ServiceAccount needs `get`/`list`/`delete` on `pods` and
+`get`/`create`/`delete` on `networkpolicies` **in the namespace where LND/CLN
+run** (`role.yaml` + `rolebinding.yaml`). The NetworkPolicy permission is a
+last-resort fail-closed boundary: if every node-level isolation mechanism
+fails, it denies egress for the selected Lightning workload and also covers a
+controller-created replacement pod until routing recovers.
 
 These are **namespaced** Role/RoleBinding objects, so pay attention to *where*
 they land:
@@ -168,7 +172,61 @@ requiredDuringSchedulingIgnoredDuringExecution:
 The Role and RoleBinding instructions in the previous section still apply to
 cross-namespace targets.
 
-## 3. PVC mount paths (do not move them)
+## 3. Full-outbound routing and cluster bypasses
+
+TunnelSats routes all external IPv4 traffic from the selected Lightning pod
+through WireGuard. This includes both replies to inbound VPN connections and
+new connections initiated by LND or CLN. If WireGuard routing becomes
+unavailable, a source-specific blackhole prevents the traffic from falling
+through to the node's ordinary default route.
+
+Cluster-internal destinations must be listed explicitly in
+`K3S_BYPASS_CIDRS`. The shipped Deployment uses the standard k3s ranges:
+
+```yaml
+- name: K3S_BYPASS_CIDRS
+  value: "10.42.0.0/16,10.43.0.0/16"
+```
+
+- `10.42.0.0/16` is the default k3s pod CIDR.
+- `10.43.0.0/16` is the default k3s service CIDR.
+
+If the cluster was installed with custom `--cluster-cidr` or `--service-cidr`
+values, replace the defaults in `deployment.yaml`. Check the k3s server
+arguments and `/etc/rancher/k3s/config.yaml` on the server node:
+
+```sh
+ps -ef | grep '[k]3s server'
+sudo cat /etc/rancher/k3s/config.yaml
+```
+
+Add other local dependencies only as narrow CIDRs. For example, a Bitcoin or
+Tor service running directly on `192.168.1.25` should be added as a single-host
+route:
+
+```yaml
+- name: K3S_BYPASS_CIDRS
+  value: "10.42.0.0/16,10.43.0.0/16,192.168.1.25/32"
+```
+
+Every bypass uses the node's main routing table and therefore does not receive
+VPN protection. Do not add broad LAN ranges unless every address in that range
+is intentionally trusted, and never use `0.0.0.0/0` (the runtime rejects it).
+An invalid setting or a missing WireGuard route fails closed and reports
+`rules_synced: false`. The effective normalized list is available as
+`k3s_bypass_cidrs` at `/api/local/status`.
+
+Useful route checks on the node are:
+
+```sh
+# Must select table 51820 / the TunnelSats WireGuard interface:
+ip route get <public-peer-ip> from <lightning-pod-ip>
+
+# Must remain on the cluster route:
+ip route get <cluster-pod-ip> from <lightning-pod-ip>
+```
+
+## 4. PVC mount paths (do not move them)
 
 The server reads and writes the Lightning config at **fixed, hard-coded paths**:
 
