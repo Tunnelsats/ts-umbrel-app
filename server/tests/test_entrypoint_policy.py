@@ -706,7 +706,7 @@ K3S_BYPASS_CIDRS="0.0.0.0/0"
 if normalize_k3s_bypass_cidrs; then
     exit 1
 fi
-[[ "${LAST_ERROR}" == *"must not contain 0.0.0.0/0"* ]]
+[[ "${LAST_ERROR}" == "Invalid K3S_BYPASS_CIDRS: default route 0.0.0.0/0 is not allowed" ]]
 '''
     )
 
@@ -923,7 +923,7 @@ if ensure_policy_routing; then
     exit 1
 fi
 [[ "${RULES}" == *"from 10.42.1.7 blackhole"* ]]
-[[ "${LAST_ERROR}" == *"must not contain 0.0.0.0/0"* ]]
+[[ "${LAST_ERROR}" == "Invalid K3S_BYPASS_CIDRS: default route 0.0.0.0/0 is not allowed" ]]
 '''
     )
 

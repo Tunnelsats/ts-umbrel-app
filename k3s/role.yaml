@@ -13,4 +13,4 @@ rules:
     verbs: ["get", "list", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "create", "delete"]
+    verbs: ["get", "list", "create", "delete"]

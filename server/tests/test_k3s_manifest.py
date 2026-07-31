@@ -52,6 +52,7 @@ def test_k3s_role_can_install_last_resort_network_policy():
     }
     assert rules[(("networking.k8s.io",), ("networkpolicies",))] == {
         "get",
+        "list",
         "create",
         "delete",
     }

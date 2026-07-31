@@ -1344,7 +1344,7 @@ for value in raw.split(","):
     if network.version != 4:
         raise SystemExit(f"{value!r} is not an IPv4 CIDR")
     if network.prefixlen == 0:
-        raise SystemExit("must not contain 0.0.0.0/0")
+        raise SystemExit("default route 0.0.0.0/0 is not allowed")
     networks.add(network)
 
 print(",".join(str(network) for network in sorted(
