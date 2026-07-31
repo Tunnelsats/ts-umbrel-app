@@ -244,7 +244,7 @@ resolve_k3s_target_pod() {
     local impl="$1"
     local namespace="$2"
     local selector="$3"
-    local encoded_selector pod_list pod
+    local encoded_selector pod_list running_pods pod
     local pod_name pod_ip pod_node
 
     encoded_selector=$(urlencode "${selector}")
@@ -254,8 +254,32 @@ resolve_k3s_target_pod() {
         return 1
     fi
 
-    if ! pod=$(printf '%s' "${pod_list}" | jq -ce \
-        '[.items[]? | select(.status.phase == "Running")] | first // empty' 2>/dev/null); then
+    if ! running_pods=$(printf '%s' "${pod_list}" | jq -ce \
+        '[.items[]? | select(.status.phase == "Running")]' 2>/dev/null); then
+        LAST_ERROR="k3s: No Running ${impl^^} pod found (namespace=${namespace}, selector=${selector})"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    if [ -z "${TUNNELSATS_K8S_NODE_NAME}" ]; then
+        LAST_ERROR="k3s: TunnelSats node name is unavailable; refusing to activate dataplane"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    # During a rollout the selector can temporarily match multiple Running pods.
+    # Prefer a complete pod on this node instead of trusting Kubernetes API order;
+    # otherwise a remote old/new replica could falsely trip the co-location guard.
+    if ! pod=$(printf '%s' "${running_pods}" | jq -ce --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
+        '. as $pods
+         | ([$pods[]
+             | select(
+                 .spec.nodeName == $node
+                 and (.metadata.name // "") != ""
+                 and (.status.podIP // "") != ""
+             )] | first)
+           // $pods[0]
+           // empty' 2>/dev/null); then
         LAST_ERROR="k3s: No Running ${impl^^} pod found (namespace=${namespace}, selector=${selector})"
         log ERROR "${LAST_ERROR}"
         return 1
@@ -267,12 +291,6 @@ resolve_k3s_target_pod() {
 
     if [ -z "${pod_name}" ] || [ -z "${pod_ip}" ] || [ -z "${pod_node}" ]; then
         LAST_ERROR="k3s: ${impl^^} pod metadata incomplete (namespace=${namespace}, pod=${pod_name:-unknown}, pod_ip=${pod_ip:-missing}, node=${pod_node:-missing})"
-        log ERROR "${LAST_ERROR}"
-        return 1
-    fi
-
-    if [ -z "${TUNNELSATS_K8S_NODE_NAME}" ]; then
-        LAST_ERROR="k3s: TunnelSats node name is unavailable; refusing to activate dataplane"
         log ERROR "${LAST_ERROR}"
         return 1
     fi
