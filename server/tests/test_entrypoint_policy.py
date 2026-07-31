@@ -281,21 +281,19 @@ fi
     assert result.returncode == 0, result.stderr
 
 
-def test_k3s_isolation_failure_quarantines_target_pod():
+def test_k3s_isolation_failure_quarantines_target_pod_cidr():
     result = run_bash(
         r'''
 source "$1"
 
 K3S_MODE="true"
 SECURE_MODE="false"
-QUARANTINE_COUNT=0
+SUBNET_QUARANTINE_COUNT=0
 STATE_ERROR=""
 
 detect_lightning_container() {
     TARGET_CONTAINER_NAME="lnd"
     TARGET_IMPL="lnd"
-    TARGET_K8S_POD_NAME="lnd-0"
-    TARGET_K8S_POD_NAMESPACE="lightning"
     DOCKER_TARGET_IP="10.42.1.7"
     return 0
 }
@@ -304,9 +302,10 @@ ensure_fallback_blackhole_rule() {
     LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
     return 1
 }
-quarantine_k3s_target_pod() {
-    [[ "${TARGET_K8S_POD_NAMESPACE}/${TARGET_K8S_POD_NAME}" == "lightning/lnd-0" ]]
-    QUARANTINE_COUNT=$((QUARANTINE_COUNT + 1))
+ensure_k3s_subnet_quarantine() {
+    [[ "$1" == "10.42.1.7" ]]
+    SUBNET_QUARANTINE_COUNT=$((SUBNET_QUARANTINE_COUNT + 1))
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
     return 0
 }
 write_state() {
@@ -317,8 +316,8 @@ if reconcile_once "test"; then
     exit 1
 fi
 
-[[ "${QUARANTINE_COUNT}" == "1" ]]
-[[ "${STATE_ERROR}" == *"quarantined pod lightning/lnd-0"* ]]
+[[ "${SUBNET_QUARANTINE_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"quarantined pod CIDR"* ]]
 '''
     )
 
@@ -762,6 +761,47 @@ remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${DELETED}" != *"proto 201"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 201\n'
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_subnet_quarantine "10.42.1.7"
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${RULES}" == *"proto 200"* ]]
+
+remove_k3s_subnet_quarantine
+[[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
+[[ "${DELETED}" != *"proto 201"* ]]
+[[ "${RULES}" == *"proto 201"* ]]
+[[ "${RULES}" != *"proto 200"* ]]
 '''
     )
 

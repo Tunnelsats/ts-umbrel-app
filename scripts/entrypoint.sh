@@ -50,8 +50,6 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
-TARGET_K8S_POD_NAME=""
-TARGET_K8S_POD_NAMESPACE=""
 FORWARDING_PORT=""
 BRIDGE_NAME=""
 RULES_SYNCED="false"
@@ -182,16 +180,6 @@ k8s_api() {
     local token
     token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
     curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
-        -H "Authorization: Bearer ${token}" \
-        "${K8S_API_URL}${path}"
-}
-
-k8s_api_delete() {
-    local path="$1"
-    local token
-    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
-    curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
-        -X DELETE \
         -H "Authorization: Bearer ${token}" \
         "${K8S_API_URL}${path}"
 }
@@ -360,8 +348,6 @@ resolve_k3s_target_pod() {
     fi
 
     DOCKER_TARGET_IP="${pod_ip}"
-    TARGET_K8S_POD_NAME="${pod_name}"
-    TARGET_K8S_POD_NAMESPACE="${namespace}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -371,8 +357,6 @@ detect_k3s_target() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
     DOCKER_TARGET_IP=""
-    TARGET_K8S_POD_NAME=""
-    TARGET_K8S_POD_NAMESPACE=""
 
     local svc_name svc_fqdn svc_ip
 
@@ -698,13 +682,71 @@ remove_k3s_egress_guards() {
     return 0
 }
 
-quarantine_k3s_target_pod() {
-    if [ -z "${TARGET_K8S_POD_NAMESPACE}" ] || [ -z "${TARGET_K8S_POD_NAME}" ]; then
+ensure_k3s_subnet_quarantine() {
+    local source_ip="$1"
+    local pod_cidr
+    local escaped_cidr
+    local exact_pattern
+
+    if ! normalize_k3s_bypass_cidrs; then
         return 1
     fi
-    k8s_api_delete \
-        "/api/v1/namespaces/${TARGET_K8S_POD_NAMESPACE}/pods/${TARGET_K8S_POD_NAME}" \
-        >/dev/null
+    pod_cidr="$(
+        SOURCE_IP="${source_ip}" \
+        BYPASS_CIDRS="${K3S_BYPASS_CIDRS_NORMALIZED}" \
+        python3 -c '
+import ipaddress
+import os
+
+source = ipaddress.ip_address(os.environ["SOURCE_IP"])
+matches = [
+    ipaddress.ip_network(value)
+    for value in os.environ["BYPASS_CIDRS"].split(",")
+    if value and source in ipaddress.ip_network(value)
+]
+print(max(matches, key=lambda network: network.prefixlen) if matches else "")
+'
+    )"
+    if [ -z "${pod_cidr}" ]; then
+        LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
+        return 1
+    fi
+    K3S_QUARANTINE_CIDR="${pod_cidr}"
+
+    escaped_cidr="${pod_cidr//./\\.}"
+    exact_pattern="^32763:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+    if ip rule show pref 32763 2>/dev/null | grep -qE "${exact_pattern}"; then
+        return 0
+    fi
+    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref 32763 >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
+        return 1
+    fi
+    if ! ip rule show pref 32763 2>/dev/null | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+        return 1
+    fi
+    return 0
+}
+
+remove_k3s_subnet_quarantine() {
+    local rule_line
+    local rule_spec
+
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        k3s_policy_rule_is_owned "${rule_spec}" || continue
+        delete_policy_rule_line "${rule_line}"
+    done < <(ip rule show pref 32763 2>/dev/null || true)
+
+    if ip rule show pref 32763 2>/dev/null | grep -qE \
+        "proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
+        LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
+        return 1
+    fi
+    return 0
 }
 
 get_target_subnet() {
@@ -1659,6 +1701,9 @@ cleanup_dataplane() {
 
     if [[ "${K3S_MODE}" == "true" ]]; then
         cleanup_k3s_policy_rules "${keep_tunnel}"
+        if [ "${keep_tunnel}" = false ]; then
+            remove_k3s_subnet_quarantine || true
+        fi
     else
         # Clean up all potential node target IP routing rules in Secure Mode
         # unconditionally to prevent stale rules across mode toggles.
@@ -1789,10 +1834,10 @@ reconcile_once() {
             "${K3S_RULE_PROTOCOL}"; then
             if [ "${k3s_guard_active}" = false ]; then
                 local isolation_error="${LAST_ERROR}"
-                if quarantine_k3s_target_pod; then
-                    LAST_ERROR="${isolation_error}; quarantined pod ${TARGET_K8S_POD_NAMESPACE}/${TARGET_K8S_POD_NAME}"
+                if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
+                    LAST_ERROR="${isolation_error}; quarantined pod CIDR ${K3S_QUARANTINE_CIDR}"
                 else
-                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod quarantine failed"
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed"
                 fi
             fi
             write_state
@@ -1840,6 +1885,13 @@ reconcile_once() {
     fi
 
     if ! ensure_policy_routing; then
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        return 1
+    fi
+    if [[ "${K3S_MODE}" == "true" ]] && ! remove_k3s_subnet_quarantine; then
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
