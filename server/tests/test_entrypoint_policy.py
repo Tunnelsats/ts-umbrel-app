@@ -10,7 +10,7 @@ ENTRYPOINT_PATH = os.path.join(REPO_ROOT, "scripts", "entrypoint.sh")
 def run_bash(script):
     with tempfile.TemporaryDirectory() as temp_dir:
         env = os.environ.copy()
-        env["K3S_POLICY_OWNERSHIP_FILE"] = os.path.join(temp_dir, "owned-rules")
+        env["POLICY_TEST_STATE_FILE"] = os.path.join(temp_dir, "state")
         env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
@@ -389,8 +389,8 @@ source "$1"
 K3S_TARGET_POD_NAMESPACE="lightning"
 K3S_TARGET_POD_SELECTOR="app=lnd"
 K3S_TARGET_POD_LABELS='{"app":"lnd","controller-revision-hash":"lnd-7f8d"}'
-PAYLOAD_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy"
-DELETE_FILE="${K3S_POLICY_OWNERSHIP_FILE}.network-policy-deleted"
+PAYLOAD_FILE="${POLICY_TEST_STATE_FILE}.network-policy"
+DELETE_FILE="${POLICY_TEST_STATE_FILE}.network-policy-deleted"
 
 k8s_api_write_status() {
     if [[ "$1" == "POST" ]]; then
@@ -611,7 +611,7 @@ source "$1"
 
 unset K3S_RULE_PROTOCOL
 K3S_MODE="true"
-K3S_RULE_PROTOCOL_FILE="${K3S_POLICY_OWNERSHIP_FILE}.protocol"
+K3S_RULE_PROTOCOL_FILE="${POLICY_TEST_STATE_FILE}.protocol"
 ip() {
     if [[ "$*" == "-N rule show" ]]; then
         printf '%s\n' $'32764:\tfrom 10.88.0.5 lookup 51820 proto 200'
@@ -800,7 +800,6 @@ ip() {
     return 1
 }
 
-record_k3s_policy_rule "${SOURCE_RULE}"
 ensure_k3s_policy_table_defaults
 [[ "${K3S_TABLE_CHANGED}" == "1" ]]
 [[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 lookup 51820 proto 200 pref 32764"* ]]
@@ -943,7 +942,7 @@ ip() {
     if [[ "$*" == "rule show pref 32764" ]]; then
         printf '%s\n' \
             $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200' \
-            $'32764:\tfrom 10.88.0.5 lookup 51820 proto 200' \
+            $'32764:\tfrom 10.88.0.5 lookup 51820 proto 201' \
             $'32764:\tfrom 10.42.0.9 lookup 51820 proto 201' \
             $'32764:\tfrom 10.42.1.7 lookup 51820' \
             $'32764:\tfrom 10.99.0.5 lookup 51820'
@@ -965,9 +964,6 @@ ip() {
     return 0
 }
 
-record_k3s_policy_rule $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main proto 200'
-record_k3s_policy_rule $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200'
-record_k3s_policy_rule $'32765:\tfrom 10.42.0.9 blackhole proto 200'
 remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${POLICY_CHANGED}" == "1" ]]
 [[ "${DELETED}" == *"from 10.42.0.9 to 10.42.0.0/16 lookup main"* ]]
@@ -1034,7 +1030,7 @@ def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rule
 source "$1"
 
 K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
-RULES=$'32763:\tfrom 10.88.0.0/16 blackhole proto 200\n32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+RULES=$'32763:\tfrom 10.88.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 DELETED=""
 
 ip() {
@@ -1066,7 +1062,7 @@ remove_k3s_subnet_quarantine
 [[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
 [[ "${DELETED}" != *"proto 201"* ]]
 [[ "${RULES}" == *"proto 201"* ]]
-[[ "${RULES}" == *"from 10.88.0.0/16 blackhole proto 200"* ]]
+[[ "${RULES}" == *"from 10.88.0.0/16 blackhole proto 201"* ]]
 [[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
 '''
     )
@@ -1160,9 +1156,6 @@ wg() {
     return 1
 }
 
-record_k3s_policy_rule $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200'
-record_k3s_policy_rule $'32764:\tfrom 10.42.1.7 lookup 51820 proto 200'
-record_k3s_policy_rule $'32765:\tfrom 10.42.1.7 blackhole proto 200'
 cleanup_dataplane --keep-tunnel
 [[ "${DELETED}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
 [[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]

@@ -106,7 +106,6 @@ fi
 # Keep emergency CIDR quarantine distinct from the persistent per-pod fallback
 # at pref 32765. This matters when a configured pod CIDR is itself a /32.
 K3S_QUARANTINE_RULE_PREF="32763"
-K3S_POLICY_OWNERSHIP_FILE="${K3S_POLICY_OWNERSHIP_FILE:-/data/tunnelsats-k3s-policy-rules}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -996,10 +995,6 @@ print(max(matches, key=lambda network: network.prefixlen) if matches else "")
         LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
         return 1
     fi
-    if ! record_k3s_policy_rule "${quarantine_rule}"; then
-        LAST_ERROR="k3s: Failed to persist emergency quarantine ownership"
-        return 1
-    fi
     return 0
 }
 
@@ -1150,12 +1145,6 @@ ensure_fallback_blackhole_rule() {
         return 1
     fi
 
-    if [ "${rule_protocol}" = "${K3S_RULE_PROTOCOL}" ] && \
-       ! record_k3s_policy_rule "$(printf '%s\n' "${matching_rules}" | head -n 1)"; then
-        LAST_ERROR="${error_message}: failed to persist rule ownership"
-        return 1
-    fi
-
     BLACKHOLE_CHANGED="1"
     return 0
 }
@@ -1201,58 +1190,16 @@ print(",".join(str(network) for network in sorted(
     return 0
 }
 
-k3s_policy_rule_key() {
-    local boot_id
-    local normalized_rule
-
-    # Kernel policy rules do not survive a host reboot. Scope ledger entries to
-    # the current boot so a stale record can never claim a later foreign rule.
-    boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
-    [ -n "${boot_id}" ] || return 1
-    normalized_rule="$(awk '{$1=$1; print}' <<< "$1")"
-    [ -n "${normalized_rule}" ] || return 1
-    printf '%s|%s\n' "${boot_id}" "${normalized_rule}"
-}
-
-record_k3s_policy_rule() {
-    local rule_key
-    local ownership_dir
-
-    rule_key="$(k3s_policy_rule_key "$1")"
-    [ -n "${rule_key}" ] || return 1
-    ownership_dir="${K3S_POLICY_OWNERSHIP_FILE%/*}"
-    [ "${ownership_dir}" != "${K3S_POLICY_OWNERSHIP_FILE}" ] || ownership_dir="."
-    mkdir -p "${ownership_dir}" || return 1
-    touch "${K3S_POLICY_OWNERSHIP_FILE}" || return 1
-    if ! grep -Fxq -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}"; then
-        printf '%s\n' "${rule_key}" >> "${K3S_POLICY_OWNERSHIP_FILE}" || return 1
-    fi
-}
-
-forget_k3s_policy_rule() {
-    local rule_key
-    local ownership_tmp
-
-    [ -f "${K3S_POLICY_OWNERSHIP_FILE}" ] || return 0
-    rule_key="$(k3s_policy_rule_key "$1")"
-    ownership_tmp="$(mktemp "${K3S_POLICY_OWNERSHIP_FILE}.tmp.XXXXXX")" || return 1
-    grep -Fvx -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}" > "${ownership_tmp}" || true
-    mv -f "${ownership_tmp}" "${K3S_POLICY_OWNERSHIP_FILE}"
-}
-
 k3s_policy_rule_has_protocol() {
     local rule_spec="${1#*:}"
     [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$) ]]
 }
 
 k3s_policy_rule_is_owned() {
-    local rule_line="$1"
-    local rule_key
-
-    k3s_policy_rule_has_protocol "${rule_line}" || return 1
-    [ -f "${K3S_POLICY_OWNERSHIP_FILE}" ] || return 1
-    rule_key="$(k3s_policy_rule_key "${rule_line}")"
-    grep -Fxq -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}"
+    # The protocol is randomly allocated from values unused on this host and
+    # remains stable only for this boot. It is the kernel-resident ownership
+    # marker; no textual ledger can become stale after external rule changes.
+    k3s_policy_rule_has_protocol "$1"
 }
 
 delete_policy_rule_line() {
@@ -1263,11 +1210,7 @@ delete_policy_rule_line() {
 
     read -r -a rule_parts <<< "${rule_spec}"
     [ "${#rule_parts[@]}" -gt 0 ] || return 0
-    if ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1; then
-        forget_k3s_policy_rule "${rule_line}" || true
-        return 0
-    fi
-    return 1
+    ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1
 }
 
 remove_stale_k3s_policy_rules() {
@@ -1385,8 +1328,8 @@ ensure_k3s_bypass_rules() {
             installed_rule="$(ip rule show pref 32500 2>/dev/null | grep -E \
                 "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}" \
                 | head -n 1 || true)"
-            if [ -z "${installed_rule}" ] || ! record_k3s_policy_rule "${installed_rule}"; then
-                LAST_ERROR="k3s: Failed to persist local bypass rule ownership"
+            if [ -z "${installed_rule}" ]; then
+                LAST_ERROR="k3s: Local bypass rule was not installed"
                 return 1
             fi
             changed=1
@@ -1522,8 +1465,8 @@ ensure_policy_routing() {
             installed_rule="$(ip rule show pref 32764 2>/dev/null | grep -E \
                 "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
                 | head -n 1 || true)"
-            if [ -z "${installed_rule}" ] || ! record_k3s_policy_rule "${installed_rule}"; then
-                LAST_ERROR="k3s: Failed to persist full-outbound rule ownership"
+            if [ -z "${installed_rule}" ]; then
+                LAST_ERROR="k3s: Full-outbound rule was not installed"
                 return 1
             fi
             changed=1
