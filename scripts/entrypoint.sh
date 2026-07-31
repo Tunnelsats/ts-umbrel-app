@@ -36,6 +36,7 @@ export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 # These are the default k3s pod/service CIDRs; custom clusters must override
 # this with their exact internal CIDRs.
 export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
+K3S_POLICY_SOURCES_FILE="${K3S_POLICY_SOURCES_FILE:-/data/tunnelsats-k3s-policy-sources}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -766,6 +767,30 @@ delete_policy_rule_line() {
     ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
 }
 
+record_k3s_policy_source() {
+    local source_ip="$1"
+    local source_dir="${K3S_POLICY_SOURCES_FILE%/*}"
+
+    [ -n "${source_ip}" ] || return 1
+    mkdir -p "${source_dir}"
+    touch "${K3S_POLICY_SOURCES_FILE}"
+    chmod 600 "${K3S_POLICY_SOURCES_FILE}"
+    if ! grep -Fxq -- "${source_ip}" "${K3S_POLICY_SOURCES_FILE}"; then
+        printf '%s\n' "${source_ip}" >> "${K3S_POLICY_SOURCES_FILE}"
+    fi
+}
+
+k3s_policy_source_is_owned() {
+    local source_ip="$1"
+
+    [ -n "${source_ip}" ] || return 1
+    if [ "${source_ip}" = "${DOCKER_TARGET_IP:-}" ]; then
+        return 0
+    fi
+    [ -f "${K3S_POLICY_SOURCES_FILE}" ] \
+        && grep -Fxq -- "${source_ip}" "${K3S_POLICY_SOURCES_FILE}"
+}
+
 remove_stale_k3s_policy_rules() {
     local current_source="$1"
     local pref
@@ -794,7 +819,9 @@ remove_stale_k3s_policy_rules() {
             fi
 
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-            if [ -n "${rule_source}" ] && [ "${rule_source}" != "${current_source}" ]; then
+            if [ -n "${rule_source}" ] && \
+               [ "${rule_source}" != "${current_source}" ] && \
+               k3s_policy_source_is_owned "${rule_source}"; then
                 delete_policy_rule_line "${rule_line}"
                 POLICY_CHANGED="1"
             fi
@@ -1513,12 +1540,15 @@ cleanup_k3s_policy_rules() {
     local pref
     local rule_line
     local rule_spec
+    local rule_source
+    local legacy_fwmark
 
     for pref in 32500 32764 32765; do
         while IFS= read -r rule_line; do
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
+            legacy_fwmark=false
 
             if [ "${pref}" = "32500" ]; then
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
@@ -1527,7 +1557,7 @@ cleanup_k3s_policy_rules() {
                 fi
             elif [ "${pref}" = "32764" ]; then
                 if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
-                    :
+                    legacy_fwmark=true
                 elif [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] && \
                      { [[ "${rule_spec}" == *" lookup 51820"* ]] || [[ "${rule_spec}" == *" table 51820"* ]]; }; then
                     :
@@ -1538,6 +1568,11 @@ cleanup_k3s_policy_rules() {
                 [ "${keep_blackholes}" = "false" ] || continue
                 [[ "${rule_spec}" == *"blackhole"* ]] || continue
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+            fi
+
+            if [ "${legacy_fwmark}" = false ]; then
+                rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+                k3s_policy_source_is_owned "${rule_source}" || continue
             fi
 
             delete_policy_rule_line "${rule_line}"
@@ -1672,6 +1707,27 @@ reconcile_once() {
             write_reconcile_result "${request_id}" false
         fi
         return 1
+    fi
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        # Target discovery can select a new pod IP before WireGuard is
+        # available. Blackhole that source immediately so any later startup
+        # failure cannot fall through to the node's ordinary egress route.
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_TARGET_IP}" \
+            "k3s: Failed to protect selected pod before WireGuard startup"; then
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+        if ! record_k3s_policy_source "${DOCKER_TARGET_IP}"; then
+            log WARN "k3s: Failed to persist policy ownership for ${DOCKER_TARGET_IP}"
+        fi
     fi
 
     if ! ensure_docker_network; then

@@ -174,6 +174,67 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_wireguard_failure_blackholes_new_target_before_returning():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+BLACKHOLE_COUNT=0
+OWNERSHIP_COUNT=0
+POLICY_COUNT=0
+STATE_ERROR=""
+STATE_SYNCED=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_fallback_blackhole_rule() {
+    [[ "$1" == "10.42.1.7" ]]
+    BLACKHOLE_COUNT=$((BLACKHOLE_COUNT + 1))
+    BLACKHOLE_CHANGED="1"
+    return 0
+}
+record_k3s_policy_source() {
+    [[ "$1" == "10.42.1.7" ]]
+    OWNERSHIP_COUNT=$((OWNERSHIP_COUNT + 1))
+    return 0
+}
+ensure_wg_up() {
+    LAST_ERROR="Failed to bring up WireGuard"
+    return 1
+}
+ensure_policy_routing() {
+    POLICY_COUNT=$((POLICY_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+    STATE_SYNCED="${RULES_SYNCED}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${BLACKHOLE_COUNT}" == "1" ]]
+[[ "${OWNERSHIP_COUNT}" == "1" ]]
+[[ "${POLICY_COUNT}" == "0" ]]
+[[ "${STATE_SYNCED}" == "false" ]]
+[[ "${STATE_ERROR}" == "Failed to bring up WireGuard" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_target_resolution_fails_when_node_metadata_is_unavailable():
     result = run_bash(
         r'''
@@ -570,24 +631,29 @@ source "$1"
 
 POLICY_CHANGED="0"
 DELETED=""
+K3S_POLICY_SOURCES_FILE="$(mktemp)"
+printf '%s\n' "10.42.0.9" "10.42.1.7" > "${K3S_POLICY_SOURCES_FILE}"
 
 ip() {
     if [[ "$*" == "rule show pref 32500" ]]; then
         printf '%s\n' \
             $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main' \
-            $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main'
+            $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main' \
+            $'32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main'
         return 0
     fi
     if [[ "$*" == "rule show pref 32764" ]]; then
         printf '%s\n' \
             $'32764:\tfrom 10.42.0.9 lookup 51820' \
-            $'32764:\tfrom 10.42.1.7 lookup 51820'
+            $'32764:\tfrom 10.42.1.7 lookup 51820' \
+            $'32764:\tfrom 10.99.0.5 lookup 51820'
         return 0
     fi
     if [[ "$*" == "rule show pref 32765" ]]; then
         printf '%s\n' \
             $'32765:\tfrom 10.42.0.9 blackhole' \
-            $'32765:\tfrom 10.42.1.7 blackhole'
+            $'32765:\tfrom 10.42.1.7 blackhole' \
+            $'32765:\tfrom 10.99.0.5 blackhole'
         return 0
     fi
     if [[ "$1 $2" == "rule del" ]]; then
@@ -603,6 +669,8 @@ remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${DELETED}" == *"from 10.42.0.9 lookup 51820"* ]]
 [[ "${DELETED}" == *"from 10.42.0.9 blackhole"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
+rm -f "${K3S_POLICY_SOURCES_FILE}"
 '''
     )
 
@@ -619,7 +687,9 @@ SECURE_MODE="false"
 DOCKER_TARGET_IP="10.42.1.7"
 DELETED=""
 FLUSHED=0
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+K3S_POLICY_SOURCES_FILE="$(mktemp)"
+printf '%s\n' "10.42.1.7" > "${K3S_POLICY_SOURCES_FILE}"
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32764:\tfrom 10.99.0.5 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n32765:\tfrom 10.99.0.5 blackhole\n'
 
 remove_tagged_iptables_rules() {
     return 0
@@ -655,12 +725,15 @@ cleanup_dataplane --keep-tunnel
 [[ "${DELETED}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
 [[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7 blackhole"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
 [[ "${FLUSHED}" == "0" ]]
 
 DELETED=""
 cleanup_dataplane
 [[ "${DELETED}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${DELETED}" != *"from 10.99.0.5"* ]]
 [[ "${FLUSHED}" == "1" ]]
+rm -f "${K3S_POLICY_SOURCES_FILE}"
 '''
     )
 
