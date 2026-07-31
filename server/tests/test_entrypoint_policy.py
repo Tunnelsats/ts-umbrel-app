@@ -460,8 +460,8 @@ if reconcile_once "test"; then
 fi
 
 [[ "${GUARD_COUNT}" == "3" ]]
-[[ "${DELETE_COUNT}" == "2" ]]
-[[ "${SLEEP_COUNT}" == "1" ]]
+[[ "${DELETE_COUNT}" == "3" ]]
+[[ "${SLEEP_COUNT}" == "0" ]]
 [[ "${STATE_ERROR}" == *"egress guard installed after retry"* ]]
 '''
     )

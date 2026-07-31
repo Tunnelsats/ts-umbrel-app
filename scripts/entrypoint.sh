@@ -361,6 +361,13 @@ wait_for_k3s_emergency_isolation() {
     # independent control is verified or the unsafe pod is deleted.
     while true; do
         attempt=$((attempt + 1))
+        # Stop the unsafe workload before spending time re-establishing slower
+        # API and dataplane controls. When every mechanism is unavailable, do
+        # not add a backoff window in which clear egress can continue.
+        if delete_k3s_target_pod; then
+            LAST_ERROR="${isolation_error}; target pod deleted after retry ${attempt}"
+            return 0
+        fi
         if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
             LAST_ERROR="${isolation_error}; egress guard installed after retry ${attempt}"
             return 0
@@ -380,14 +387,9 @@ wait_for_k3s_emergency_isolation() {
             LAST_ERROR="${isolation_error}; emergency NetworkPolicy installed after retry ${attempt}"
             return 0
         fi
-        if delete_k3s_target_pod; then
-            LAST_ERROR="${isolation_error}; target pod deleted after retry ${attempt}"
-            return 0
-        fi
 
         LAST_ERROR="${isolation_error}; all emergency isolation controls unavailable; fail-stop retry ${attempt}"
         write_state
-        sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
     done
 }
 
