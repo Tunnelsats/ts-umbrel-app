@@ -82,14 +82,12 @@ This means TunnelSats and the LND/CLN pod **must run on the same node**:
 
 - **Single-node cluster** (the typical Umbrel / home-node setup): nothing to do
   — there is only one node, so they are always co-located.
-- **Multi-node cluster**: the scheduler may place the LND/CLN pod on a different
-  node than TunnelSats. DNAT then forwards to a pod on another node, but the
-  reply never passes through TunnelSats' fwmark rules — inbound connections
-  break and replies can leak outside the tunnel.
+- **Multi-node cluster**: the shipped Deployment uses required pod affinity to
+  schedule TunnelSats on the same node as the default LND target. A runtime
+  check independently compares both pods' `spec.nodeName` values before any
+  forwarding rules are installed.
 
-To enforce co-location on a multi-node cluster, uncomment the `podAffinity`
-block in `deployment.yaml` and set its `labelSelector` to match your Lightning
-pod (the same labels as `LND_K8S_POD_SELECTOR` / `CLN_K8S_POD_SELECTOR`):
+The default affinity selector matches the default `LND_K8S_POD_SELECTOR`:
 
 ```yaml
 affinity:
@@ -101,11 +99,74 @@ affinity:
         topologyKey: kubernetes.io/hostname
 ```
 
+Do not remove or weaken this required affinity. If scheduling configuration
+drifts or a target moves after scheduling, TunnelSats fails closed: it removes
+its forwarding rules, reports `rules_synced: false`, and places a
+`Pod co-location required` explanation in `last_error` at
+`/api/local/status`.
+
 Confirm both landed on the same node:
 
 ```sh
 kubectl get pods -n <ns> -o wide -l 'app in (tunnelsats,lnd)'   # same NODE column
 ```
+
+### Select exactly one Lightning implementation
+
+The manifest targets LND by default. TunnelSats forwards to exactly one
+Lightning implementation, and LND has priority if both service variables are
+enabled. On k3s, configure exactly one target so the scheduler affinity and
+runtime selection cannot disagree.
+
+For **LND**, keep these values aligned:
+
+```yaml
+affinity: ... matchLabels: {app: lnd}
+LND_K8S_SERVICE: lnd
+LND_K8S_NAMESPACE: <LND namespace, or omit for the TunnelSats namespace>
+LND_K8S_POD_SELECTOR: app=lnd
+```
+
+For **CLN**, disable/comment all three `LND_K8S_*` entries, enable the three
+`CLN_K8S_*` entries, and change the affinity selector:
+
+```yaml
+affinity:
+  podAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: cln
+        topologyKey: kubernetes.io/hostname
+# CLN_K8S_SERVICE: cln
+# CLN_K8S_NAMESPACE: <CLN namespace, or omit for the TunnelSats namespace>
+# CLN_K8S_POD_SELECTOR: app=cln
+```
+
+The affinity `matchLabels` must describe the same pods as the selected
+`*_K8S_POD_SELECTOR`. The environment selector accepts Kubernetes selector
+syntax such as `app=cln`; express the equivalent requirement under the
+affinity `labelSelector`.
+
+By default, a pod-affinity term searches only the namespace containing
+TunnelSats. If the selected Lightning pod is in another namespace, set the
+matching runtime namespace **and** add that namespace to the affinity term:
+
+```yaml
+- name: CLN_K8S_NAMESPACE
+  value: "bitcoin-lab"
+# ...
+requiredDuringSchedulingIgnoredDuringExecution:
+  - labelSelector:
+      matchLabels:
+        app: cln
+    namespaces:
+      - bitcoin-lab
+    topologyKey: kubernetes.io/hostname
+```
+
+The Role and RoleBinding instructions in the previous section still apply to
+cross-namespace targets.
 
 ## 3. PVC mount paths (do not move them)
 
