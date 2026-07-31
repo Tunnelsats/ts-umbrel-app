@@ -43,6 +43,7 @@ K3S_RULE_PROTOCOL="200"
 # Keep emergency CIDR quarantine distinct from the persistent per-pod fallback
 # at pref 32765. This matters when a configured pod CIDR is itself a /32.
 K3S_QUARANTINE_RULE_PREF="32763"
+K3S_POLICY_OWNERSHIP_FILE="${K3S_POLICY_OWNERSHIP_FILE:-/data/tunnelsats-k3s-policy-rules}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -690,6 +691,7 @@ ensure_k3s_subnet_quarantine() {
     local pod_cidr
     local escaped_cidr
     local exact_pattern
+    local quarantine_rule
 
     if ! normalize_k3s_bypass_cidrs; then
         return 1
@@ -720,15 +722,25 @@ print(max(matches, key=lambda network: network.prefixlen) if matches else "")
     escaped_cidr="${pod_cidr%/32}"
     escaped_cidr="${escaped_cidr//./\\.}"
     exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-    if ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE "${exact_pattern}"; then
+    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+    if [ -n "${quarantine_rule}" ]; then
+        if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+            LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
+            return 1
+        fi
         return 0
     fi
     if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
         LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
         return 1
     fi
-    if ! ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE "${exact_pattern}"; then
+    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+    if [ -z "${quarantine_rule}" ]; then
         LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+        return 1
+    fi
+    if ! record_k3s_policy_rule "${quarantine_rule}"; then
+        LAST_ERROR="k3s: Failed to persist emergency quarantine ownership"
         return 1
     fi
     return 0
@@ -747,7 +759,7 @@ remove_k3s_subnet_quarantine() {
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             [[ "${rule_spec}" == *"blackhole"* ]] || continue
-            k3s_policy_rule_is_owned "${rule_spec}" || continue
+            k3s_policy_rule_is_owned "${rule_line}" || continue
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
             if [ "${quarantine_pref}" = "32765" ]; then
                 [[ "${rule_source}" == */* ]] || continue
@@ -759,13 +771,21 @@ remove_k3s_subnet_quarantine() {
         done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
     done
 
-    if ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE \
-        "blackhole.*proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)" || \
-       ip rule show pref 32765 2>/dev/null | grep -qE \
-        "from[[:space:]]+[^[:space:]]+/([0-9]|[12][0-9]|3[01])[[:space:]]+blackhole.*proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
-        LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
-        return 1
-    fi
+    for quarantine_pref in "${K3S_QUARANTINE_RULE_PREF}" 32765; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            [[ "${rule_spec}" == *"blackhole"* ]] || continue
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${quarantine_pref}" = "32765" ]; then
+                [[ "${rule_source}" == */* ]] || continue
+                [[ "${rule_source}" != */32 ]] || continue
+            fi
+            LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
+            return 1
+        done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+    done
     return 0
 }
 
@@ -843,12 +863,14 @@ ensure_fallback_blackhole_rule() {
         rule_spec="${rule_line#*:}"
         read -r -a rule_parts <<< "${rule_spec}"
         [ "${#rule_parts[@]}" -gt 0 ] || continue
-        if [ -n "${rule_protocol}" ] && \
-           ! [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${rule_protocol}([[:space:]]|$) ]]; then
-            LAST_ERROR="${error_message}: pref 32765 is occupied by an unowned rule"
-            return 1
+        if [ -n "${rule_protocol}" ]; then
+            if ! [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${rule_protocol}([[:space:]]|$) ]] || \
+               { [ "${rule_protocol}" = "${K3S_RULE_PROTOCOL}" ] && ! k3s_policy_rule_is_owned "${rule_line}"; }; then
+                LAST_ERROR="${error_message}: pref 32765 is occupied by an unowned rule"
+                return 1
+            fi
         fi
-        ip rule del "${rule_parts[@]}" pref 32765 >/dev/null 2>&1 || true
+        delete_policy_rule_line "${rule_line}" || true
     done <<< "${matching_rules}"
 
     if ip rule show pref 32765 2>/dev/null | grep -qE "${source_pattern}"; then
@@ -865,6 +887,12 @@ ensure_fallback_blackhole_rule() {
     matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
     if [ "${matching_count}" -ne 1 ] || ! printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
         LAST_ERROR="${error_message}"
+        return 1
+    fi
+
+    if [ "${rule_protocol}" = "${K3S_RULE_PROTOCOL}" ] && \
+       ! record_k3s_policy_rule "$(printf '%s\n' "${matching_rules}" | head -n 1)"; then
+        LAST_ERROR="${error_message}: failed to persist rule ownership"
         return 1
     fi
 
@@ -913,6 +941,60 @@ print(",".join(str(network) for network in sorted(
     return 0
 }
 
+k3s_policy_rule_key() {
+    local boot_id
+    local normalized_rule
+
+    # Kernel policy rules do not survive a host reboot. Scope ledger entries to
+    # the current boot so a stale record can never claim a later foreign rule.
+    boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    [ -n "${boot_id}" ] || return 1
+    normalized_rule="$(awk '{$1=$1; print}' <<< "$1")"
+    [ -n "${normalized_rule}" ] || return 1
+    printf '%s|%s\n' "${boot_id}" "${normalized_rule}"
+}
+
+record_k3s_policy_rule() {
+    local rule_key
+    local ownership_dir
+
+    rule_key="$(k3s_policy_rule_key "$1")"
+    [ -n "${rule_key}" ] || return 1
+    ownership_dir="${K3S_POLICY_OWNERSHIP_FILE%/*}"
+    [ "${ownership_dir}" != "${K3S_POLICY_OWNERSHIP_FILE}" ] || ownership_dir="."
+    mkdir -p "${ownership_dir}" || return 1
+    touch "${K3S_POLICY_OWNERSHIP_FILE}" || return 1
+    if ! grep -Fxq -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}"; then
+        printf '%s\n' "${rule_key}" >> "${K3S_POLICY_OWNERSHIP_FILE}" || return 1
+    fi
+}
+
+forget_k3s_policy_rule() {
+    local rule_key
+    local ownership_tmp
+
+    [ -f "${K3S_POLICY_OWNERSHIP_FILE}" ] || return 0
+    rule_key="$(k3s_policy_rule_key "$1")"
+    ownership_tmp="$(mktemp "${K3S_POLICY_OWNERSHIP_FILE}.tmp.XXXXXX")" || return 1
+    grep -Fvx -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}" > "${ownership_tmp}" || true
+    mv -f "${ownership_tmp}" "${K3S_POLICY_OWNERSHIP_FILE}"
+}
+
+k3s_policy_rule_has_protocol() {
+    local rule_spec="${1#*:}"
+    [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$) ]]
+}
+
+k3s_policy_rule_is_owned() {
+    local rule_line="$1"
+    local rule_key
+
+    k3s_policy_rule_has_protocol "${rule_line}" || return 1
+    [ -f "${K3S_POLICY_OWNERSHIP_FILE}" ] || return 1
+    rule_key="$(k3s_policy_rule_key "${rule_line}")"
+    grep -Fxq -- "${rule_key}" "${K3S_POLICY_OWNERSHIP_FILE}"
+}
+
 delete_policy_rule_line() {
     local rule_line="$1"
     local priority="${rule_line%%:*}"
@@ -921,12 +1003,11 @@ delete_policy_rule_line() {
 
     read -r -a rule_parts <<< "${rule_spec}"
     [ "${#rule_parts[@]}" -gt 0 ] || return 0
-    ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
-}
-
-k3s_policy_rule_is_owned() {
-    local rule_spec="$1"
-    [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$) ]]
+    if ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1; then
+        forget_k3s_policy_rule "${rule_line}" || true
+        return 0
+    fi
+    return 1
 }
 
 remove_stale_k3s_policy_rules() {
@@ -964,7 +1045,7 @@ remove_stale_k3s_policy_rules() {
             fi
             if [ -n "${rule_source}" ] && \
                [ "${rule_source}" != "${current_source}" ] && \
-               k3s_policy_rule_is_owned "${rule_spec}"; then
+               k3s_policy_rule_is_owned "${rule_line}"; then
                 delete_policy_rule_line "${rule_line}"
                 POLICY_CHANGED="1"
             fi
@@ -1010,6 +1091,7 @@ ensure_k3s_bypass_rules() {
     local rule_spec
     local destination
     local cidr
+    local installed_rule
     local bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
     local -a bypass_cidrs=()
 
@@ -1022,7 +1104,7 @@ ensure_k3s_bypass_rules() {
         [ -n "${rule_line}" ] || continue
         rule_spec="${rule_line#*:}"
         [[ "${rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
-        k3s_policy_rule_is_owned "${rule_spec}" || continue
+        k3s_policy_rule_is_owned "${rule_line}" || continue
         if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
             continue
         fi
@@ -1040,6 +1122,13 @@ ensure_k3s_bypass_rules() {
                 LAST_ERROR="k3s: Failed to add local bypass for ${cidr}"
                 return 1
             fi
+            installed_rule="$(ip rule show pref 32500 2>/dev/null | grep -E \
+                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}" \
+                | head -n 1 || true)"
+            if [ -z "${installed_rule}" ] || ! record_k3s_policy_rule "${installed_rule}"; then
+                LAST_ERROR="k3s: Failed to persist local bypass rule ownership"
+                return 1
+            fi
             changed=1
         fi
     done
@@ -1051,6 +1140,7 @@ ensure_k3s_bypass_rules() {
 ensure_k3s_policy_table_defaults() {
     local changed=0
     local route_line
+    local source_rule
     local -a route_parts
 
     # Seed the fail-closed route before inspecting or replacing any usable
@@ -1073,7 +1163,16 @@ ensure_k3s_policy_table_defaults() {
 
         # An unexpected default could override WireGuard. Remove the active
         # source rule first so the source blackhole protects this repair.
-        ip rule del from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1 || true
+        source_rule="$(ip rule show pref 32764 2>/dev/null | grep -E \
+            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
+            | head -n 1 || true)"
+        if [ -n "${source_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${source_rule}"; then
+                LAST_ERROR="k3s: Refusing to remove unowned source rule while repairing table 51820"
+                return 1
+            fi
+            delete_policy_rule_line "${source_rule}" || true
+        fi
         if ip rule show | grep -qE \
             "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
             LAST_ERROR="k3s: Failed to suspend source routing while repairing table 51820"
@@ -1103,6 +1202,7 @@ ensure_k3s_policy_table_defaults() {
 
 ensure_policy_routing() {
     local changed=0
+    local installed_rule
     POLICY_CHANGED="0"
     
     if [[ "${K3S_MODE}" == "true" ]]; then
@@ -1157,6 +1257,13 @@ ensure_policy_routing() {
             ip rule del from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1 || true
             if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1; then
                 LAST_ERROR="k3s: Failed to add full-outbound policy routing rule"
+                return 1
+            fi
+            installed_rule="$(ip rule show pref 32764 2>/dev/null | grep -E \
+                "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
+                | head -n 1 || true)"
+            if [ -z "${installed_rule}" ] || ! record_k3s_policy_rule "${installed_rule}"; then
+                LAST_ERROR="k3s: Failed to persist full-outbound rule ownership"
                 return 1
             fi
             changed=1
@@ -1531,7 +1638,7 @@ rules_are_synced() {
                 [ -n "${bypass_rule}" ] || continue
                 bypass_rule_spec="${bypass_rule#*:}"
                 [[ "${bypass_rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
-                k3s_policy_rule_is_owned "${bypass_rule_spec}" || continue
+                k3s_policy_rule_has_protocol "${bypass_rule}" || continue
                 if [[ "${bypass_rule_spec}" != *" lookup main"* ]] && [[ "${bypass_rule_spec}" != *" table main"* ]]; then
                     continue
                 fi
@@ -1736,7 +1843,7 @@ cleanup_k3s_policy_rules() {
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
             fi
 
-            k3s_policy_rule_is_owned "${rule_spec}" || continue
+            k3s_policy_rule_is_owned "${rule_line}" || continue
 
             delete_policy_rule_line "${rule_line}"
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)

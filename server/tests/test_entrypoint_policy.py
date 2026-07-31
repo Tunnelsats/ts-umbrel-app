@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -7,12 +8,16 @@ ENTRYPOINT_PATH = os.path.join(REPO_ROOT, "scripts", "entrypoint.sh")
 
 
 def run_bash(script):
-    return subprocess.run(
-        ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env = os.environ.copy()
+        env["K3S_POLICY_OWNERSHIP_FILE"] = os.path.join(temp_dir, "owned-rules")
+        return subprocess.run(
+            ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def test_fallback_blackhole_rule_removes_conflicts_and_is_idempotent():
@@ -524,6 +529,10 @@ ip() {
         printf '%s' "${RULES}" | grep '^32765:' || true
         return 0
     fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${RULES}" | grep '^32764:' || true
+        return 0
+    fi
     if [[ "$*" == "rule show" ]]; then
         printf '%s' "${RULES}"
         return 0
@@ -642,7 +651,11 @@ ip() {
             "blackhole default metric 3"
         return 0
     fi
-    if [[ "$*" == "rule del from 10.42.1.7 table 51820 protocol 200 pref 32764" ]]; then
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${SOURCE_RULE}"
+        return 0
+    fi
+    if [[ "$*" == "rule del from 10.42.1.7 lookup 51820 proto 200 pref 32764" ]]; then
         DELETE_LOG+="$*"$'\n'
         SOURCE_RULE=""
         return 0
@@ -658,9 +671,10 @@ ip() {
     return 1
 }
 
+record_k3s_policy_rule "${SOURCE_RULE}"
 ensure_k3s_policy_table_defaults
 [[ "${K3S_TABLE_CHANGED}" == "1" ]]
-[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 table 51820 protocol 200 pref 32764"* ]]
+[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 lookup 51820 proto 200 pref 32764"* ]]
 [[ "${DELETE_LOG}" == *"route del table 51820 default via 192.0.2.1 dev eth0 metric 1"* ]]
 '''
     )
@@ -800,6 +814,7 @@ ip() {
     if [[ "$*" == "rule show pref 32764" ]]; then
         printf '%s\n' \
             $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200' \
+            $'32764:\tfrom 10.88.0.5 lookup 51820 proto 200' \
             $'32764:\tfrom 10.42.0.9 lookup 51820 proto 201' \
             $'32764:\tfrom 10.42.1.7 lookup 51820' \
             $'32764:\tfrom 10.99.0.5 lookup 51820'
@@ -821,6 +836,9 @@ ip() {
     return 0
 }
 
+record_k3s_policy_rule $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main proto 200'
+record_k3s_policy_rule $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200'
+record_k3s_policy_rule $'32765:\tfrom 10.42.0.9 blackhole proto 200'
 remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${POLICY_CHANGED}" == "1" ]]
 [[ "${DELETED}" == *"from 10.42.0.9 to 10.42.0.0/16 lookup main"* ]]
@@ -830,6 +848,7 @@ remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${DELETED}" != *"from 10.42.0.0/16"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"from 10.88.0.5"* ]]
 '''
     )
 
@@ -886,7 +905,7 @@ def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rule
 source "$1"
 
 K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
-RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+RULES=$'32763:\tfrom 10.88.0.0/16 blackhole proto 200\n32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 DELETED=""
 
 ip() {
@@ -918,6 +937,7 @@ remove_k3s_subnet_quarantine
 [[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
 [[ "${DELETED}" != *"proto 201"* ]]
 [[ "${RULES}" == *"proto 201"* ]]
+[[ "${RULES}" == *"from 10.88.0.0/16 blackhole proto 200"* ]]
 [[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
 '''
     )
@@ -1011,6 +1031,9 @@ wg() {
     return 1
 }
 
+record_k3s_policy_rule $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200'
+record_k3s_policy_rule $'32764:\tfrom 10.42.1.7 lookup 51820 proto 200'
+record_k3s_policy_rule $'32765:\tfrom 10.42.1.7 blackhole proto 200'
 cleanup_dataplane --keep-tunnel
 [[ "${DELETED}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
 [[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]
