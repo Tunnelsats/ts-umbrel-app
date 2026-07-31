@@ -890,17 +890,21 @@ RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 201\n32765:\tfrom 10.42.1.7 bl
 DELETED=""
 
 ip() {
-    if [[ "$*" == "rule show pref 32765" ]]; then
-        printf '%s' "${RULES}"
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}" | grep '^32763:' || true
         return 0
     fi
-    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32765" ]]; then
-        RULES+=$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
         return 0
     fi
     if [[ "$1 $2" == "rule del" ]]; then
         DELETED+="$*"$'\n'
-        RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        RULES="${RULES//$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
         return 0
     fi
     return 1
@@ -915,6 +919,50 @@ remove_k3s_subnet_quarantine
 [[ "${DELETED}" != *"proto 201"* ]]
 [[ "${RULES}" == *"proto 201"* ]]
 [[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_slash_32_quarantine_is_distinct_from_persistent_pod_fallback():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.42.1.7/32"
+RULES=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}" | grep '^32763:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.1.7/32 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.1.7 blackhole proto 200\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'32763:\tfrom 10.42.1.7 blackhole proto 200\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_subnet_quarantine "10.42.1.7"
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.1.7/32" ]]
+[[ "${RULES}" == *"32763:"* ]]
+
+remove_k3s_subnet_quarantine
+[[ "${DELETED}" == *"from 10.42.1.7 blackhole proto 200"* ]]
+[[ "${RULES}" == *"32765:"* ]]
+[[ "${RULES}" != *"32763:"* ]]
 '''
     )
 

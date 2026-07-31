@@ -40,6 +40,9 @@ export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
 # every rule installed by the k3s dataplane. Unlike a file of historical pod
 # IPs, this cannot become stale when Kubernetes recycles an address.
 K3S_RULE_PROTOCOL="200"
+# Keep emergency CIDR quarantine distinct from the persistent per-pod fallback
+# at pref 32765. This matters when a configured pod CIDR is itself a /32.
+K3S_QUARANTINE_RULE_PREF="32763"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -713,16 +716,18 @@ print(max(matches, key=lambda network: network.prefixlen) if matches else "")
     fi
     K3S_QUARANTINE_CIDR="${pod_cidr}"
 
-    escaped_cidr="${pod_cidr//./\\.}"
-    exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-    if ip rule show pref 32765 2>/dev/null | grep -qE "${exact_pattern}"; then
+    # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
+    escaped_cidr="${pod_cidr%/32}"
+    escaped_cidr="${escaped_cidr//./\\.}"
+    exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+    if ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE "${exact_pattern}"; then
         return 0
     fi
-    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref 32765 >/dev/null 2>&1; then
+    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
         LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
         return 1
     fi
-    if ! ip rule show pref 32765 2>/dev/null | grep -qE "${exact_pattern}"; then
+    if ! ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE "${exact_pattern}"; then
         LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
         return 1
     fi
@@ -733,19 +738,30 @@ remove_k3s_subnet_quarantine() {
     local rule_line
     local rule_spec
     local rule_source
+    local quarantine_pref
 
-    while IFS= read -r rule_line; do
-        [ -n "${rule_line}" ] || continue
-        rule_spec="${rule_line#*:}"
-        [[ "${rule_spec}" == *"blackhole"* ]] || continue
-        k3s_policy_rule_is_owned "${rule_spec}" || continue
-        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-        [[ "${rule_source}" == */* ]] || continue
-        [[ "${rule_source}" != */32 ]] || continue
-        delete_policy_rule_line "${rule_line}"
-    done < <(ip rule show pref 32765 2>/dev/null || true)
+    # Also remove pre-upgrade CIDR-wide quarantines from pref 32765. A /32 at
+    # that legacy preference is the persistent per-pod fallback and must stay.
+    for quarantine_pref in "${K3S_QUARANTINE_RULE_PREF}" 32765; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            [[ "${rule_spec}" == *"blackhole"* ]] || continue
+            k3s_policy_rule_is_owned "${rule_spec}" || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${quarantine_pref}" = "32765" ]; then
+                [[ "${rule_source}" == */* ]] || continue
+                [[ "${rule_source}" != */32 ]] || continue
+            else
+                [ -n "${rule_source}" ] || continue
+            fi
+            delete_policy_rule_line "${rule_line}"
+        done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+    done
 
-    if ip rule show pref 32765 2>/dev/null | grep -qE \
+    if ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -qE \
+        "blackhole.*proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)" || \
+       ip rule show pref 32765 2>/dev/null | grep -qE \
         "from[[:space:]]+[^[:space:]]+/([0-9]|[12][0-9]|3[01])[[:space:]]+blackhole.*proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
         LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
         return 1
