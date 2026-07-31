@@ -16,6 +16,8 @@ DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
+KILL_SWITCH_PREF=32762
+WG_HANDSHAKE_MAX_AGE=180
 
 # k3s mode: set K3S_MODE=true to bypass Docker networking and use Kubernetes Services instead.
 # These are explicitly exported so the Python dashboard (launched as a child process below)
@@ -1313,6 +1315,116 @@ get_target_subnet() {
     echo "${subnet}"
 }
 
+ensure_source_blackhole_rule() {
+    local source_prefix="$1"
+    local preference="$2"
+    local error_message="$3"
+    local escaped_source="${source_prefix//./\\.}"
+    local displayed_source="${escaped_source}"
+    local source_pattern
+    local exact_pattern
+    local matching_rules
+    local matching_count
+
+    [[ "${source_prefix}" == */* ]] || displayed_source+="(/32)?"
+    source_pattern="^${preference}:[[:space:]]+from[[:space:]]+${displayed_source}([[:space:]]|$)"
+    exact_pattern="^${preference}:[[:space:]]+from[[:space:]]+${displayed_source}[[:space:]]+blackhole[[:space:]]*$"
+    SOURCE_BLACKHOLE_CHANGED="0"
+
+    matching_rules="$(ip rule show pref "${preference}" 2>/dev/null | grep -E "${source_pattern}" || true)"
+    matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+    if [ "${matching_count}" -eq 1 ] && printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
+        return 0
+    fi
+
+    local rule_line
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        delete_policy_rule_line "${rule_line}" || true
+    done <<< "${matching_rules}"
+
+    if ip rule show pref "${preference}" 2>/dev/null | grep -qE "${source_pattern}"; then
+        LAST_ERROR="${error_message}: failed to remove conflicting pref ${preference} rule"
+        return 1
+    fi
+
+    ip rule add from "${source_prefix}" blackhole pref "${preference}" >/dev/null 2>&1 || true
+    matching_rules="$(ip rule show pref "${preference}" 2>/dev/null | grep -E "${source_pattern}" || true)"
+    matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+    if [ "${matching_count}" -ne 1 ] || ! printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="${error_message}"
+        return 1
+    fi
+
+    SOURCE_BLACKHOLE_CHANGED="1"
+}
+
+ensure_reconcile_kill_switch() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        ensure_source_blackhole_rule \
+            "10.21.21.9" "${KILL_SWITCH_PREF}" \
+            "SecureMode: Failed to install LND reconciliation kill switch" || return 1
+        ensure_source_blackhole_rule \
+            "10.21.21.96" "${KILL_SWITCH_PREF}" \
+            "SecureMode: Failed to install CLN reconciliation kill switch" || return 1
+        return 0
+    fi
+
+    ensure_source_blackhole_rule \
+        "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}" \
+        "Failed to install reconciliation kill switch for ${DOCKER_NETWORK_SUBNET}"
+}
+
+remove_source_blackhole_rule() {
+    local source_prefix="$1"
+    local preference="$2"
+    local escaped_source="${source_prefix//./\\.}"
+    local displayed_source="${escaped_source}"
+    local exact_pattern
+
+    [[ "${source_prefix}" == */* ]] || displayed_source+="(/32)?"
+    exact_pattern="^${preference}:[[:space:]]+from[[:space:]]+${displayed_source}[[:space:]]+blackhole[[:space:]]*$"
+    ip rule del from "${source_prefix}" blackhole pref "${preference}" >/dev/null 2>&1 || true
+    if ip rule show pref "${preference}" 2>/dev/null | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="Failed to release reconciliation kill switch for ${source_prefix}"
+        return 1
+    fi
+}
+
+remove_reconcile_kill_switch() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        [ -n "${DOCKER_TARGET_IP:-}" ] || return 0
+        remove_source_blackhole_rule "${DOCKER_TARGET_IP}" "${KILL_SWITCH_PREF}"
+        return
+    fi
+
+    remove_source_blackhole_rule "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}"
+}
+
+wireguard_handshake_is_fresh() {
+    local latest_handshake
+    local now
+    local age
+
+    latest_handshake="$(wg show "${WG_IFACE}" latest-handshakes 2>/dev/null \
+        | awk 'BEGIN { newest = 0 } $2 > newest { newest = $2 } END { print newest }' || true)"
+    if [[ ! "${latest_handshake}" =~ ^[0-9]+$ ]] || [ "${latest_handshake}" -eq 0 ]; then
+        LAST_ERROR="WireGuard has no completed handshake"
+        return 1
+    fi
+
+    now="$(date +%s)"
+    age=$((now - latest_handshake))
+    if [ "${age}" -lt 0 ] || [ "${age}" -gt "${WG_HANDSHAKE_MAX_AGE}" ]; then
+        LAST_ERROR="WireGuard handshake is stale (${age}s; maximum ${WG_HANDSHAKE_MAX_AGE}s)"
+        return 1
+    fi
+}
+
 ensure_fallback_blackhole_rule() {
     local source_prefix="$1"
     local error_message="$2"
@@ -2028,7 +2140,43 @@ ensure_nat_forward_rules() {
     return 0
 }
 
+fail_closed_policy_prerequisites_are_synced() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+
+    local source_prefix
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        source_prefix="${DOCKER_TARGET_IP}"
+    else
+        source_prefix="${DOCKER_NETWORK_SUBNET}"
+    fi
+
+    local escaped_source="${source_prefix//./\\.}"
+    local displayed_source="${escaped_source}"
+    [[ "${source_prefix}" == */* ]] || displayed_source+="(/32)?"
+    if ! ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null \
+        | grep -qE "^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${displayed_source}[[:space:]]+blackhole[[:space:]]*$"; then
+        log WARN "rules_are_synced: source fallback blackhole FAIL"
+        return 1
+    fi
+
+    local table_routes
+    table_routes="$(ip route show table 51820 2>/dev/null || true)"
+    if ! printf '%s\n' "${table_routes}" \
+        | grep -qE "^default([[:space:]].*)?[[:space:]]dev[[:space:]]+${WG_IFACE}([[:space:]]|$)"; then
+        log WARN "rules_are_synced: WireGuard table default route FAIL"
+        return 1
+    fi
+    if ! printf '%s\n' "${table_routes}" | grep -qE '^blackhole[[:space:]]+default([[:space:]]|$)'; then
+        log WARN "rules_are_synced: policy table blackhole FAIL"
+        return 1
+    fi
+}
+
 rules_are_synced() {
+    if ! fail_closed_policy_prerequisites_are_synced; then
+        return 1
+    fi
+
     # We match the config-defined VPNPort on the tunnel interface to catch these packets.
     local internal_match_port="${FORWARDING_PORT}"
 
@@ -2321,6 +2469,7 @@ cleanup_dataplane() {
             ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
             ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
             if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${cleanup_ip}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
                 ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
             fi
         done
@@ -2335,6 +2484,7 @@ cleanup_dataplane() {
             ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
 
             if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
                 ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
             fi
 
@@ -2390,6 +2540,47 @@ write_reconcile_result() {
     cp -f "${result_path}" "${RECONCILE_RESULT_LEGACY}" || true
 }
 
+fail_reconcile_closed() {
+    local request_id="${1:-}"
+    local failure_error="${LAST_ERROR:-Reconciliation failed}"
+    local pre_cleanup_guard_error=""
+
+    # k3s owns a separate layered isolation and recovery lifecycle. Preserve
+    # that state instead of applying the Docker/Secure Mode cleanup below.
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        RULES_SYNCED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        return 1
+    fi
+
+    # Try to isolate first, but always clear partially staged NAT/FORWARD and
+    # source-routing state even when this attempt fails. The post-cleanup retry
+    # then verifies that the dataplane is left fail-closed.
+    if ! ensure_reconcile_kill_switch; then
+        pre_cleanup_guard_error="${LAST_ERROR}"
+    fi
+
+    cleanup_dataplane "--keep-tunnel"
+
+    if ! ensure_reconcile_kill_switch; then
+        LAST_ERROR="${failure_error}; additionally failed to restore kill switch: ${LAST_ERROR}"
+    elif [ -n "${pre_cleanup_guard_error}" ]; then
+        LAST_ERROR="${failure_error}; pre-cleanup kill switch warning: ${pre_cleanup_guard_error}"
+    else
+        LAST_ERROR="${failure_error}"
+    fi
+
+    RULES_SYNCED="false"
+    write_state
+    if [ -n "${request_id}" ]; then
+        write_reconcile_result "${request_id}" false
+    fi
+    return 1
+}
+
 reconcile_once() {
     local reason="$1"
     local request_id="${2:-}"
@@ -2403,8 +2594,8 @@ reconcile_once() {
 
     log INFO "reconcile_start reason=${reason}"
 
-    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]] && [ ! -S "${DOCKER_SOCK}" ]; then
-        LAST_ERROR="Docker socket unavailable"
+    if ! ensure_reconcile_kill_switch; then
+        LAST_ERROR="${LAST_ERROR:-Failed to install reconciliation kill switch}"
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
@@ -2412,12 +2603,22 @@ reconcile_once() {
         return 1
     fi
 
+    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]] && [ ! -S "${DOCKER_SOCK}" ]; then
+        LAST_ERROR="Docker socket unavailable"
+        fail_reconcile_closed "${request_id}"
+        return 1
+    fi
+
     if ! detect_lightning_container; then
         LAST_ERROR="${LAST_ERROR:-No running LND/CLN container detected}"
-        cleanup_dataplane "--keep-tunnel"
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            cleanup_dataplane "--keep-tunnel"
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+        else
+            fail_reconcile_closed "${request_id}"
         fi
         return 1
     fi
@@ -2467,43 +2668,33 @@ reconcile_once() {
     fi
 
     if ! ensure_docker_network; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
 
     if ! ensure_container_attached; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
 
     if ! resolve_bridge_name; then
         LAST_ERROR="Failed to resolve docker bridge interface"
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
 
     if ! ensure_wg_up; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
+        return 1
+    fi
+
+    if [[ "${K3S_MODE}" != "true" ]] && ! wireguard_handshake_is_fresh; then
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
 
     if ! ensure_policy_routing; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
     policy_changed="${POLICY_CHANGED}"
@@ -2513,10 +2704,7 @@ reconcile_once() {
     fi
 
     if ! ensure_nat_forward_rules; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
+        fail_reconcile_closed "${request_id}"
         return 1
     fi
     nat_changed="${NAT_CHANGED}"
@@ -2525,14 +2713,40 @@ reconcile_once() {
         changed=1
     fi
 
-    if rules_are_synced; then
-        if [[ "${K3S_MODE}" == "true" ]] && ! release_k3s_reconcile_guards; then
-            RULES_SYNCED="false"
-        else
-            RULES_SYNCED="true"
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        if ! rules_are_synced; then
+            LAST_ERROR="Dataplane rules are not fully synced"
+            fail_reconcile_closed "${request_id}"
+            return 1
         fi
-    else
+        if ! release_k3s_reconcile_guards; then
+            RULES_SYNCED="false"
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        RULES_SYNCED="true"
+    elif ! rules_are_synced; then
         LAST_ERROR="Dataplane rules are not fully synced"
+        fail_reconcile_closed "${request_id}"
+        return 1
+    else
+        # The emergency guard remains active while the complete dataplane and
+        # handshake are verified. Only then can target traffic use table 51820.
+        if ! wireguard_handshake_is_fresh; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        if ! remove_reconcile_kill_switch; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        # Defense in depth against route-table drift during activation.
+        if ! rules_are_synced; then
+            LAST_ERROR="Dataplane rules failed verification after kill-switch release"
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        RULES_SYNCED="true"
     fi
 
     write_state
@@ -2570,7 +2784,12 @@ main_loop() {
             if [ -n "${API_PID}" ]; then
                 kill "${API_PID}" >/dev/null 2>&1 || true
             fi
-            cleanup_dataplane
+            if [[ "${K3S_MODE}" == "true" ]]; then
+                cleanup_dataplane
+            else
+                LAST_ERROR="Restart requested; dataplane remains fail-closed"
+                fail_reconcile_closed || true
+            fi
             exit 1
         fi
 
@@ -2613,6 +2832,11 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 trap cleanup SIGTERM SIGINT
+
+if ! ensure_reconcile_kill_switch; then
+    log ERROR "Startup aborted because the Lightning kill switch could not be installed: ${LAST_ERROR}"
+    exit 1
+fi
 
 echo "Starting Tunnelsats v3 (mode: $([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "umbrel"))..."
 log INFO "Starting internal dashboard server on port 9739"
