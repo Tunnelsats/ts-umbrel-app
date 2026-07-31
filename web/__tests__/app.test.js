@@ -103,7 +103,9 @@ describe('UI Routing and Initialization', () => {
                     target_impl: 'lnd',
                     target_container: 'lightning_lnd_1',
                     configs_found: [],
-                    version: 'v3.0.0'
+                    version: 'v3.0.0',
+                    rules_synced: true,
+                    last_error: null
                 }),
                 ok: true
             })
@@ -263,6 +265,36 @@ describe('UI Routing and Initialization', () => {
 
         expect(document.getElementById('statusBadge').textContent).toBe('Connected');
         expect(document.getElementById('txt-routing-status').textContent).toBe('No Nodes Detected');
+    });
+
+    test('fetchStatus reports a fail-closed dataplane error instead of Protected', async () => {
+        const error = 'k3s: Pod co-location required; TunnelSats node=worker-a, LND pod=lightning/lnd-0 node=worker-b';
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    target_impl: 'lnd',
+                    rules_synced: false,
+                    last_error: error
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).toBe('Connected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Dataplane Blocked');
+        expect(document.getElementById('badge-routing').textContent).toBe('Offline');
+        expect(document.getElementById('txt-routing-error').textContent).toBe(error);
+        expect(document.getElementById('txt-routing-error').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('dashboard-banner-title').textContent).toBe('Hybrid Lightning Connectivity');
+        expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(true);
     });
 
     test('fetchStatus adjusts UI for secure_mode: true', async () => {

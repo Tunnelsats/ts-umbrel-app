@@ -27,17 +27,17 @@ spec:
       # straight to the Lightning pod IP and the reply path must traverse THIS
       # host's fwmark/WireGuard rules. That only holds if tunnelsats runs on the
       # SAME node as the LND/CLN pod. On a single-node cluster this is automatic.
-      # On a multi-node cluster you MUST pin them together — uncomment the
-      # podAffinity below and set the labelSelector to match your Lightning pod
-      # (the same labels as LND_K8S_POD_SELECTOR / CLN_K8S_POD_SELECTOR). See
-      # k3s/README.md → "Multi-node clusters".
-      # affinity:
-      #   podAffinity:
-      #     requiredDuringSchedulingIgnoredDuringExecution:
-      #       - labelSelector:
-      #           matchLabels:
-      #             app: lnd
-      #         topologyKey: kubernetes.io/hostname
+      # Required affinity makes that privacy invariant the safe default. This
+      # selector matches the default LND_K8S_POD_SELECTOR below. If using CLN,
+      # or a Lightning pod in another namespace, update BOTH this affinity term
+      # and the corresponding *_K8S_* environment variables. See k3s/README.md.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: lnd
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: tunnelsats
           # Pin to an immutable tag before production use:
@@ -55,6 +55,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Runtime backstop for the required affinity above. The dataplane
+            # refuses to activate unless the selected Lightning pod reports
+            # this same node name.
+            - name: TUNNELSATS_K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             # Set to your LND Service name (used for routing + config injection)
             - name: LND_K8S_SERVICE
               value: "lnd"

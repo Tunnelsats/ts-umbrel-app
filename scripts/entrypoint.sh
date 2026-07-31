@@ -31,6 +31,7 @@ export LND_K8S_NAMESPACE="${LND_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
 export CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
 export LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
 export CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
+export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -239,10 +240,59 @@ resolve_svc_ip() {
     return 1
 }
 
+resolve_k3s_target_pod() {
+    local impl="$1"
+    local namespace="$2"
+    local selector="$3"
+    local encoded_selector pod_list pod
+    local pod_name pod_ip pod_node
+
+    encoded_selector=$(urlencode "${selector}")
+    if ! pod_list=$(k8s_api "/api/v1/namespaces/${namespace}/pods?labelSelector=${encoded_selector}"); then
+        LAST_ERROR="k3s: Failed to query ${impl^^} pods (namespace=${namespace}, selector=${selector})"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    if ! pod=$(printf '%s' "${pod_list}" | jq -ce \
+        '[.items[]? | select(.status.phase == "Running")] | first // empty' 2>/dev/null); then
+        LAST_ERROR="k3s: No Running ${impl^^} pod found (namespace=${namespace}, selector=${selector})"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    pod_name=$(printf '%s' "${pod}" | jq -r '.metadata.name // empty')
+    pod_ip=$(printf '%s' "${pod}" | jq -r '.status.podIP // empty')
+    pod_node=$(printf '%s' "${pod}" | jq -r '.spec.nodeName // empty')
+
+    if [ -z "${pod_name}" ] || [ -z "${pod_ip}" ] || [ -z "${pod_node}" ]; then
+        LAST_ERROR="k3s: ${impl^^} pod metadata incomplete (namespace=${namespace}, pod=${pod_name:-unknown}, pod_ip=${pod_ip:-missing}, node=${pod_node:-missing})"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    if [ -z "${TUNNELSATS_K8S_NODE_NAME}" ]; then
+        LAST_ERROR="k3s: TunnelSats node name is unavailable; refusing to activate dataplane"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    if [ "${pod_node}" != "${TUNNELSATS_K8S_NODE_NAME}" ]; then
+        LAST_ERROR="k3s: Pod co-location required; TunnelSats node=${TUNNELSATS_K8S_NODE_NAME}, ${impl^^} pod=${namespace}/${pod_name} node=${pod_node}"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    DOCKER_TARGET_IP="${pod_ip}"
+    log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
+    return 0
+}
+
 detect_k3s_target() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    DOCKER_TARGET_IP=""
 
     local svc_name svc_fqdn svc_ip
 
@@ -257,17 +307,7 @@ detect_k3s_target() {
             log INFO "k3s: Detected LND service ${svc_fqdn} at ClusterIP ${svc_ip}"
             # Use the actual pod IP for DNAT and policy routing to avoid asymmetric
             # routing caused by kube-proxy's double NAT through the ClusterIP.
-            local pod_ip encoded_selector
-            encoded_selector=$(urlencode "${LND_K8S_POD_SELECTOR}")
-            pod_ip=$(k8s_api "/api/v1/namespaces/${LND_K8S_NAMESPACE}/pods?labelSelector=${encoded_selector}" 2>/dev/null \
-                | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
-                | head -n1 || true)
-            if [ -n "${pod_ip}" ]; then
-                DOCKER_TARGET_IP="${pod_ip}"
-                log INFO "k3s: Using LND pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
-            else
-                LAST_ERROR="k3s: Could not resolve LND pod IP"
-                log ERROR "k3s: Could not resolve LND pod IP, direct routing is required for WireGuard CONNMARK"
+            if ! resolve_k3s_target_pod "lnd" "${LND_K8S_NAMESPACE}" "${LND_K8S_POD_SELECTOR}"; then
                 return 1
             fi
             return 0
@@ -284,17 +324,7 @@ detect_k3s_target() {
             TARGET_CONTAINER_NAME="${svc_name}"
             LN_TARGET_PORT="9736"
             log INFO "k3s: Detected CLN service ${svc_fqdn} at ClusterIP ${svc_ip}"
-            local pod_ip encoded_selector
-            encoded_selector=$(urlencode "${CLN_K8S_POD_SELECTOR}")
-            pod_ip=$(k8s_api "/api/v1/namespaces/${CLN_K8S_NAMESPACE}/pods?labelSelector=${encoded_selector}" 2>/dev/null \
-                | jq -r '.items[] | select(.status.phase == "Running") | .status.podIP' 2>/dev/null \
-                | head -n1 || true)
-            if [ -n "${pod_ip}" ]; then
-                DOCKER_TARGET_IP="${pod_ip}"
-                log INFO "k3s: Using CLN pod IP ${pod_ip} for direct routing (bypasses kube-proxy)"
-            else
-                LAST_ERROR="k3s: Could not resolve CLN pod IP"
-                log ERROR "k3s: Could not resolve CLN pod IP, direct routing is required for WireGuard CONNMARK"
+            if ! resolve_k3s_target_pod "cln" "${CLN_K8S_NAMESPACE}" "${CLN_K8S_POD_SELECTOR}"; then
                 return 1
             fi
             return 0

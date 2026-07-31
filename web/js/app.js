@@ -82,6 +82,7 @@ async function mockFetch(url) {
                 expires_at: '2027-03-10T12:00:00Z',
                 forwarding_port: '35825',
                 last_reconcile_at: new Date().toISOString(),
+                rules_synced: true,
                 last_error: null
             }
         };
@@ -724,13 +725,16 @@ async function fetchStatus() {
         const clnDetected = data.cln_detected === true;
         const lndRouting = data.lnd_routing_active === true;
         const clnRouting = data.cln_routing_active === true;
+        const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
+            ? data.last_error.trim()
+            : '';
 
         const hasNode = lndDetected || clnDetected;
         const routingActive = lndRouting || clnRouting;
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (vpnActive && hasNode && routingActive) {
+        if (vpnActive && hasNode && routingActive && !dataplaneError) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
@@ -849,6 +853,7 @@ async function fetchStatus() {
         // Node Routing explicit UI states
         const badgeRouting = document.getElementById('badge-routing');
         const txtRoutingStatus = document.getElementById('txt-routing-status');
+        const txtRoutingError = document.getElementById('txt-routing-error');
         const routingActions = document.getElementById('routing-actions');
         const btnDashEnable = document.getElementById('btn-dash-enable-routing');
         const btnDashDisable = document.getElementById('btn-dash-disable-routing');
@@ -859,9 +864,16 @@ async function fetchStatus() {
         }
         if (btnDashEnable) btnDashEnable.classList.add('hidden');
         if (btnDashDisable) btnDashDisable.classList.add('hidden');
+        if (txtRoutingError) {
+            txtRoutingError.textContent = dataplaneError;
+            txtRoutingError.classList.toggle('hidden', !dataplaneError);
+        }
 
         let badgeState;
-        if (!hasNode) {
+        if (dataplaneError) {
+            badgeState = BADGE_STATES.offline;
+            if (txtRoutingStatus) txtRoutingStatus.textContent = "Dataplane Blocked";
+        } else if (!hasNode) {
             badgeState = BADGE_STATES.notFound;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
         } else if (!vpnActive) {
@@ -887,7 +899,7 @@ async function fetchStatus() {
         const bannerText = document.getElementById('dashboard-banner-text');
         const bannerDots = document.getElementById('dashboard-banner-dots');
 
-        if (vpnActive) {
+        if (vpnActive && !dataplaneError) {
             if (bannerTitle) bannerTitle.textContent = "Network Layer Active";
             if (bannerText) bannerText.textContent = "Secure WireGuard tunneling provided by Tunnelsats. Your Lightning P2P traffic is now encrypted and routed through our private global exit nodes.";
             if (bannerDots) {
@@ -1927,7 +1939,12 @@ async function pollUntilConnected(options = {}) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const status = await fetchStatus();
-        if (status && status.vpn_active === true) {
+        if (
+            status
+            && status.vpn_active === true
+            && status.rules_synced !== false
+            && !status.last_error
+        ) {
             if (onConnected) onConnected(status);
             return true;
         }
