@@ -749,6 +749,28 @@ remove_k3s_subnet_quarantine() {
     return 0
 }
 
+release_k3s_reconcile_guards() {
+    if ! remove_k3s_subnet_quarantine; then
+        return 1
+    fi
+
+    # Validate the effective dataplane again without the CIDR-wide fallback.
+    # If anything changed during release, restore durable quarantine before
+    # returning the failed reconciliation.
+    if ! rules_are_synced; then
+        if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
+            LAST_ERROR="k3s: Dataplane validation failed after releasing emergency quarantine; quarantine restored"
+        else
+            LAST_ERROR="k3s: Dataplane validation failed after releasing emergency quarantine; restore failed"
+        fi
+        return 1
+    fi
+
+    # Remove every tagged guard, including stale IPs from failed prior
+    # reconciliations, only after the unguarded routing policy is verified.
+    remove_k3s_egress_guards
+}
+
 get_target_subnet() {
     local target_ip="${1:-${DOCKER_TARGET_IP:-}}"
     if [ -z "${target_ip}" ]; then
@@ -1933,7 +1955,7 @@ reconcile_once() {
     fi
 
     if rules_are_synced; then
-        if [ "${k3s_guard_active}" = true ] && ! remove_k3s_egress_guards; then
+        if [[ "${K3S_MODE}" == "true" ]] && ! release_k3s_reconcile_guards; then
             RULES_SYNCED="false"
         else
             RULES_SYNCED="true"

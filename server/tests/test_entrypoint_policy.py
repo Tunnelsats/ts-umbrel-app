@@ -324,6 +324,73 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_guard_release_clears_stale_guards_after_revalidation():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+SUBNET_REMOVE_COUNT=0
+GUARD_REMOVE_COUNT=0
+SYNC_COUNT=0
+
+remove_k3s_subnet_quarantine() {
+    SUBNET_REMOVE_COUNT=$((SUBNET_REMOVE_COUNT + 1))
+    return 0
+}
+rules_are_synced() {
+    SYNC_COUNT=$((SYNC_COUNT + 1))
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+
+release_k3s_reconcile_guards
+[[ "${SUBNET_REMOVE_COUNT}" == "1" ]]
+[[ "${SYNC_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_guard_release_restores_quarantine_when_revalidation_fails():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+RESTORE_COUNT=0
+GUARD_REMOVE_COUNT=0
+
+remove_k3s_subnet_quarantine() { return 0; }
+rules_are_synced() { return 1; }
+ensure_k3s_subnet_quarantine() {
+    [[ "$1" == "10.42.1.7" ]]
+    RESTORE_COUNT=$((RESTORE_COUNT + 1))
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+
+if release_k3s_reconcile_guards; then
+    exit 1
+fi
+[[ "${RESTORE_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "0" ]]
+[[ "${LAST_ERROR}" == *"failed after releasing emergency quarantine"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_target_resolution_fails_when_node_metadata_is_unavailable():
     result = run_bash(
         r'''
