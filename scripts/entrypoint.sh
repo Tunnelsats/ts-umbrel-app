@@ -36,10 +36,73 @@ export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 # These are the default k3s pod/service CIDRs; custom clusters must override
 # this with their exact internal CIDRs.
 export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
-# Numeric routing-protocol tag used as a kernel-persisted ownership marker for
-# every rule installed by the k3s dataplane. Unlike a file of historical pod
-# IPs, this cannot become stale when Kubernetes recycles an address.
-K3S_RULE_PROTOCOL="200"
+# Persist an instance-specific routing-protocol tag. The kernel exposes only an
+# 8-bit protocol field on policy rules, so selecting an unused value is also
+# part of avoiding ownership collisions with other host-network components.
+K3S_RULE_PROTOCOL_FILE="${K3S_RULE_PROTOCOL_FILE:-/data/tunnelsats-k3s-rule-protocol}"
+initialize_k3s_rule_protocol() {
+    local configured_protocol="${K3S_RULE_PROTOCOL:-}"
+    local current_boot=""
+    local protocol_dir
+    local protocol_tmp
+    local saved_boot=""
+    local saved_protocol=""
+    local used_protocols
+
+    if [ -z "${configured_protocol}" ] && [ "${K3S_MODE}" = "true" ]; then
+        current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+        [ -n "${current_boot}" ] || return 1
+        if [ -f "${K3S_RULE_PROTOCOL_FILE}" ]; then
+            read -r saved_boot saved_protocol < "${K3S_RULE_PROTOCOL_FILE}" || true
+            if [ "${saved_boot}" = "${current_boot}" ]; then
+                configured_protocol="${saved_protocol}"
+            fi
+        fi
+    fi
+
+    if [ -z "${configured_protocol}" ] && [ "${K3S_MODE}" = "true" ]; then
+        used_protocols="$(ip -N rule show 2>/dev/null | awk '
+            { for (i = 1; i < NF; i++) if ($i == "proto" || $i == "protocol") print $(i + 1) }
+        ' | paste -sd, - || true)"
+        configured_protocol="$(USED_PROTOCOLS="${used_protocols}" python3 -c '
+import os
+import secrets
+
+used = {
+    int(value)
+    for value in os.environ.get("USED_PROTOCOLS", "").split(",")
+    if value.isdigit()
+}
+candidates = [value for value in range(100, 253) if value not in used]
+if not candidates:
+    raise SystemExit("no unused routing protocol is available")
+print(secrets.choice(candidates))
+' 2>/dev/null)" || return 1
+
+        protocol_dir="${K3S_RULE_PROTOCOL_FILE%/*}"
+        [ "${protocol_dir}" != "${K3S_RULE_PROTOCOL_FILE}" ] || protocol_dir="."
+        mkdir -p "${protocol_dir}" || return 1
+        protocol_tmp="$(mktemp "${K3S_RULE_PROTOCOL_FILE}.tmp.XXXXXX")" || return 1
+        if ! printf '%s %s\n' "${current_boot}" "${configured_protocol}" > "${protocol_tmp}" || \
+           ! chmod 600 "${protocol_tmp}" || \
+           ! mv -f "${protocol_tmp}" "${K3S_RULE_PROTOCOL_FILE}"; then
+            rm -f "${protocol_tmp}"
+            return 1
+        fi
+    fi
+
+    # Docker/Secure Mode do not use protocol ownership, but retaining the old
+    # value there keeps those code paths deterministic without touching /data.
+    configured_protocol="${configured_protocol:-200}"
+    [[ "${configured_protocol}" =~ ^[0-9]+$ ]] || return 1
+    [ "${configured_protocol}" -ge 1 ] && [ "${configured_protocol}" -le 252 ] || return 1
+    K3S_RULE_PROTOCOL="${configured_protocol}"
+}
+
+if ! initialize_k3s_rule_protocol; then
+    printf '%s\n' "Failed to initialize the k3s policy-rule ownership protocol" >&2
+    exit 1
+fi
 # Keep emergency CIDR quarantine distinct from the persistent per-pod fallback
 # at pref 32765. This matters when a configured pod CIDR is itself a /32.
 K3S_QUARANTINE_RULE_PREF="32763"

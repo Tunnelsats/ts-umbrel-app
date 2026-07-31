@@ -11,6 +11,7 @@ def run_bash(script):
     with tempfile.TemporaryDirectory() as temp_dir:
         env = os.environ.copy()
         env["K3S_POLICY_OWNERSHIP_FILE"] = os.path.join(temp_dir, "owned-rules")
+        env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
             check=False,
@@ -500,6 +501,37 @@ if normalize_k3s_bypass_cidrs; then
     exit 1
 fi
 [[ "${LAST_ERROR}" == *"must not contain 0.0.0.0/0"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rule_protocol_is_persisted_and_avoids_shared_host_tags():
+    result = run_bash(
+        r'''
+source "$1"
+
+unset K3S_RULE_PROTOCOL
+K3S_MODE="true"
+K3S_RULE_PROTOCOL_FILE="${K3S_POLICY_OWNERSHIP_FILE}.protocol"
+ip() {
+    if [[ "$*" == "-N rule show" ]]; then
+        printf '%s\n' $'32764:\tfrom 10.88.0.5 lookup 51820 proto 200'
+        return 0
+    fi
+    return 1
+}
+
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" =~ ^[0-9]+$ ]]
+[[ "${K3S_RULE_PROTOCOL}" != "200" ]]
+[[ "$(awk '{print $2}' "${K3S_RULE_PROTOCOL_FILE}")" == "${K3S_RULE_PROTOCOL}" ]]
+
+FIRST_PROTOCOL="${K3S_RULE_PROTOCOL}"
+unset K3S_RULE_PROTOCOL
+initialize_k3s_rule_protocol
+[[ "${K3S_RULE_PROTOCOL}" == "${FIRST_PROTOCOL}" ]]
 '''
     )
 
