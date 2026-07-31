@@ -381,6 +381,57 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_total_isolation_failure_retries_until_target_is_contained():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DELETE_COUNT=0
+GUARD_COUNT=0
+SLEEP_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    K3S_TARGET_POD_NAMESPACE="lightning"
+    K3S_TARGET_POD_NAME="lnd-0"
+    return 0
+}
+ensure_k3s_egress_guard() {
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    [[ "${GUARD_COUNT}" -ge 3 ]]
+}
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_k3s_subnet_quarantine() { return 1; }
+ensure_k3s_emergency_network_policy() { return 1; }
+delete_k3s_target_pod() {
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 1
+}
+sleep() { SLEEP_COUNT=$((SLEEP_COUNT + 1)); }
+write_state() { STATE_ERROR="${LAST_ERROR}"; }
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${GUARD_COUNT}" == "3" ]]
+[[ "${DELETE_COUNT}" == "2" ]]
+[[ "${SLEEP_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"egress guard installed after retry"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_emergency_network_policy_covers_replacement_pods_until_release():
     result = run_bash(
         r'''
@@ -652,11 +703,41 @@ initialize_k3s_rule_protocol
 [[ "${K3S_RULE_PROTOCOL}" =~ ^[0-9]+$ ]]
 [[ "${K3S_RULE_PROTOCOL}" != "200" ]]
 [[ "$(awk '{print $2}' "${K3S_RULE_PROTOCOL_FILE}")" == "${K3S_RULE_PROTOCOL}" ]]
+[[ "$(awk '{print $3}' "${K3S_RULE_PROTOCOL_FILE}")" == "${K3S_RULE_PREF_BASE}" ]]
+[[ "${K3S_RULE_PREF_BASE}" != "32500" ]]
+[[ "${K3S_BLACKHOLE_RULE_PREF}" -lt 32766 ]]
 
 FIRST_PROTOCOL="${K3S_RULE_PROTOCOL}"
+FIRST_PREF_BASE="${K3S_RULE_PREF_BASE}"
 unset K3S_RULE_PROTOCOL
+unset K3S_RULE_PREF_BASE
 initialize_k3s_rule_protocol
 [[ "${K3S_RULE_PROTOCOL}" == "${FIRST_PROTOCOL}" ]]
+[[ "${K3S_RULE_PREF_BASE}" == "${FIRST_PREF_BASE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rule_ownership_requires_boot_scoped_protocol_and_preference():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_RULE_PROTOCOL="200"
+K3S_BYPASS_RULE_PREF="32500"
+K3S_QUARANTINE_RULE_PREF="32763"
+K3S_TUNNEL_RULE_PREF="32764"
+K3S_BLACKHOLE_RULE_PREF="32765"
+
+k3s_policy_rule_is_owned $'32764:\tfrom 10.42.1.7 lookup 51820 proto 200'
+if k3s_policy_rule_is_owned $'32766:\tfrom 10.42.9.9 lookup 999 proto 200'; then
+    exit 1
+fi
+if k3s_policy_rule_is_owned $'32764:\tfrom 10.42.9.9 lookup 999 proto 201'; then
+    exit 1
+fi
 '''
     )
 
