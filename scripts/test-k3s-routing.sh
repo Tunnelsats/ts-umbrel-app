@@ -103,10 +103,10 @@ ip netns exec "${ROUTER_NS}" env \
         WG_IFACE="tunnelsatsv2"
         ensure_policy_routing
 
-        external_route="$(ip route get 198.51.100.2 from 10.42.1.7)"
+        external_route="$(ip route get 198.51.100.2 from 10.42.1.7 iif pod-r)"
         [[ "${external_route}" == *"dev tunnelsatsv2"* ]]
 
-        local_route="$(ip route get 10.42.1.1 from 10.42.1.7)"
+        local_route="$(ip route get 10.42.1.1 from 10.42.1.7 iif pod-r)"
         [[ "${local_route}" == *"dev pod-r"* ]]
     '
 
@@ -130,7 +130,7 @@ fi
 
 kill_route="$(
     ip netns exec "${ROUTER_NS}" \
-        ip route get 198.51.100.2 from 10.42.1.7 2>&1 || true
+        ip route get 198.51.100.2 from 10.42.1.7 iif pod-r 2>&1 || true
 )"
 if [[ "${kill_route}" == *"dev clear0"* ]]; then
     echo "FAIL: kill-switch route fell through to ordinary egress" >&2
