@@ -469,6 +469,45 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_deleted_target_waits_for_replacement_wide_isolation():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_NAME="lnd-0"
+DELETE_COUNT=0
+GUARD_COUNT=0
+QUARANTINE_COUNT=0
+
+delete_k3s_target_pod() {
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 0
+}
+ensure_k3s_egress_guard() {
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    return 0
+}
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_subnet_quarantine() {
+    QUARANTINE_COUNT=$((QUARANTINE_COUNT + 1))
+    [[ "${QUARANTINE_COUNT}" -ge 2 ]]
+}
+ensure_k3s_emergency_network_policy() { return 1; }
+write_state() { :; }
+
+wait_for_k3s_emergency_isolation "initial isolation failure"
+[[ "${DELETE_COUNT}" == "1" ]]
+[[ "${GUARD_COUNT}" == "0" ]]
+[[ "${QUARANTINE_COUNT}" == "2" ]]
+[[ "${LAST_ERROR}" == *"pod CIDR quarantined after retry 2"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_emergency_network_policy_covers_replacement_pods_until_release():
     result = run_bash(
         r'''
@@ -1305,7 +1344,7 @@ remove_k3s_subnet_quarantine
     assert result.returncode == 0, result.stderr
 
 
-def test_k3s_recovery_removes_owned_legacy_quarantine_with_random_preferences():
+def test_k3s_recovery_preserves_ambiguous_legacy_quarantine():
     result = run_bash(
         r'''
 source "$1"
@@ -1344,14 +1383,19 @@ clear_k3s_legacy_rule_protocol() {
     CLEARED=1
 }
 
-remove_k3s_subnet_quarantine
-[[ "${DELETED}" == *"from 10.42.0.0/16 blackhole proto 199 pref 32765"* ]]
+if remove_k3s_subnet_quarantine; then
+    exit 1
+fi
+[[ "${DELETED}" != *"from 10.42.0.0/16 blackhole proto 199 pref 32765"* ]]
 [[ "${DELETED}" != *"proto 198"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
+[[ "${RULES}" == *"proto 199"* ]]
 [[ "${RULES}" == *"proto 198"* ]]
 [[ "${RULES}" == *"from 10.42.1.7 blackhole proto 200"* ]]
-[[ "${CLEARED}" == "1" ]]
-[[ -z "${K3S_LEGACY_RULE_PROTOCOL}" ]]
+[[ "${CLEARED}" == "0" ]]
+[[ "${K3S_LEGACY_RULE_PROTOCOL}" == "199" ]]
+[[ "${LAST_ERROR}" == *"ambiguous legacy pod-CIDR quarantine"* ]]
+[[ "${LAST_ERROR}" == *"manual cleanup required"* ]]
 '''
     )
 

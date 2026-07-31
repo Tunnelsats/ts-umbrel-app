@@ -354,6 +354,7 @@ delete_k3s_target_pod() {
 wait_for_k3s_emergency_isolation() {
     local isolation_error="$1"
     local attempt=0
+    local target_deleted=false
 
     # Returning control to the ordinary reconcile loop while every isolation
     # mechanism is absent would leave the Lightning workload on clear-net
@@ -364,20 +365,22 @@ wait_for_k3s_emergency_isolation() {
         # Stop the unsafe workload before spending time re-establishing slower
         # API and dataplane controls. When every mechanism is unavailable, do
         # not add a backoff window in which clear egress can continue.
-        if delete_k3s_target_pod; then
-            LAST_ERROR="${isolation_error}; target pod deleted after retry ${attempt}"
-            return 0
+        if [ "${target_deleted}" = false ] && delete_k3s_target_pod; then
+            target_deleted=true
+            LAST_ERROR="${isolation_error}; target pod deleted; waiting for replacement-wide isolation"
         fi
-        if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
-            LAST_ERROR="${isolation_error}; egress guard installed after retry ${attempt}"
-            return 0
-        fi
-        if ensure_fallback_blackhole_rule \
-            "${DOCKER_TARGET_IP}" \
-            "k3s: Failed to protect selected pod during isolation retry" \
-            "${K3S_RULE_PROTOCOL}"; then
-            LAST_ERROR="${isolation_error}; source blackhole installed after retry ${attempt}"
-            return 0
+        if [ "${target_deleted}" = false ]; then
+            if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
+                LAST_ERROR="${isolation_error}; egress guard installed after retry ${attempt}"
+                return 0
+            fi
+            if ensure_fallback_blackhole_rule \
+                "${DOCKER_TARGET_IP}" \
+                "k3s: Failed to protect selected pod during isolation retry" \
+                "${K3S_RULE_PROTOCOL}"; then
+                LAST_ERROR="${isolation_error}; source blackhole installed after retry ${attempt}"
+                return 0
+            fi
         fi
         if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
             LAST_ERROR="${isolation_error}; pod CIDR quarantined after retry ${attempt}"
@@ -1202,56 +1205,53 @@ remove_k3s_subnet_quarantine() {
     local quarantine_pref
     local owned_quarantine
 
-    # Also remove pre-upgrade CIDR-wide quarantines from pref 32765. A /32 at
-    # that legacy preference is the persistent per-pod fallback and must stay.
-    for quarantine_pref in "${K3S_QUARANTINE_RULE_PREF}" 32765; do
-        while IFS= read -r rule_line; do
-            [ -n "${rule_line}" ] || continue
-            rule_spec="${rule_line#*:}"
-            [[ "${rule_spec}" == *"blackhole"* ]] || continue
-            owned_quarantine=false
-            if k3s_policy_rule_is_owned "${rule_line}"; then
-                owned_quarantine=true
-            elif [ "${quarantine_pref}" = "32765" ] && \
-                 [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] && \
-                 [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]]; then
-                owned_quarantine=true
-            fi
-            [ "${owned_quarantine}" = true ] || continue
-            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-            if [ "${quarantine_pref}" = "32765" ]; then
-                [[ "${rule_source}" == */* ]] || continue
-                [[ "${rule_source}" != */32 ]] || continue
-            else
-                [ -n "${rule_source}" ] || continue
-            fi
-            delete_policy_rule_line "${rule_line}"
-        done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
-    done
+    quarantine_pref="${K3S_QUARANTINE_RULE_PREF}"
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        owned_quarantine=false
+        if k3s_policy_rule_is_owned "${rule_line}"; then
+            owned_quarantine=true
+        fi
+        [ "${owned_quarantine}" = true ] || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        delete_policy_rule_line "${rule_line}"
+    done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
 
-    for quarantine_pref in "${K3S_QUARANTINE_RULE_PREF}" 32765; do
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        owned_quarantine=false
+        if k3s_policy_rule_is_owned "${rule_line}"; then
+            owned_quarantine=true
+        fi
+        [ "${owned_quarantine}" = true ] || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
+        return 1
+    done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    # A protocol-only pre-upgrade marker cannot distinguish our old rule from
+    # a foreign rule created with the same protocol and preference. Preserve
+    # ambiguous CIDR-wide rules and keep recovery visibly blocked rather than
+    # deleting routing state we cannot prove we own.
+    if [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ]; then
         while IFS= read -r rule_line; do
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             [[ "${rule_spec}" == *"blackhole"* ]] || continue
-            owned_quarantine=false
-            if k3s_policy_rule_is_owned "${rule_line}"; then
-                owned_quarantine=true
-            elif [ "${quarantine_pref}" = "32765" ] && \
-                 [ -n "${K3S_LEGACY_RULE_PROTOCOL}" ] && \
-                 [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]]; then
-                owned_quarantine=true
-            fi
-            [ "${owned_quarantine}" = true ] || continue
+            [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_LEGACY_RULE_PROTOCOL}([[:space:]]|$) ]] || continue
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-            if [ "${quarantine_pref}" = "32765" ]; then
-                [[ "${rule_source}" == */* ]] || continue
-                [[ "${rule_source}" != */32 ]] || continue
-            fi
-            LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
+            [[ "${rule_source}" == */* ]] || continue
+            [[ "${rule_source}" != */32 ]] || continue
+            LAST_ERROR="k3s: Preserving ambiguous legacy pod-CIDR quarantine at pref 32765; manual cleanup required"
             return 1
-        done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
-    done
+        done < <(ip rule show pref 32765 2>/dev/null || true)
+    fi
     if ! clear_k3s_legacy_rule_protocol; then
         LAST_ERROR="k3s: Failed to retire legacy quarantine ownership marker"
         return 1
