@@ -1227,7 +1227,16 @@ release_k3s_reconcile_guards() {
     if ! remove_k3s_egress_guards; then
         return 1
     fi
-    remove_k3s_emergency_network_policy
+    # A successfully recovered dataplane must not be left behind an emergency
+    # deny policy merely because the API was temporarily unavailable. Keep the
+    # workload fail-closed while retrying, and only report recovery once the
+    # policy is gone (or a foreign replacement has been safely preserved).
+    while ! remove_k3s_emergency_network_policy; do
+        LAST_ERROR="k3s: Dataplane recovered; retrying emergency NetworkPolicy cleanup"
+        write_state
+        sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
+    done
+    return 0
 }
 
 get_target_subnet() {

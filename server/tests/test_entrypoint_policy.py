@@ -539,6 +539,36 @@ release_k3s_reconcile_guards
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_guard_release_retries_emergency_policy_cleanup():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+POLICY_REMOVE_COUNT=0
+SLEEP_COUNT=0
+STATE_ERROR=""
+
+remove_k3s_subnet_quarantine() { return 0; }
+rules_are_synced() { return 0; }
+remove_k3s_egress_guards() { return 0; }
+remove_k3s_emergency_network_policy() {
+    POLICY_REMOVE_COUNT=$((POLICY_REMOVE_COUNT + 1))
+    [[ "${POLICY_REMOVE_COUNT}" -ge 2 ]]
+}
+write_state() { STATE_ERROR="${LAST_ERROR}"; }
+sleep() { SLEEP_COUNT=$((SLEEP_COUNT + 1)); }
+
+release_k3s_reconcile_guards
+[[ "${POLICY_REMOVE_COUNT}" == "2" ]]
+[[ "${SLEEP_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"retrying emergency NetworkPolicy cleanup"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_guard_release_restores_quarantine_when_revalidation_fails():
     result = run_bash(
         r'''
