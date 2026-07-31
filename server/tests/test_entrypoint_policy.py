@@ -182,7 +182,6 @@ source "$1"
 K3S_MODE="true"
 SECURE_MODE="false"
 BLACKHOLE_COUNT=0
-OWNERSHIP_COUNT=0
 POLICY_COUNT=0
 STATE_ERROR=""
 STATE_SYNCED=""
@@ -200,11 +199,6 @@ ensure_fallback_blackhole_rule() {
     [[ "$1" == "10.42.1.7" ]]
     BLACKHOLE_COUNT=$((BLACKHOLE_COUNT + 1))
     BLACKHOLE_CHANGED="1"
-    return 0
-}
-record_k3s_policy_source() {
-    [[ "$1" == "10.42.1.7" ]]
-    OWNERSHIP_COUNT=$((OWNERSHIP_COUNT + 1))
     return 0
 }
 ensure_wg_up() {
@@ -225,7 +219,6 @@ if reconcile_once "test"; then
 fi
 
 [[ "${BLACKHOLE_COUNT}" == "1" ]]
-[[ "${OWNERSHIP_COUNT}" == "1" ]]
 [[ "${POLICY_COUNT}" == "0" ]]
 [[ "${STATE_SYNCED}" == "false" ]]
 [[ "${STATE_ERROR}" == "Failed to bring up WireGuard" ]]
@@ -375,17 +368,17 @@ ip() {
     if [[ "$1 $2" == "rule add" ]]; then
         ADD_COUNT=$((ADD_COUNT + 1))
         case "$*" in
-            "rule add from 10.42.1.7 to 10.42.0.0/16 table main pref 32500")
-                RULES+=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n'
+            "rule add from 10.42.1.7 to 10.42.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n'
                 ;;
-            "rule add from 10.42.1.7 to 10.43.0.0/16 table main pref 32500")
-                RULES+=$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n'
+            "rule add from 10.42.1.7 to 10.43.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n'
                 ;;
-            "rule add from 10.42.1.7 table 51820 pref 32764")
-                RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820\n'
+            "rule add from 10.42.1.7 table 51820 protocol 200 pref 32764")
+                RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
                 ;;
-            "rule add from 10.42.1.7 blackhole pref 32765")
-                RULES+=$'32765:\tfrom 10.42.1.7 blackhole\n'
+            "rule add from 10.42.1.7 blackhole protocol 200 pref 32765")
+                RULES+=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
                 ;;
             *)
                 return 1
@@ -446,8 +439,8 @@ ip() {
         printf '%s' "${RULES}"
         return 0
     fi
-    if [[ "$*" == "rule add from 10.42.1.7 blackhole pref 32765" ]]; then
-        RULES=$'32765:\tfrom 10.42.1.7 blackhole\n'
+    if [[ "$*" == "rule add from 10.42.1.7 blackhole protocol 200 pref 32765" ]]; then
+        RULES=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
         return 0
     fi
     return 0
@@ -471,7 +464,7 @@ source "$1"
 
 DOCKER_TARGET_IP="10.42.1.7"
 WG_IFACE="tunnelsatsv2"
-SOURCE_RULE=$'32764:\tfrom 10.42.1.7 lookup 51820\n'
+SOURCE_RULE=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
 DELETE_LOG=""
 
 ip() {
@@ -486,7 +479,7 @@ ip() {
             "blackhole default metric 3"
         return 0
     fi
-    if [[ "$*" == "rule del from 10.42.1.7 table 51820 pref 32764" ]]; then
+    if [[ "$*" == "rule del from 10.42.1.7 table 51820 protocol 200 pref 32764" ]]; then
         DELETE_LOG+="$*"$'\n'
         SOURCE_RULE=""
         return 0
@@ -504,7 +497,7 @@ ip() {
 
 ensure_k3s_policy_table_defaults
 [[ "${K3S_TABLE_CHANGED}" == "1" ]]
-[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 table 51820 pref 32764"* ]]
+[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 table 51820 protocol 200 pref 32764"* ]]
 [[ "${DELETE_LOG}" == *"route del table 51820 default via 192.0.2.1 dev eth0 metric 1"* ]]
 '''
     )
@@ -524,7 +517,7 @@ K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
 FORWARDING_PORT="19735"
 LN_TARGET_PORT="9735"
 WG_IFACE="tunnelsatsv2"
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 EXTRA_DEFAULT=0
 
 ip() {
@@ -564,17 +557,17 @@ if rules_are_synced; then
 fi
 EXTRA_DEFAULT=0
 
-RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820\n'/}"
+RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'/}"
 if rules_are_synced; then
     exit 1
 fi
 
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n30000:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n30000:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 if rules_are_synced; then
     exit 1
 fi
 
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 192.168.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.7 to 192.168.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
 if rules_are_synced; then
     exit 1
 fi
@@ -631,27 +624,28 @@ source "$1"
 
 POLICY_CHANGED="0"
 DELETED=""
-K3S_POLICY_SOURCES_FILE="$(mktemp)"
-printf '%s\n' "10.42.0.9" "10.42.1.7" > "${K3S_POLICY_SOURCES_FILE}"
 
 ip() {
     if [[ "$*" == "rule show pref 32500" ]]; then
         printf '%s\n' \
-            $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main' \
+            $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main proto 200' \
+            $'32500:\tfrom 10.42.0.9 to 10.99.0.0/16 lookup main proto 201' \
             $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main' \
             $'32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main'
         return 0
     fi
     if [[ "$*" == "rule show pref 32764" ]]; then
         printf '%s\n' \
-            $'32764:\tfrom 10.42.0.9 lookup 51820' \
+            $'32764:\tfrom 10.42.0.9 lookup 51820 proto 200' \
+            $'32764:\tfrom 10.42.0.9 lookup 51820 proto 201' \
             $'32764:\tfrom 10.42.1.7 lookup 51820' \
             $'32764:\tfrom 10.99.0.5 lookup 51820'
         return 0
     fi
     if [[ "$*" == "rule show pref 32765" ]]; then
         printf '%s\n' \
-            $'32765:\tfrom 10.42.0.9 blackhole' \
+            $'32765:\tfrom 10.42.0.9 blackhole proto 200' \
+            $'32765:\tfrom 10.42.0.9 blackhole proto 201' \
             $'32765:\tfrom 10.42.1.7 blackhole' \
             $'32765:\tfrom 10.99.0.5 blackhole'
         return 0
@@ -668,9 +662,9 @@ remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${DELETED}" == *"from 10.42.0.9 to 10.42.0.0/16 lookup main"* ]]
 [[ "${DELETED}" == *"from 10.42.0.9 lookup 51820"* ]]
 [[ "${DELETED}" == *"from 10.42.0.9 blackhole"* ]]
+[[ "${DELETED}" != *"proto 201"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
-rm -f "${K3S_POLICY_SOURCES_FILE}"
 '''
     )
 
@@ -687,9 +681,7 @@ SECURE_MODE="false"
 DOCKER_TARGET_IP="10.42.1.7"
 DELETED=""
 FLUSHED=0
-K3S_POLICY_SOURCES_FILE="$(mktemp)"
-printf '%s\n' "10.42.1.7" > "${K3S_POLICY_SOURCES_FILE}"
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32764:\tfrom 10.99.0.5 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n32765:\tfrom 10.99.0.5 blackhole\n'
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main proto 201\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32764:\tfrom 10.99.0.5 lookup 51820 proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n32765:\tfrom 10.99.0.5 blackhole proto 201\n'
 
 remove_tagged_iptables_rules() {
     return 0
@@ -733,7 +725,6 @@ cleanup_dataplane
 [[ "${DELETED}" == *"from 10.42.1.7 blackhole"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
 [[ "${FLUSHED}" == "1" ]]
-rm -f "${K3S_POLICY_SOURCES_FILE}"
 '''
     )
 

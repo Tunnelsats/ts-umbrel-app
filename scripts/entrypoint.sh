@@ -36,7 +36,10 @@ export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 # These are the default k3s pod/service CIDRs; custom clusters must override
 # this with their exact internal CIDRs.
 export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
-K3S_POLICY_SOURCES_FILE="${K3S_POLICY_SOURCES_FILE:-/data/tunnelsats-k3s-policy-sources}"
+# Numeric routing-protocol tag used as a kernel-persisted ownership marker for
+# every rule installed by the k3s dataplane. Unlike a file of historical pod
+# IPs, this cannot become stale when Kubernetes recycles an address.
+K3S_RULE_PROTOCOL="200"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -673,15 +676,22 @@ get_target_subnet() {
 ensure_fallback_blackhole_rule() {
     local source_prefix="$1"
     local error_message="$2"
+    local rule_protocol="${3:-}"
     local escaped_source="${source_prefix//./\\.}"
     local source_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}([[:space:]]|$)"
-    local exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}[[:space:]]+blackhole[[:space:]]*$"
+    local exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_source}[[:space:]]+blackhole"
     local matching_rules
     local matching_count
 
     BLACKHOLE_CHANGED="0"
     matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
     matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
+
+    if [ -n "${rule_protocol}" ]; then
+        exact_pattern="${exact_pattern}([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${rule_protocol}[[:space:]]*$"
+    else
+        exact_pattern="${exact_pattern}[[:space:]]*$"
+    fi
 
     if [ "${matching_count}" -eq 1 ] && printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
         return 0
@@ -695,6 +705,11 @@ ensure_fallback_blackhole_rule() {
         rule_spec="${rule_line#*:}"
         read -r -a rule_parts <<< "${rule_spec}"
         [ "${#rule_parts[@]}" -gt 0 ] || continue
+        if [ -n "${rule_protocol}" ] && \
+           ! [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${rule_protocol}([[:space:]]|$) ]]; then
+            LAST_ERROR="${error_message}: pref 32765 is occupied by an unowned rule"
+            return 1
+        fi
         ip rule del "${rule_parts[@]}" pref 32765 >/dev/null 2>&1 || true
     done <<< "${matching_rules}"
 
@@ -703,7 +718,11 @@ ensure_fallback_blackhole_rule() {
         return 1
     fi
 
-    ip rule add from "${source_prefix}" blackhole pref 32765 >/dev/null 2>&1 || true
+    if [ -n "${rule_protocol}" ]; then
+        ip rule add from "${source_prefix}" blackhole protocol "${rule_protocol}" pref 32765 >/dev/null 2>&1 || true
+    else
+        ip rule add from "${source_prefix}" blackhole pref 32765 >/dev/null 2>&1 || true
+    fi
     matching_rules="$(ip rule show pref 32765 2>/dev/null | grep -E "${source_pattern}" || true)"
     matching_count="$(printf '%s\n' "${matching_rules}" | sed '/^$/d' | wc -l)"
     if [ "${matching_count}" -ne 1 ] || ! printf '%s\n' "${matching_rules}" | grep -qE "${exact_pattern}"; then
@@ -767,28 +786,9 @@ delete_policy_rule_line() {
     ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
 }
 
-record_k3s_policy_source() {
-    local source_ip="$1"
-    local source_dir="${K3S_POLICY_SOURCES_FILE%/*}"
-
-    [ -n "${source_ip}" ] || return 1
-    mkdir -p "${source_dir}"
-    touch "${K3S_POLICY_SOURCES_FILE}"
-    chmod 600 "${K3S_POLICY_SOURCES_FILE}"
-    if ! grep -Fxq -- "${source_ip}" "${K3S_POLICY_SOURCES_FILE}"; then
-        printf '%s\n' "${source_ip}" >> "${K3S_POLICY_SOURCES_FILE}"
-    fi
-}
-
-k3s_policy_source_is_owned() {
-    local source_ip="$1"
-
-    [ -n "${source_ip}" ] || return 1
-    if [ "${source_ip}" = "${DOCKER_TARGET_IP:-}" ]; then
-        return 0
-    fi
-    [ -f "${K3S_POLICY_SOURCES_FILE}" ] \
-        && grep -Fxq -- "${source_ip}" "${K3S_POLICY_SOURCES_FILE}"
+k3s_policy_rule_is_owned() {
+    local rule_spec="$1"
+    [[ "${rule_spec}" =~ (^|[[:space:]])proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$) ]]
 }
 
 remove_stale_k3s_policy_rules() {
@@ -821,7 +821,7 @@ remove_stale_k3s_policy_rules() {
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
             if [ -n "${rule_source}" ] && \
                [ "${rule_source}" != "${current_source}" ] && \
-               k3s_policy_source_is_owned "${rule_source}"; then
+               k3s_policy_rule_is_owned "${rule_spec}"; then
                 delete_policy_rule_line "${rule_line}"
                 POLICY_CHANGED="1"
             fi
@@ -861,6 +861,7 @@ ensure_k3s_bypass_rules() {
         [ -n "${rule_line}" ] || continue
         rule_spec="${rule_line#*:}"
         [[ "${rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+        k3s_policy_rule_is_owned "${rule_spec}" || continue
         if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
             continue
         fi
@@ -873,8 +874,8 @@ ensure_k3s_bypass_rules() {
 
     for cidr in "${bypass_cidrs[@]}"; do
         if ! ip rule show pref 32500 2>/dev/null | grep -qE \
-            "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
-            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${cidr}" table main pref 32500 >/dev/null 2>&1; then
+            "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}"; then
+            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${cidr}" table main protocol "${K3S_RULE_PROTOCOL}" pref 32500 >/dev/null 2>&1; then
                 LAST_ERROR="k3s: Failed to add local bypass for ${cidr}"
                 return 1
             fi
@@ -911,9 +912,9 @@ ensure_k3s_policy_table_defaults() {
 
         # An unexpected default could override WireGuard. Remove the active
         # source rule first so the source blackhole protects this repair.
-        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        ip rule del from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1 || true
         if ip rule show | grep -qE \
-            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
             LAST_ERROR="k3s: Failed to suspend source routing while repairing table 51820"
             return 1
         fi
@@ -948,7 +949,8 @@ ensure_policy_routing() {
         # blocks the pod before the normal main-table rule can leak traffic.
         if ! ensure_fallback_blackhole_rule \
             "${DOCKER_TARGET_IP}" \
-            "k3s: Failed to add fallback blackhole rule"; then
+            "k3s: Failed to add fallback blackhole rule" \
+            "${K3S_RULE_PROTOCOL}"; then
             return 1
         fi
         if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
@@ -988,9 +990,9 @@ ensure_policy_routing() {
         # Route every remaining packet from the selected Lightning pod through
         # WireGuard. This covers both replies and pod-initiated connections.
         if ! ip rule show | grep -qE \
-            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
-            ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
-            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
+            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
+            ip rule del from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 protocol "${K3S_RULE_PROTOCOL}" pref 32764 >/dev/null 2>&1; then
                 LAST_ERROR="k3s: Failed to add full-outbound policy routing rule"
                 return 1
             fi
@@ -1351,7 +1353,7 @@ rules_are_synced() {
             fi
             for bypass_cidr in "${expected_bypass_cidrs[@]}"; do
                 if ! ip rule show pref 32500 2>/dev/null | grep -qE \
-                    "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
+                    "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}"; then
                     log WARN "rules_are_synced: k3s bypass ${bypass_cidr} FAIL"
                     return 1
                 fi
@@ -1366,6 +1368,7 @@ rules_are_synced() {
                 [ -n "${bypass_rule}" ] || continue
                 bypass_rule_spec="${bypass_rule#*:}"
                 [[ "${bypass_rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+                k3s_policy_rule_is_owned "${bypass_rule_spec}" || continue
                 if [[ "${bypass_rule_spec}" != *" lookup main"* ]] && [[ "${bypass_rule_spec}" != *" table main"* ]]; then
                     continue
                 fi
@@ -1382,13 +1385,13 @@ rules_are_synced() {
             fi
 
             if ! ip rule show | grep -qE \
-                "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+                "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
                 log WARN "rules_are_synced: k3s full-outbound rule FAIL"
                 return 1
             fi
 
             if ! ip rule show pref 32765 2>/dev/null | grep -qE \
-                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
+                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
                 log WARN "rules_are_synced: k3s source blackhole FAIL"
                 return 1
             fi
@@ -1572,7 +1575,7 @@ cleanup_k3s_policy_rules() {
 
             if [ "${legacy_fwmark}" = false ]; then
                 rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-                k3s_policy_source_is_owned "${rule_source}" || continue
+                k3s_policy_rule_is_owned "${rule_spec}" || continue
             fi
 
             delete_policy_rule_line "${rule_line}"
@@ -1715,7 +1718,8 @@ reconcile_once() {
         # failure cannot fall through to the node's ordinary egress route.
         if ! ensure_fallback_blackhole_rule \
             "${DOCKER_TARGET_IP}" \
-            "k3s: Failed to protect selected pod before WireGuard startup"; then
+            "k3s: Failed to protect selected pod before WireGuard startup" \
+            "${K3S_RULE_PROTOCOL}"; then
             write_state
             if [ -n "${request_id}" ]; then
                 write_reconcile_result "${request_id}" false
@@ -1724,9 +1728,6 @@ reconcile_once() {
         fi
         if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
             changed=1
-        fi
-        if ! record_k3s_policy_source "${DOCKER_TARGET_IP}"; then
-            log WARN "k3s: Failed to persist policy ownership for ${DOCKER_TARGET_IP}"
         fi
     fi
 
