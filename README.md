@@ -61,13 +61,14 @@ You can manually force either behavior by editing `tunnelsats/docker-compose.yml
 
 Besides Umbrel, TunnelSats can run in `k3s` mode alongside an LND/CLN node in a
 Kubernetes cluster. The manifests live in [`k3s/`](k3s/) and are applied with
-`kubectl apply -k k3s/ --namespace=<your-namespace>`.
+`kubectl apply -k k3s/` after setting the namespace in
+`k3s/kustomization.yaml`.
 
 See **[`k3s/README.md`](k3s/README.md)** for the full guide. Pay special
-attention to the **namespace/RBAC** and **PVC mount path** configuration — those
-are the two settings most likely to trip up a first install (a misconfigured
-namespace causes `403 Forbidden` pod lookups; a wrong mount path causes
-*"Failed to modify LND config"*).
+attention to the **namespace/RBAC**, **cluster bypass CIDRs**, and **PVC mount
+path** configuration. k3s mode routes both inbound replies and new outbound
+Lightning connections through WireGuard, with a blackhole fallback when the
+tunnel route is unavailable.
 
 ---
 
@@ -90,6 +91,14 @@ When `SECURE_MODE=false` and the Docker socket is explicitly mounted, the runtim
    - Policy routing table `51820` with blackhole fallback.
    - Inbound DNAT from WireGuard forwarding port to `10.9.9.9:9735` (or dynamically selected ports).
    - FORWARD rules between the WireGuard interface and the docker bridge.
+
+### k3s dataplane
+
+The k3s deployment selects a ready, co-located Lightning pod and routes every
+non-cluster destination sourced by that pod through policy table `51820`.
+Explicit `K3S_BYPASS_CIDRS` entries keep required pod, service, Bitcoin, and Tor
+traffic on the cluster's main table. A source blackhole prevents ordinary
+egress fallback if WireGuard routing disappears.
 
 ---
 

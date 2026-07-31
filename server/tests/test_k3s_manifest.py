@@ -38,3 +38,4 @@ def test_k3s_manifest_exposes_tunnelsats_node_name_to_runtime():
         "fieldPath": "spec.nodeName"
     }
     assert env["LND_K8S_POD_SELECTOR"]["value"] == "app=lnd"
+    assert env["K3S_BYPASS_CIDRS"]["value"] == "10.42.0.0/16,10.43.0.0/16"

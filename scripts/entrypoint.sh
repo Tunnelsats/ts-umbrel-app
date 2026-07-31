@@ -32,6 +32,10 @@ export CLN_K8S_NAMESPACE="${CLN_K8S_NAMESPACE:-${K8S_NAMESPACE}}"
 export LND_K8S_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
 export CLN_K8S_POD_SELECTOR="${CLN_K8S_POD_SELECTOR:-app=cln}"
 export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
+# Destinations that must remain inside the cluster instead of using WireGuard.
+# These are the default k3s pod/service CIDRs; custom clusters must override
+# this with their exact internal CIDRs.
+export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
 K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
@@ -48,6 +52,7 @@ RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
+K3S_BYPASS_CIDRS_NORMALIZED=""
 
 log() {
     local level="$1"
@@ -98,6 +103,7 @@ write_state() {
         --arg docker_network_name "${DOCKER_NETWORK_NAME}" \
         --arg docker_network_subnet "${DOCKER_NETWORK_SUBNET}" \
         --arg bridge_name "${BRIDGE_NAME:-}" \
+        --arg k3s_bypass_cidrs "${K3S_BYPASS_CIDRS_NORMALIZED:-}" \
         --arg last_reconcile_at "$(date -u +%FT%TZ)" \
         '{
             dataplane_mode: $dataplane_mode,
@@ -106,6 +112,12 @@ write_state() {
             target_impl: $target_impl,
             forwarding_port: $forwarding_port,
             rules_synced: $rules_synced,
+            k3s_bypass_cidrs: (
+                if $k3s_bypass_cidrs == ""
+                then []
+                else ($k3s_bypass_cidrs | split(","))
+                end
+            ),
             last_reconcile_at: $last_reconcile_at,
             last_error: (if $last_error == "" then null else $last_error end),
             docker_network: {
@@ -619,11 +631,13 @@ remove_tagged_iptables_rules() {
     local chain="$2"
     local marker="$3"
 
+    IPTABLES_RULES_REMOVED="0"
     local rules
     rules=$(iptables -t "${table}" -S "${chain}" | grep "${marker}" || true)
     if [ -z "${rules}" ]; then
         return 0
     fi
+    IPTABLES_RULES_REMOVED="1"
 
     while IFS= read -r rule; do
         [ -z "${rule}" ] && continue
@@ -700,48 +714,262 @@ ensure_fallback_blackhole_rule() {
     return 0
 }
 
+normalize_k3s_bypass_cidrs() {
+    local normalized
+    local validation_error
+
+    if ! normalized="$(
+        K3S_BYPASS_CIDRS_VALUE="${K3S_BYPASS_CIDRS}" python3 -c '
+import ipaddress
+import os
+
+raw = os.environ.get("K3S_BYPASS_CIDRS_VALUE", "")
+networks = set()
+for value in raw.split(","):
+    value = value.strip()
+    if not value:
+        continue
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if network.version != 4:
+        raise SystemExit(f"{value!r} is not an IPv4 CIDR")
+    if network.prefixlen == 0:
+        raise SystemExit("must not contain 0.0.0.0/0")
+    networks.add(network)
+
+print(",".join(str(network) for network in sorted(
+    networks,
+    key=lambda item: (int(item.network_address), item.prefixlen),
+)))
+' 2>&1
+    )"; then
+        validation_error="${normalized//$'\n'/ }"
+        LAST_ERROR="Invalid K3S_BYPASS_CIDRS: ${validation_error}"
+        K3S_BYPASS_CIDRS_NORMALIZED=""
+        return 1
+    fi
+
+    K3S_BYPASS_CIDRS_NORMALIZED="${normalized}"
+    return 0
+}
+
+delete_policy_rule_line() {
+    local rule_line="$1"
+    local priority="${rule_line%%:*}"
+    local rule_spec="${rule_line#*:}"
+    local -a rule_parts
+
+    read -r -a rule_parts <<< "${rule_spec}"
+    [ "${#rule_parts[@]}" -gt 0 ] || return 0
+    ip rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
+}
+
+remove_stale_k3s_policy_rules() {
+    local current_source="$1"
+    local pref
+    local rule_line
+    local rule_spec
+    local rule_source
+
+    for pref in 32500 32764 32765; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+
+            case "${pref}:${rule_spec}" in
+                32500:*" lookup main"*|32500:*" table main"*|\
+                32764:*" lookup 51820"*|32764:*" table 51820"*|\
+                32765:*" blackhole"*)
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+
+            # The old k3s implementation used this mark at pref 32764.
+            if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
+                continue
+            fi
+
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ -n "${rule_source}" ] && [ "${rule_source}" != "${current_source}" ]; then
+                delete_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip rule show pref "${pref}" 2>/dev/null || true)
+    done
+}
+
+remove_legacy_k3s_fwmark_rules() {
+    local changed=0
+    local legacy_rule
+
+    while IFS= read -r legacy_rule; do
+        [ -n "${legacy_rule}" ] || continue
+        delete_policy_rule_line "${legacy_rule}"
+        changed=1
+    done < <(ip rule show 2>/dev/null | grep -Ei \
+        "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820" || true)
+
+    K3S_LEGACY_POLICY_CHANGED="${changed}"
+}
+
+ensure_k3s_bypass_rules() {
+    local changed=0
+    local rule_line
+    local rule_spec
+    local destination
+    local cidr
+    local bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
+    local -a bypass_cidrs=()
+
+    if [ -n "${K3S_BYPASS_CIDRS_NORMALIZED}" ]; then
+        IFS=',' read -r -a bypass_cidrs <<< "${K3S_BYPASS_CIDRS_NORMALIZED}"
+    fi
+
+    # Remove bypasses that are no longer configured.
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+        if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+            continue
+        fi
+        destination="$(awk '{for (i = 1; i <= NF; i++) if ($i == "to") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        if [ -z "${destination}" ] || [[ "${bypass_csv}" != *",${destination},"* ]]; then
+            delete_policy_rule_line "${rule_line}"
+            changed=1
+        fi
+    done < <(ip rule show pref 32500 2>/dev/null || true)
+
+    for cidr in "${bypass_cidrs[@]}"; do
+        if ! ip rule show pref 32500 2>/dev/null | grep -qE \
+            "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
+            if ! ip rule add from "${DOCKER_TARGET_IP}" to "${cidr}" table main pref 32500 >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to add local bypass for ${cidr}"
+                return 1
+            fi
+            changed=1
+        fi
+    done
+
+    K3S_BYPASS_CHANGED="${changed}"
+    return 0
+}
+
+ensure_k3s_policy_table_defaults() {
+    local changed=0
+    local route_line
+    local -a route_parts
+
+    # Seed the fail-closed route before inspecting or replacing any usable
+    # default in the policy table.
+    if ! ip route replace blackhole default metric 3 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to set policy table blackhole"
+        return 1
+    fi
+
+    while IFS= read -r route_line; do
+        [ -n "${route_line}" ] || continue
+        if [[ "${route_line}" == blackhole\ default* ]] && [[ "${route_line}" == *"metric 3"* ]]; then
+            continue
+        fi
+        if [[ "${route_line}" == default* ]] && \
+           [[ "${route_line}" == *"dev ${WG_IFACE}"* ]] && \
+           [[ "${route_line}" == *"metric 2"* ]]; then
+            continue
+        fi
+
+        # An unexpected default could override WireGuard. Remove the active
+        # source rule first so the source blackhole protects this repair.
+        ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+        if ip rule show | grep -qE \
+            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+            LAST_ERROR="k3s: Failed to suspend source routing while repairing table 51820"
+            return 1
+        fi
+
+        read -r -a route_parts <<< "${route_line}"
+        if ! ip route del table 51820 "${route_parts[@]}" >/dev/null 2>&1; then
+            LAST_ERROR="k3s: Failed to remove unexpected table 51820 default"
+            return 1
+        fi
+        changed=1
+    done < <(
+        ip route show table 51820 2>/dev/null \
+            | grep -E "^(blackhole[[:space:]]+)?default([[:space:]]|$)" \
+            || true
+    )
+
+    if ! ip route replace default dev "${WG_IFACE}" metric 2 table 51820 >/dev/null 2>&1; then
+        LAST_ERROR="k3s: Failed to set WireGuard policy table default"
+        return 1
+    fi
+
+    K3S_TABLE_CHANGED="${changed}"
+    return 0
+}
+
 ensure_policy_routing() {
     local changed=0
     POLICY_CHANGED="0"
     
     if [[ "${K3S_MODE}" == "true" ]]; then
-        # k3s mode: fwmark-based routing so ONLY replies to WireGuard-originated connections
-        # are sent back through the tunnel. IP-source rules (from <pod-ip> lookup 51820) route
-        # ALL traffic from the LND pod through WG, which breaks thunderhub/lndg and causes
-        # chacha20poly1305 auth failures on LND's own outbound P2P connections.
-        # The mangle rules added in ensure_nat_forward_rules() mark incoming WG packets in
-        # FORWARD (after DNAT) and save the mark to conntrack; CONNMARK --restore-mark in
-        # PREROUTING then tags reply packets from LND so they take the fwmark routing path.
+        # Install the fallback first. Even malformed bypass configuration then
+        # blocks the pod before the normal main-table rule can leak traffic.
+        if ! ensure_fallback_blackhole_rule \
+            "${DOCKER_TARGET_IP}" \
+            "k3s: Failed to add fallback blackhole rule"; then
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
 
-        # Remove ALL IP-source rules at our reserved priorities — not just for the
-        # current pod IP. LND pod IP can change across restarts; if the old tunnelsats
-        # pod was SIGKILL'd, cleanup never ran and stale rules for the old IP remain.
-        #
-        # Only touch rules that look like ours — i.e. rules that route to table 51820 or
-        # table main. This avoids accidentally wiping unrelated rules that some other
-        # operator on the host might have parked at these prefs.
-        local _pref _line _spec
-        for _pref in 32500 32763 32764; do
-            while IFS= read -r _line; do
-                [[ -z "${_line}" ]] && continue
-                _spec=$(echo "${_line}" | sed 's/^[0-9]*:[[:space:]]*//')
-                [[ -z "${_spec}" ]] && continue
-                local -a _spec_arr
-                read -r -a _spec_arr <<< "${_spec}"
-                ip rule del "${_spec_arr[@]}" >/dev/null 2>&1 || true
-            done < <(ip rule show pref "${_pref}" 2>/dev/null | grep -v "fwmark" | grep -E "lookup (51820|main)" || true)
-        done
+        # Retire reply-only routing before inspecting table 51820. The source
+        # blackhole above keeps traffic fail-closed during migration.
+        remove_legacy_k3s_fwmark_rules
+        if [ "${K3S_LEGACY_POLICY_CHANGED}" = "1" ]; then
+            changed=1
+        fi
 
-        # Single fwmark rule: only packets carrying fwmark 51820 go through table 51820.
-        if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*lookup 51820"; then
-            if ! ip rule add fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1; then
-                if ! ip rule show pref 32764 | grep -q "fwmark"; then
-                    LAST_ERROR="k3s: Failed to add fwmark policy routing rule"
-                    return 1
-                fi
+        if ! normalize_k3s_bypass_cidrs; then
+            return 1
+        fi
+
+        if ! ensure_k3s_policy_table_defaults; then
+            return 1
+        fi
+        if [ "${K3S_TABLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        remove_stale_k3s_policy_rules "${DOCKER_TARGET_IP}"
+        if [ "${POLICY_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        if ! ensure_k3s_bypass_rules; then
+            return 1
+        fi
+        if [ "${K3S_BYPASS_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
+        # Route every remaining packet from the selected Lightning pod through
+        # WireGuard. This covers both replies and pod-initiated connections.
+        if ! ip rule show | grep -qE \
+            "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+            ip rule del from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if ! ip rule add from "${DOCKER_TARGET_IP}" table 51820 pref 32764 >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to add full-outbound policy routing rule"
+                return 1
             fi
             changed=1
         fi
+
     elif [[ "${SECURE_MODE}" == "true" ]]; then
         # Secure Mode: Direct IP policy routing
         # 1. Discover target's bridge network subnet dynamically
@@ -967,32 +1195,46 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        # Mangle rules for conntrack fwmark routing.
-        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK restore rule"
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            # Source routing supersedes the old reply-only CONNMARK design.
+            # Remove all tagged remnants during migration.
+            local legacy_mangle_removed=0
             remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                LAST_ERROR="Failed to add CONNMARK restore-mark rule"
-                return 1
-            fi
-            changed=1
-        fi
-
-        # Remove legacy wg-mark rule (MARK --set-mark) if it exists from a previous deployment.
-        remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log INFO "Syncing mangle CONNMARK set-mark rule"
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
             remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                LAST_ERROR="Failed to add CONNMARK set-mark rule"
-                return 1
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
+            if [ "${legacy_mangle_removed}" = "1" ]; then
+                changed=1
             fi
-            changed=1
+        else
+            # Secure Mode still uses conntrack marks for reply routing.
+            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+                log INFO "Syncing mangle CONNMARK restore rule"
+                remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+                if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                    -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
+                    LAST_ERROR="Failed to add CONNMARK restore-mark rule"
+                    return 1
+                fi
+                changed=1
+            fi
+
+            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+
+            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+                log INFO "Syncing mangle CONNMARK set-mark rule"
+                remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+                if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                    -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
+                    LAST_ERROR="Failed to add CONNMARK set-mark rule"
+                    return 1
+                fi
+                changed=1
+            fi
         fi
     else
         # Docker mode: bridge-interface FORWARD rules.
@@ -1070,26 +1312,102 @@ rules_are_synced() {
                 return 1
             fi
         else
-            # 1. fwmark policy routing rule
-            if ! ip rule show | grep -qE "fwmark 0x[cC][aA]6[cC].*(lookup|table)[[:space:]]+51820"; then
-                log WARN "rules_are_synced: k3s fwmark rule FAIL"
+            if ! normalize_k3s_bypass_cidrs; then
+                log WARN "rules_are_synced: ${LAST_ERROR}"
+                return 1
+            fi
+
+            local bypass_cidr
+            local -a expected_bypass_cidrs=()
+            if [ -n "${K3S_BYPASS_CIDRS_NORMALIZED}" ]; then
+                IFS=',' read -r -a expected_bypass_cidrs <<< "${K3S_BYPASS_CIDRS_NORMALIZED}"
+            fi
+            for bypass_cidr in "${expected_bypass_cidrs[@]}"; do
+                if ! ip rule show pref 32500 2>/dev/null | grep -qE \
+                    "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main"; then
+                    log WARN "rules_are_synced: k3s bypass ${bypass_cidr} FAIL"
+                    return 1
+                fi
+            done
+
+            local actual_bypass_count=0
+            local bypass_rule
+            local bypass_rule_spec
+            local actual_destination
+            local expected_bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
+            while IFS= read -r bypass_rule; do
+                [ -n "${bypass_rule}" ] || continue
+                bypass_rule_spec="${bypass_rule#*:}"
+                [[ "${bypass_rule_spec}" == *"from ${DOCKER_TARGET_IP} "* ]] || continue
+                if [[ "${bypass_rule_spec}" != *" lookup main"* ]] && [[ "${bypass_rule_spec}" != *" table main"* ]]; then
+                    continue
+                fi
+                actual_destination="$(awk '{for (i = 1; i <= NF; i++) if ($i == "to") {print $(i + 1); exit}}' <<< "${bypass_rule_spec}")"
+                if [ -z "${actual_destination}" ] || [[ "${expected_bypass_csv}" != *",${actual_destination},"* ]]; then
+                    log WARN "rules_are_synced: unexpected k3s bypass ${actual_destination:-missing}"
+                    return 1
+                fi
+                actual_bypass_count=$((actual_bypass_count + 1))
+            done < <(ip rule show pref 32500 2>/dev/null || true)
+            if [ "${actual_bypass_count}" -ne "${#expected_bypass_cidrs[@]}" ]; then
+                log WARN "rules_are_synced: k3s bypass count FAIL"
+                return 1
+            fi
+
+            if ! ip rule show | grep -qE \
+                "^32764:[[:space:]]+from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+(lookup|table)[[:space:]]+51820[[:space:]]*$"; then
+                log WARN "rules_are_synced: k3s full-outbound rule FAIL"
+                return 1
+            fi
+
+            if ! ip rule show pref 32765 2>/dev/null | grep -qE \
+                "from[[:space:]]+${DOCKER_TARGET_IP//./\\.}[[:space:]]+blackhole[[:space:]]*$"; then
+                log WARN "rules_are_synced: k3s source blackhole FAIL"
+                return 1
+            fi
+
+            if ip rule show | grep -qiE \
+                "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820"; then
+                log WARN "rules_are_synced: legacy k3s fwmark rule remains"
+                return 1
+            fi
+
+            local table_51820
+            table_51820="$(ip route show table 51820 2>/dev/null || true)"
+            if ! grep -qE \
+                "^default([[:space:]].*)dev[[:space:]]+${WG_IFACE}([[:space:]].*)metric[[:space:]]+2([[:space:]]|$)" \
+                <<< "${table_51820}"; then
+                log WARN "rules_are_synced: k3s WireGuard table default FAIL"
+                return 1
+            fi
+            if ! grep -qE \
+                "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+3([[:space:]]|$)" \
+                <<< "${table_51820}"; then
+                log WARN "rules_are_synced: k3s table blackhole FAIL"
+                return 1
+            fi
+            local default_route_count
+            default_route_count="$(
+                grep -cE "^(blackhole[[:space:]]+)?default([[:space:]]|$)" <<< "${table_51820}" || true
+            )"
+            if [ "${default_route_count}" -ne 2 ]; then
+                log WARN "rules_are_synced: unexpected k3s policy table default"
                 return 1
             fi
         fi
 
-        # Both K3S_MODE and SECURE_MODE use conntrack mangle rules
-        # 1b. mangle CONNMARK restore rule
-        if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
-            return 1
-        fi
+        if [[ "${SECURE_MODE}" == "true" ]]; then
+            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
+                log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
+                return 1
+            fi
 
-        # 1c. mangle CONNMARK set rule
-        if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-            -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-            log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
-            return 1
+            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
+                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
+                log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
+                return 1
+            fi
         fi
 
         # 2. NAT PREROUTING check (DNAT)
@@ -1190,6 +1508,43 @@ rules_are_synced() {
     return 0
 }
 
+cleanup_k3s_policy_rules() {
+    local keep_blackholes="$1"
+    local pref
+    local rule_line
+    local rule_spec
+
+    for pref in 32500 32764 32765; do
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
+
+            if [ "${pref}" = "32500" ]; then
+                [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+                if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                    continue
+                fi
+            elif [ "${pref}" = "32764" ]; then
+                if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
+                    :
+                elif [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] && \
+                     { [[ "${rule_spec}" == *" lookup 51820"* ]] || [[ "${rule_spec}" == *" table 51820"* ]]; }; then
+                    :
+                else
+                    continue
+                fi
+            else
+                [ "${keep_blackholes}" = "false" ] || continue
+                [[ "${rule_spec}" == *"blackhole"* ]] || continue
+                [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+            fi
+
+            delete_policy_rule_line "${rule_line}"
+        done < <(ip rule show pref "${pref}" 2>/dev/null || true)
+    done
+}
+
 cleanup_dataplane() {
     local keep_tunnel=false
     if [[ "${1:-}" == "--keep-tunnel" ]]; then
@@ -1207,39 +1562,40 @@ cleanup_dataplane() {
     local max_attempts=10
     local attempt=0
 
-    # Clean up all potential node target IP routing rules in Secure Mode unconditionally to prevent stale rules persisting across mode toggles or restores
-    for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
-        [ -n "${cleanup_ip}" ] || continue
-        local cleanup_subnet
-        cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
-        ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
-        ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
-        if [ "${keep_tunnel}" = false ]; then
-            ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
-        fi
-    done
-
-    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
-        if [[ "${SECURE_MODE}" != "true" ]]; then
-            ip rule del fwmark 51820 table 51820 pref 32764 >/dev/null 2>&1 || true
-        fi
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        cleanup_k3s_policy_rules "${keep_tunnel}"
     else
-        # Remove local bypass rule (pref 32500)
-        ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
-
-        # Remove bridge gateway tunnel rule (pref 32763)
-        local bridge_gw
-        bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
-        ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
-
-        if [ "${keep_tunnel}" = false ]; then
-            ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
-        fi
-
-        while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
-            ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
-            attempt=$((attempt + 1))
+        # Clean up all potential node target IP routing rules in Secure Mode
+        # unconditionally to prevent stale rules across mode toggles.
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+            [ -n "${cleanup_ip}" ] || continue
+            local cleanup_subnet
+            cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
+            ip rule del from "${cleanup_ip}" to "${cleanup_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+            ip rule del from "${cleanup_ip}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${cleanup_ip}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
         done
+
+        if [[ "${SECURE_MODE}" != "true" ]]; then
+            # Remove local bypass rule (pref 32500)
+            ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
+
+            # Remove bridge gateway tunnel rule (pref 32763)
+            local bridge_gw
+            bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+            ip rule del from "${bridge_gw}" table 51820 pref 32763 >/dev/null 2>&1 || true
+
+            if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${DOCKER_NETWORK_SUBNET}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
+
+            while ip rule show | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$" && [ ${attempt} -lt ${max_attempts} ]; do
+                ip rule del from "${DOCKER_NETWORK_SUBNET}" table 51820 >/dev/null 2>&1 || break
+                attempt=$((attempt + 1))
+            done
+        fi
     fi
 
     if [ "${keep_tunnel}" = false ]; then

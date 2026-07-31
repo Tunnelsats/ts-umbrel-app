@@ -255,3 +255,413 @@ fi
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_k3s_bypass_cidrs_are_normalized_and_unsafe_values_are_rejected():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_BYPASS_CIDRS="10.43.0.1/16, 10.42.0.0/16,10.43.0.0/16"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "10.42.0.0/16,10.43.0.0/16" ]]
+
+K3S_BYPASS_CIDRS="10.42.0.0/16,not-a-cidr"
+if normalize_k3s_bypass_cidrs; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Invalid K3S_BYPASS_CIDRS"* ]]
+
+LAST_ERROR=""
+K3S_BYPASS_CIDRS="0.0.0.0/0"
+if normalize_k3s_bypass_cidrs; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"must not contain 0.0.0.0/0"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_routes_external_traffic_with_only_explicit_local_bypasses():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+WG_IFACE="tunnelsatsv2"
+RULES=""
+ROUTES=""
+ADD_COUNT=0
+DELETE_LOG=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$1 $2" == "rule add" ]]; then
+        ADD_COUNT=$((ADD_COUNT + 1))
+        case "$*" in
+            "rule add from 10.42.1.7 to 10.42.0.0/16 table main pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n'
+                ;;
+            "rule add from 10.42.1.7 to 10.43.0.0/16 table main pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n'
+                ;;
+            "rule add from 10.42.1.7 table 51820 pref 32764")
+                RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820\n'
+                ;;
+            "rule add from 10.42.1.7 blackhole pref 32765")
+                RULES+=$'32765:\tfrom 10.42.1.7 blackhole\n'
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "route replace" ]]; then
+        ROUTES+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$*" == "route del 10.9.0.0/24 table 51820" ]]; then
+        return 0
+    fi
+    if [[ "$*" == "-4 addr show dev tunnelsatsv2" ]]; then
+        printf '%s\n' "7: tunnelsatsv2    inet 10.9.0.2/24 scope global tunnelsatsv2"
+        return 0
+    fi
+    return 1
+}
+
+ensure_policy_routing
+[[ "${POLICY_CHANGED}" == "1" ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main'* ]]
+[[ "${RULES}" == *$'32764:\tfrom 10.42.1.7 lookup 51820'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.1.7 blackhole'* ]]
+[[ "${RULES}" != *"fwmark"* ]]
+[[ "${ROUTES}" == *"route replace default dev tunnelsatsv2 metric 2 table 51820"* ]]
+[[ "${ROUTES}" == *"route replace blackhole default metric 3 table 51820"* ]]
+
+FIRST_ADD_COUNT="${ADD_COUNT}"
+ensure_policy_routing
+[[ "${POLICY_CHANGED}" == "0" ]]
+[[ "${ADD_COUNT}" == "${FIRST_ADD_COUNT}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_validation_failure_installs_blackhole_before_returning():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="0.0.0.0/0"
+RULES=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.1.7 blackhole pref 32765" ]]; then
+        RULES=$'32765:\tfrom 10.42.1.7 blackhole\n'
+        return 0
+    fi
+    return 0
+}
+
+if ensure_policy_routing; then
+    exit 1
+fi
+[[ "${RULES}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${LAST_ERROR}" == *"must not contain 0.0.0.0/0"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_policy_table_repair_suspends_source_rule_before_removing_default():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_TARGET_IP="10.42.1.7"
+WG_IFACE="tunnelsatsv2"
+SOURCE_RULE=$'32764:\tfrom 10.42.1.7 lookup 51820\n'
+DELETE_LOG=""
+
+ip() {
+    if [[ "$*" == "route replace blackhole default metric 3 table 51820" ]] || \
+       [[ "$*" == "route replace default dev tunnelsatsv2 metric 2 table 51820" ]]; then
+        return 0
+    fi
+    if [[ "$*" == "route show table 51820" ]]; then
+        printf '%s\n' \
+            "default via 192.0.2.1 dev eth0 metric 1" \
+            "default dev tunnelsatsv2 metric 2" \
+            "blackhole default metric 3"
+        return 0
+    fi
+    if [[ "$*" == "rule del from 10.42.1.7 table 51820 pref 32764" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        SOURCE_RULE=""
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${SOURCE_RULE}"
+        return 0
+    fi
+    if [[ "$*" == "route del table 51820 default via 192.0.2.1 dev eth0 metric 1" ]]; then
+        DELETE_LOG+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_policy_table_defaults
+[[ "${K3S_TABLE_CHANGED}" == "1" ]]
+[[ "${DELETE_LOG}" == *"rule del from 10.42.1.7 table 51820 pref 32764"* ]]
+[[ "${DELETE_LOG}" == *"route del table 51820 default via 192.0.2.1 dev eth0 metric 1"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_rules_are_synced_requires_full_outbound_and_blackhole_routes():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+WG_IFACE="tunnelsatsv2"
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+EXTRA_DEFAULT=0
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "route show table 51820" ]]; then
+        printf '%s\n' \
+            "default dev tunnelsatsv2 metric 2" \
+            "blackhole default metric 3" \
+            "10.9.0.0/24 dev tunnelsatsv2"
+        if [ "${EXTRA_DEFAULT}" = "1" ]; then
+            printf '%s\n' "default via 192.0.2.1 dev eth0 metric 1"
+        fi
+        return 0
+    fi
+    return 1
+}
+iptables() {
+    return 0
+}
+
+rules_are_synced
+
+EXTRA_DEFAULT=1
+if rules_are_synced; then
+    exit 1
+fi
+EXTRA_DEFAULT=0
+
+RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820\n'/}"
+if rules_are_synced; then
+    exit 1
+fi
+
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n30000:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+if rules_are_synced; then
+    exit 1
+fi
+
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main\n32500:\tfrom 10.42.1.7 to 192.168.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+if rules_are_synced; then
+    exit 1
+fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_nat_reconcile_removes_legacy_connmark_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+WG_IFACE="tunnelsatsv2"
+REMOVED=""
+
+remove_tagged_iptables_rules() {
+    REMOVED+="$1/$2/$3"$'\n'
+}
+iptables() {
+    if [[ "$*" == "-t nat -S PREROUTING" ]]; then
+        printf '%s\n' \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 19735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.42.1.7:9735" \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 9735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.42.1.7:9735"
+        return 0
+    fi
+    if [[ "$*" == "-t nat -S POSTROUTING" ]]; then
+        printf '%s\n' "-A POSTROUTING -s 10.42.1.7 -o tunnelsatsv2 -m comment --comment tunnelsats-masq -j MASQUERADE"
+        return 0
+    fi
+    return 0
+}
+
+ensure_nat_forward_rules
+[[ "${REMOVED}" == *"mangle/PREROUTING/tunnelsats-conn-restore"* ]]
+[[ "${REMOVED}" == *"mangle/FORWARD/tunnelsats-conn-save"* ]]
+[[ "${REMOVED}" == *"mangle/FORWARD/tunnelsats-wg-mark"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_stale_k3s_rules_are_removed_without_touching_current_source():
+    result = run_bash(
+        r'''
+source "$1"
+
+POLICY_CHANGED="0"
+DELETED=""
+
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s\n' \
+            $'32500:\tfrom 10.42.0.9 to 10.42.0.0/16 lookup main' \
+            $'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main'
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s\n' \
+            $'32764:\tfrom 10.42.0.9 lookup 51820' \
+            $'32764:\tfrom 10.42.1.7 lookup 51820'
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s\n' \
+            $'32765:\tfrom 10.42.0.9 blackhole' \
+            $'32765:\tfrom 10.42.1.7 blackhole'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 0
+}
+
+remove_stale_k3s_policy_rules "10.42.1.7"
+[[ "${POLICY_CHANGED}" == "1" ]]
+[[ "${DELETED}" == *"from 10.42.0.9 to 10.42.0.0/16 lookup main"* ]]
+[[ "${DELETED}" == *"from 10.42.0.9 lookup 51820"* ]]
+[[ "${DELETED}" == *"from 10.42.0.9 blackhole"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_cleanup_preserves_blackholes_only_when_tunnel_is_kept():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+DELETED=""
+FLUSHED=0
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main\n32764:\tfrom 10.42.1.7 lookup 51820\n32765:\tfrom 10.42.1.7 blackhole\n'
+
+remove_tagged_iptables_rules() {
+    return 0
+}
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${RULES}" | grep '^32764:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$*" == "route flush table 51820" ]]; then
+        FLUSHED=$((FLUSHED + 1))
+        return 0
+    fi
+    return 0
+}
+wg() {
+    return 1
+}
+
+cleanup_dataplane --keep-tunnel
+[[ "${DELETED}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
+[[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]
+[[ "${DELETED}" != *"from 10.42.1.7 blackhole"* ]]
+[[ "${FLUSHED}" == "0" ]]
+
+DELETED=""
+cleanup_dataplane
+[[ "${DELETED}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${FLUSHED}" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
