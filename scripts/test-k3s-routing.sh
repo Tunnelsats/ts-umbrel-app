@@ -88,7 +88,10 @@ ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv4.conf.clear0.rp_filter=0
 
 # Establish that ordinary routing would expose the clear path before policy
 # routing is installed.
-ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null
+if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: baseline clear-egress path is unreachable" >&2
+    exit 1
+fi
 
 # Expansion in the quoted program belongs to the nested shell.
 # shellcheck disable=SC2016
@@ -104,21 +107,36 @@ ip netns exec "${ROUTER_NS}" env \
         ensure_policy_routing
 
         external_route="$(ip route get 198.51.100.2 from 10.42.1.7 iif pod-r)"
-        [[ "${external_route}" == *"dev tunnelsatsv2"* ]]
+        if [[ "${external_route}" != *"dev tunnelsatsv2"* ]]; then
+            echo "FAIL: external route did not select WireGuard: ${external_route}" >&2
+            exit 1
+        fi
 
         local_route="$(ip route get 10.42.1.1 from 10.42.1.7 iif pod-r)"
-        [[ "${local_route}" == *"dev pod-r"* ]]
+        if [[ "${local_route}" == *"dev tunnelsatsv2"* ]] || [[ "${local_route}" == *"dev clear0"* ]]; then
+            echo "FAIL: local route selected external egress: ${local_route}" >&2
+            exit 1
+        fi
     '
 
 # A new outbound connection now succeeds through the VPN-side namespace.
-ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null
+if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: pod-initiated traffic did not traverse the VPN path" >&2
+    exit 1
+fi
 
 # A connection arriving from the VPN side also receives its reply through the
 # same path, exercising the inbound-reply invariant without connmarks.
-ip netns exec "${VPN_NS}" ping -I 198.51.100.2 -c 1 -W 2 10.42.1.7 >/dev/null
+if ! ip netns exec "${VPN_NS}" ping -I 198.51.100.2 -c 1 -W 2 10.42.1.7 >/dev/null; then
+    echo "FAIL: reply to VPN-originated traffic did not return through the VPN path" >&2
+    exit 1
+fi
 
 # Cluster-local dependencies remain available through the explicit bypass.
-ip netns exec "${POD_NS}" ping -c 1 -W 2 10.42.1.1 >/dev/null
+if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 10.42.1.1 >/dev/null; then
+    echo "FAIL: cluster-local bypass is unreachable" >&2
+    exit 1
+fi
 
 # Removing the WireGuard default leaves the table blackhole in place. External
 # traffic must fail instead of falling back to the clear interface.
