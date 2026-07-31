@@ -573,8 +573,8 @@ remove_k3s_emergency_network_policy() {
     case "${status}" in
         200|202|404) return 0 ;;
         409)
-            log WARN "k3s: Emergency NetworkPolicy changed before deletion; preserving replacement"
-            return 0
+            LAST_ERROR="k3s: Emergency NetworkPolicy changed during deletion; retrying cleanup"
+            return 1
             ;;
         *)
             LAST_ERROR="k3s: Failed to remove emergency deny-egress NetworkPolicy"

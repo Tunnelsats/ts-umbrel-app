@@ -543,6 +543,32 @@ remove_k3s_emergency_network_policy
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_emergency_network_policy_uid_conflict_requires_retry():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+
+k8s_api() {
+    printf '%s' '{"metadata":{"name":"tunnelsats-emergency-egress-deny","uid":"owned-uid","annotations":{"tunnelsats.io/emergency-egress-deny":"true"}},"spec":{"podSelector":{"matchLabels":{"app":"lnd"}},"policyTypes":["Egress"],"egress":[]}}'
+}
+k8s_api_write_status() {
+    [[ "$1" == "DELETE" ]]
+    printf '%s' "409"
+}
+
+if remove_k3s_emergency_network_policy; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"changed during deletion; retrying cleanup"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_guard_release_clears_stale_guards_after_revalidation():
     result = run_bash(
         r'''
