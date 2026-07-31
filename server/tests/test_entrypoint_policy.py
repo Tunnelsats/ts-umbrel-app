@@ -330,6 +330,51 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_total_isolation_failure_deletes_target_pod():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DELETE_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    K3S_TARGET_POD_NAMESPACE="lightning"
+    K3S_TARGET_POD_NAME="lnd-0"
+    return 0
+}
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_k3s_subnet_quarantine() { return 1; }
+delete_k3s_target_pod() {
+    [[ "${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}" == "lightning/lnd-0" ]]
+    DELETE_COUNT=$((DELETE_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${DELETE_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"deleted target pod lightning/lnd-0 to fail closed"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_guard_release_clears_stale_guards_after_revalidation():
     result = run_bash(
         r'''

@@ -119,6 +119,8 @@ TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
 FORWARDING_PORT=""
 BRIDGE_NAME=""
+K3S_TARGET_POD_NAME=""
+K3S_TARGET_POD_NAMESPACE=""
 RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
@@ -249,6 +251,37 @@ k8s_api() {
     curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
         -H "Authorization: Bearer ${token}" \
         "${K8S_API_URL}${path}"
+}
+
+delete_k3s_target_pod() {
+    local token
+    local http_code
+
+    if [ -z "${K3S_TARGET_POD_NAMESPACE}" ] || [ -z "${K3S_TARGET_POD_NAME}" ]; then
+        log ERROR "k3s: Cannot delete target pod because its identity is unavailable"
+        return 1
+    fi
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || {
+        log ERROR "k3s: Cannot read service account token to delete unsafe target pod"
+        return 1
+    }
+    http_code="$(curl -sS --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -o /dev/null -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d '{"gracePeriodSeconds":0,"propagationPolicy":"Background"}' \
+        "${K8S_API_URL}/api/v1/namespaces/${K3S_TARGET_POD_NAMESPACE}/pods/${K3S_TARGET_POD_NAME}" \
+        2>/dev/null || true)"
+    case "${http_code}" in
+        200|202|404)
+            log ERROR "k3s: Deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} after total isolation failure"
+            return 0
+            ;;
+        *)
+            log ERROR "k3s: Failed to delete unsafe target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} (HTTP ${http_code:-unavailable})"
+            return 1
+            ;;
+    esac
 }
 
 # Percent-encode a string for safe use inside a URL query parameter. Used for
@@ -415,6 +448,8 @@ resolve_k3s_target_pod() {
     fi
 
     DOCKER_TARGET_IP="${pod_ip}"
+    K3S_TARGET_POD_NAMESPACE="${namespace}"
+    K3S_TARGET_POD_NAME="${pod_name}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -424,6 +459,8 @@ detect_k3s_target() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
     DOCKER_TARGET_IP=""
+    K3S_TARGET_POD_NAME=""
+    K3S_TARGET_POD_NAMESPACE=""
 
     local svc_name svc_fqdn svc_ip
 
@@ -2070,8 +2107,10 @@ reconcile_once() {
                 local isolation_error="${LAST_ERROR}"
                 if ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP}"; then
                     LAST_ERROR="${isolation_error}; quarantined pod CIDR ${K3S_QUARANTINE_CIDR}"
+                elif delete_k3s_target_pod; then
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed; deleted target pod ${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME} to fail closed"
                 else
-                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod-CIDR quarantine failed"
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable, pod-CIDR quarantine failed, and emergency target pod deletion failed"
                 fi
             fi
             write_state
