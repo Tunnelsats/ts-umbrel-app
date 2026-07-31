@@ -742,6 +742,7 @@ ip() {
         printf '%s\n' \
             $'32765:\tfrom 10.42.0.9 blackhole proto 200' \
             $'32765:\tfrom 10.42.0.9 blackhole proto 201' \
+            $'32765:\tfrom 10.42.0.0/16 blackhole proto 200' \
             $'32765:\tfrom 10.42.1.7 blackhole' \
             $'32765:\tfrom 10.99.0.5 blackhole'
         return 0
@@ -759,8 +760,53 @@ remove_stale_k3s_policy_rules "10.42.1.7"
 [[ "${DELETED}" == *"from 10.42.0.9 lookup 51820"* ]]
 [[ "${DELETED}" == *"from 10.42.0.9 blackhole"* ]]
 [[ "${DELETED}" != *"proto 201"* ]]
+[[ "${DELETED}" != *"from 10.42.0.0/16"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_legacy_fwmark_migration_requires_tagged_ownership_evidence():
+    result = run_bash(
+        r'''
+source "$1"
+
+OWNED=0
+DELETED=""
+ip() {
+    if [[ "$*" == "rule show" ]]; then
+        printf '%s\n' $'32764:\tfrom all fwmark 0xca6c lookup 51820'
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+iptables() {
+    if [[ "${OWNED}" == "1" && "$*" == "-t mangle -S PREROUTING" ]]; then
+        printf '%s\n' "-A PREROUTING -m comment --comment tunnelsats-conn-restore"
+    elif [[ "${OWNED}" == "1" && "$*" == "-t mangle -S FORWARD" ]]; then
+        printf '%s\n' "-A FORWARD -m comment --comment tunnelsats-conn-save"
+    fi
+    return 0
+}
+
+if remove_legacy_k3s_fwmark_rules; then
+    exit 1
+fi
+[[ -z "${DELETED}" ]]
+[[ "${LAST_ERROR}" == *"Unowned legacy fwmark rule"* ]]
+
+OWNED=1
+LAST_ERROR=""
+remove_legacy_k3s_fwmark_rules
+[[ "${DELETED}" == *"fwmark 0xca6c lookup 51820"* ]]
+[[ -z "${LAST_ERROR}" ]]
 '''
     )
 
@@ -773,21 +819,21 @@ def test_k3s_subnet_quarantine_covers_replacement_ips_and_preserves_unowned_rule
 source "$1"
 
 K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
-RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 201\n'
+RULES=$'32765:\tfrom 10.42.0.0/16 blackhole proto 201\n'
 DELETED=""
 
 ip() {
-    if [[ "$*" == "rule show pref 32763" ]]; then
+    if [[ "$*" == "rule show pref 32765" ]]; then
         printf '%s' "${RULES}"
         return 0
     fi
-    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763" ]]; then
-        RULES+=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32765" ]]; then
+        RULES+=$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'
         return 0
     fi
     if [[ "$1 $2" == "rule del" ]]; then
         DELETED+="$*"$'\n'
-        RULES="${RULES//$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
         return 0
     fi
     return 1
@@ -818,7 +864,7 @@ SECURE_MODE="false"
 DOCKER_TARGET_IP="10.42.1.7"
 DELETED=""
 FLUSHED=0
-RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main proto 201\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32764:\tfrom 10.99.0.5 lookup 51820 proto 201\n32765:\tfrom 10.42.1.7 blackhole proto 200\n32765:\tfrom 10.99.0.5 blackhole proto 201\n'
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.99.0.5 to 10.99.0.0/16 lookup main proto 201\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32764:\tfrom 10.99.0.5 lookup 51820 proto 201\n32764:\tfrom all fwmark 0xca6c lookup 51820\n32765:\tfrom 10.42.1.7 blackhole proto 200\n32765:\tfrom 10.99.0.5 blackhole proto 201\n'
 
 remove_tagged_iptables_rules() {
     return 0
@@ -855,12 +901,14 @@ cleanup_dataplane --keep-tunnel
 [[ "${DELETED}" == *"from 10.42.1.7 lookup 51820"* ]]
 [[ "${DELETED}" != *"from 10.42.1.7 blackhole"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"fwmark 0xca6c"* ]]
 [[ "${FLUSHED}" == "0" ]]
 
 DELETED=""
 cleanup_dataplane
 [[ "${DELETED}" == *"from 10.42.1.7 blackhole"* ]]
 [[ "${DELETED}" != *"from 10.99.0.5"* ]]
+[[ "${DELETED}" != *"fwmark 0xca6c"* ]]
 [[ "${FLUSHED}" == "1" ]]
 '''
     )

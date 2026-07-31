@@ -714,15 +714,15 @@ print(max(matches, key=lambda network: network.prefixlen) if matches else "")
     K3S_QUARANTINE_CIDR="${pod_cidr}"
 
     escaped_cidr="${pod_cidr//./\\.}"
-    exact_pattern="^32763:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-    if ip rule show pref 32763 2>/dev/null | grep -qE "${exact_pattern}"; then
+    exact_pattern="^32765:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+    if ip rule show pref 32765 2>/dev/null | grep -qE "${exact_pattern}"; then
         return 0
     fi
-    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref 32763 >/dev/null 2>&1; then
+    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref 32765 >/dev/null 2>&1; then
         LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
         return 1
     fi
-    if ! ip rule show pref 32763 2>/dev/null | grep -qE "${exact_pattern}"; then
+    if ! ip rule show pref 32765 2>/dev/null | grep -qE "${exact_pattern}"; then
         LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
         return 1
     fi
@@ -739,9 +739,9 @@ remove_k3s_subnet_quarantine() {
         [[ "${rule_spec}" == *"blackhole"* ]] || continue
         k3s_policy_rule_is_owned "${rule_spec}" || continue
         delete_policy_rule_line "${rule_line}"
-    done < <(ip rule show pref 32763 2>/dev/null || true)
+    done < <(ip rule show pref 32765 2>/dev/null || true)
 
-    if ip rule show pref 32763 2>/dev/null | grep -qE \
+    if ip rule show pref 32765 2>/dev/null | grep -qE \
         "proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}([[:space:]]|$)"; then
         LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
         return 1
@@ -915,6 +915,11 @@ remove_stale_k3s_policy_rules() {
             fi
 
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${pref}" = "32765" ] && [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */32 ]]; then
+                # CIDR-wide emergency quarantine must survive ordinary stale
+                # per-pod cleanup; only explicit full cleanup may remove it.
+                continue
+            fi
             if [ -n "${rule_source}" ] && \
                [ "${rule_source}" != "${current_source}" ] && \
                k3s_policy_rule_is_owned "${rule_spec}"; then
@@ -928,15 +933,33 @@ remove_stale_k3s_policy_rules() {
 remove_legacy_k3s_fwmark_rules() {
     local changed=0
     local legacy_rule
+    local legacy_rules
+
+    legacy_rules="$(ip rule show 2>/dev/null | grep -Ei \
+        "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820" || true)"
+    if [ -z "${legacy_rules}" ]; then
+        K3S_LEGACY_POLICY_CHANGED="0"
+        return 0
+    fi
+
+    # Untagged policy rules are not sufficient proof of ownership. Only
+    # migrate the legacy rule when its paired TunnelSats mangle rules still
+    # provide an independently tagged ownership signal.
+    if ! iptables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-conn-restore" || \
+       ! iptables -t mangle -S FORWARD 2>/dev/null | grep -Fq -- "tunnelsats-conn-save"; then
+        LAST_ERROR="k3s: Unowned legacy fwmark rule conflicts with full-outbound routing"
+        K3S_LEGACY_POLICY_CHANGED="0"
+        return 1
+    fi
 
     while IFS= read -r legacy_rule; do
         [ -n "${legacy_rule}" ] || continue
         delete_policy_rule_line "${legacy_rule}"
         changed=1
-    done < <(ip rule show 2>/dev/null | grep -Ei \
-        "fwmark 0x0*ca6c.*(lookup|table)[[:space:]]+51820" || true)
+    done <<< "${legacy_rules}"
 
     K3S_LEGACY_POLICY_CHANGED="${changed}"
+    return 0
 }
 
 ensure_k3s_bypass_rules() {
@@ -1055,7 +1078,9 @@ ensure_policy_routing() {
 
         # Retire reply-only routing before inspecting table 51820. The source
         # blackhole above keeps traffic fail-closed during migration.
-        remove_legacy_k3s_fwmark_rules
+        if ! remove_legacy_k3s_fwmark_rules; then
+            return 1
+        fi
         if [ "${K3S_LEGACY_POLICY_CHANGED}" = "1" ]; then
             changed=1
         fi
@@ -1639,15 +1664,12 @@ cleanup_k3s_policy_rules() {
     local pref
     local rule_line
     local rule_spec
-    local rule_source
-    local legacy_fwmark
 
     for pref in 32500 32764 32765; do
         while IFS= read -r rule_line; do
             [ -n "${rule_line}" ] || continue
             rule_spec="${rule_line#*:}"
             rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
-            legacy_fwmark=false
 
             if [ "${pref}" = "32500" ]; then
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
@@ -1656,7 +1678,10 @@ cleanup_k3s_policy_rules() {
                 fi
             elif [ "${pref}" = "32764" ]; then
                 if [[ "${rule_spec}" == *"fwmark 0xca6c"* ]] || [[ "${rule_spec}" == *"fwmark 0xCA6C"* ]]; then
-                    legacy_fwmark=true
+                    # Legacy rules predate protocol ownership markers. Preserve
+                    # them during generic cleanup rather than claiming them by
+                    # structure alone.
+                    continue
                 elif [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] && \
                      { [[ "${rule_spec}" == *" lookup 51820"* ]] || [[ "${rule_spec}" == *" table 51820"* ]]; }; then
                     :
@@ -1669,10 +1694,7 @@ cleanup_k3s_policy_rules() {
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
             fi
 
-            if [ "${legacy_fwmark}" = false ]; then
-                rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-                k3s_policy_rule_is_owned "${rule_spec}" || continue
-            fi
+            k3s_policy_rule_is_owned "${rule_spec}" || continue
 
             delete_policy_rule_line "${rule_line}"
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)
@@ -1885,13 +1907,6 @@ reconcile_once() {
     fi
 
     if ! ensure_policy_routing; then
-        write_state
-        if [ -n "${request_id}" ]; then
-            write_reconcile_result "${request_id}" false
-        fi
-        return 1
-    fi
-    if [[ "${K3S_MODE}" == "true" ]] && ! remove_k3s_subnet_quarantine; then
         write_state
         if [ -n "${request_id}" ]; then
             write_reconcile_result "${request_id}" false
