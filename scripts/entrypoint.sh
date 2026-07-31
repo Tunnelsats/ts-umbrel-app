@@ -50,6 +50,8 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
+TARGET_K8S_POD_NAME=""
+TARGET_K8S_POD_NAMESPACE=""
 FORWARDING_PORT=""
 BRIDGE_NAME=""
 RULES_SYNCED="false"
@@ -180,6 +182,16 @@ k8s_api() {
     local token
     token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
     curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -H "Authorization: Bearer ${token}" \
+        "${K8S_API_URL}${path}"
+}
+
+k8s_api_delete() {
+    local path="$1"
+    local token
+    token=$(cat "${K8S_SA_TOKEN_PATH}" 2>/dev/null) || { log WARN "k8s: Cannot read service account token"; return 1; }
+    curl -sf --connect-timeout 5 --max-time 10 --cacert "${K8S_SA_CA_PATH}" \
+        -X DELETE \
         -H "Authorization: Bearer ${token}" \
         "${K8S_API_URL}${path}"
 }
@@ -348,6 +360,8 @@ resolve_k3s_target_pod() {
     fi
 
     DOCKER_TARGET_IP="${pod_ip}"
+    TARGET_K8S_POD_NAME="${pod_name}"
+    TARGET_K8S_POD_NAMESPACE="${namespace}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -357,6 +371,8 @@ detect_k3s_target() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
     DOCKER_TARGET_IP=""
+    TARGET_K8S_POD_NAME=""
+    TARGET_K8S_POD_NAMESPACE=""
 
     local svc_name svc_fqdn svc_ip
 
@@ -651,6 +667,44 @@ remove_tagged_iptables_rules() {
     done <<EOF_RULES
 ${rules}
 EOF_RULES
+}
+
+ensure_k3s_egress_guard() {
+    local source_ip="$1"
+    local marker="tunnelsats-k3s-egress-guard"
+
+    if iptables -C FORWARD -s "${source_ip}" \
+        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! iptables -I FORWARD 1 -s "${source_ip}" \
+        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+        return 1
+    fi
+
+    iptables -C FORWARD -s "${source_ip}" \
+        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1
+}
+
+remove_k3s_egress_guards() {
+    local marker="tunnelsats-k3s-egress-guard"
+
+    remove_tagged_iptables_rules filter FORWARD "${marker}"
+    if iptables -S FORWARD 2>/dev/null | grep -Fq -- "${marker}"; then
+        LAST_ERROR="k3s: Failed to remove temporary egress guard"
+        return 1
+    fi
+    return 0
+}
+
+quarantine_k3s_target_pod() {
+    if [ -z "${TARGET_K8S_POD_NAMESPACE}" ] || [ -z "${TARGET_K8S_POD_NAME}" ]; then
+        return 1
+    fi
+    k8s_api_delete \
+        "/api/v1/namespaces/${TARGET_K8S_POD_NAMESPACE}/pods/${TARGET_K8S_POD_NAME}" \
+        >/dev/null
 }
 
 get_target_subnet() {
@@ -1593,6 +1647,9 @@ cleanup_dataplane() {
     remove_tagged_iptables_rules nat POSTROUTING "tunnelsats-masq"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-in"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-forward-out"
+    if [ "${keep_tunnel}" = false ]; then
+        remove_tagged_iptables_rules filter FORWARD "tunnelsats-k3s-egress-guard"
+    fi
     remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
     remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
     remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
@@ -1687,6 +1744,7 @@ reconcile_once() {
     local changed=0
     local policy_changed="0"
     local nat_changed="0"
+    local k3s_guard_active=false
 
     LAST_ERROR=""
     RULES_SYNCED="false"
@@ -1713,6 +1771,15 @@ reconcile_once() {
     fi
 
     if [[ "${K3S_MODE}" == "true" ]]; then
+        # Keep an independent packet-filter guard in place until the complete
+        # routing policy is verified. If blackhole setup fails, this guard
+        # continues to block clear-text pod egress.
+        if ensure_k3s_egress_guard "${DOCKER_TARGET_IP}"; then
+            k3s_guard_active=true
+        else
+            log WARN "k3s: Failed to install temporary iptables egress guard; requiring source blackhole"
+        fi
+
         # Target discovery can select a new pod IP before WireGuard is
         # available. Blackhole that source immediately so any later startup
         # failure cannot fall through to the node's ordinary egress route.
@@ -1720,6 +1787,14 @@ reconcile_once() {
             "${DOCKER_TARGET_IP}" \
             "k3s: Failed to protect selected pod before WireGuard startup" \
             "${K3S_RULE_PROTOCOL}"; then
+            if [ "${k3s_guard_active}" = false ]; then
+                local isolation_error="${LAST_ERROR}"
+                if quarantine_k3s_target_pod; then
+                    LAST_ERROR="${isolation_error}; quarantined pod ${TARGET_K8S_POD_NAMESPACE}/${TARGET_K8S_POD_NAME}"
+                else
+                    LAST_ERROR="${isolation_error}; temporary egress guard unavailable and pod quarantine failed"
+                fi
+            fi
             write_state
             if [ -n "${request_id}" ]; then
                 write_reconcile_result "${request_id}" false
@@ -1791,7 +1866,11 @@ reconcile_once() {
     fi
 
     if rules_are_synced; then
-        RULES_SYNCED="true"
+        if [ "${k3s_guard_active}" = true ] && ! remove_k3s_egress_guards; then
+            RULES_SYNCED="false"
+        else
+            RULES_SYNCED="true"
+        fi
     else
         LAST_ERROR="Dataplane rules are not fully synced"
     fi

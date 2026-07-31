@@ -228,6 +228,103 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_blackhole_failure_keeps_emergency_egress_guard():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+GUARD_COUNT=0
+GUARD_REMOVE_COUNT=0
+WG_UP_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_k3s_egress_guard() {
+    [[ "$1" == "10.42.1.7" ]]
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    return 0
+}
+remove_k3s_egress_guards() {
+    GUARD_REMOVE_COUNT=$((GUARD_REMOVE_COUNT + 1))
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+ensure_wg_up() {
+    WG_UP_COUNT=$((WG_UP_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${GUARD_COUNT}" == "1" ]]
+[[ "${GUARD_REMOVE_COUNT}" == "0" ]]
+[[ "${WG_UP_COUNT}" == "0" ]]
+[[ "${STATE_ERROR}" == *"Failed to protect selected pod"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_isolation_failure_quarantines_target_pod():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+QUARANTINE_COUNT=0
+STATE_ERROR=""
+
+detect_lightning_container() {
+    TARGET_CONTAINER_NAME="lnd"
+    TARGET_IMPL="lnd"
+    TARGET_K8S_POD_NAME="lnd-0"
+    TARGET_K8S_POD_NAMESPACE="lightning"
+    DOCKER_TARGET_IP="10.42.1.7"
+    return 0
+}
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() {
+    LAST_ERROR="k3s: Failed to protect selected pod before WireGuard startup"
+    return 1
+}
+quarantine_k3s_target_pod() {
+    [[ "${TARGET_K8S_POD_NAMESPACE}/${TARGET_K8S_POD_NAME}" == "lightning/lnd-0" ]]
+    QUARANTINE_COUNT=$((QUARANTINE_COUNT + 1))
+    return 0
+}
+write_state() {
+    STATE_ERROR="${LAST_ERROR}"
+}
+
+if reconcile_once "test"; then
+    exit 1
+fi
+
+[[ "${QUARANTINE_COUNT}" == "1" ]]
+[[ "${STATE_ERROR}" == *"quarantined pod lightning/lnd-0"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_target_resolution_fails_when_node_metadata_is_unavailable():
     result = run_bash(
         r'''
