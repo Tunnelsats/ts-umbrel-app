@@ -1060,18 +1060,70 @@ ensure_k3s_egress_guard() {
     local source_ip="$1"
     local marker="tunnelsats-k3s-egress-guard"
 
-    if iptables -C FORWARD -s "${source_ip}" \
+    if ! iptables -C FORWARD -s "${source_ip}" \
         -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
-        return 0
+        if ! iptables -I FORWARD 1 -s "${source_ip}" \
+            -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
+            return 1
+        fi
     fi
 
-    if ! iptables -I FORWARD 1 -s "${source_ip}" \
+    if ! iptables -C FORWARD -s "${source_ip}" \
         -m comment --comment "${marker}" -j DROP >/dev/null 2>&1; then
         return 1
     fi
 
-    iptables -C FORWARD -s "${source_ip}" \
-        -m comment --comment "${marker}" -j DROP >/dev/null 2>&1
+    # Once the current pod is independently guarded, promptly release tagged
+    # guards for historical pod IPs. Otherwise Kubernetes can recycle an old
+    # address to an unrelated workload while a failed reconciliation persists.
+    while ! remove_stale_k3s_egress_guards "${source_ip}"; do
+        log WARN "k3s: Retrying stale egress-guard cleanup"
+        sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
+    done
+    return 0
+}
+
+remove_stale_k3s_egress_guards() {
+    local current_source="$1"
+    local marker="tunnelsats-k3s-egress-guard"
+    local rules
+    local rule
+    local source
+    local index
+    local -a parts
+
+    rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        read -r -a parts <<< "${rule}"
+        source=""
+        for ((index = 0; index < ${#parts[@]} - 1; index++)); do
+            if [ "${parts[index]}" = "-s" ]; then
+                source="${parts[index + 1]}"
+                break
+            fi
+        done
+        if [ "${source%/32}" = "${current_source}" ]; then
+            continue
+        fi
+        parts[0]="-D"
+        iptables "${parts[@]}" >/dev/null 2>&1 || return 1
+    done <<< "${rules}"
+
+    rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        read -r -a parts <<< "${rule}"
+        source=""
+        for ((index = 0; index < ${#parts[@]} - 1; index++)); do
+            if [ "${parts[index]}" = "-s" ]; then
+                source="${parts[index + 1]}"
+                break
+            fi
+        done
+        [ "${source%/32}" = "${current_source}" ] || return 1
+    done <<< "${rules}"
+    return 0
 }
 
 remove_k3s_egress_guards() {

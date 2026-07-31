@@ -287,6 +287,43 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_egress_guard_prunes_stale_recycled_ip_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+RULES=$'-A FORWARD -s 10.42.1.7/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.5/32 -m comment --comment foreign-guard -j DROP'
+DELETED=""
+
+iptables() {
+    if [[ "$*" == "-S FORWARD" ]]; then
+        printf '%s\n' "${RULES}"
+        return 0
+    fi
+    if [[ "$*" == "-C FORWARD -s 10.42.1.7 -m comment --comment tunnelsats-k3s-egress-guard -j DROP" ]]; then
+        return 0
+    fi
+    if [[ "$1 $2" == "-D FORWARD" ]]; then
+        DELETED+="$*"$'\n'
+        RULES="${RULES//$'-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n'/}"
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_egress_guard "10.42.1.7"
+[[ "${DELETED}" == *"-D FORWARD -s 10.42.1.6/32"* ]]
+[[ "${DELETED}" != *"10.42.1.7"* ]]
+[[ "${DELETED}" != *"foreign-guard"* ]]
+[[ "${RULES}" == *"10.42.1.7/32"* ]]
+[[ "${RULES}" == *"foreign-guard"* ]]
+[[ "${RULES}" != *"10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_k3s_isolation_failure_quarantines_target_pod_cidr():
     result = run_bash(
         r'''
