@@ -167,6 +167,7 @@ fi
 [[ "${STATE_ERROR}" == *"Pod co-location required"* ]]
 [[ "${STATE_ERROR}" == *"TunnelSats node=worker-a"* ]]
 [[ "${STATE_ERROR}" == *"LND pod=lightning/lnd-0 node=worker-b"* ]]
+[[ "${STATE_ERROR}" == *"Check podAffinity in k3s/deployment.yaml or node scheduling labels."* ]]
 '''
     )
 

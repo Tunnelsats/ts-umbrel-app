@@ -326,7 +326,7 @@ resolve_k3s_target_pod() {
     fi
 
     if [ "${pod_node}" != "${TUNNELSATS_K8S_NODE_NAME}" ]; then
-        LAST_ERROR="k3s: Pod co-location required; TunnelSats node=${TUNNELSATS_K8S_NODE_NAME}, ${impl^^} pod=${namespace}/${pod_name} node=${pod_node}"
+        LAST_ERROR="k3s: Pod co-location required; TunnelSats node=${TUNNELSATS_K8S_NODE_NAME}, ${impl^^} pod=${namespace}/${pod_name} node=${pod_node}. Check podAffinity in k3s/deployment.yaml or node scheduling labels."
         log ERROR "${LAST_ERROR}"
         return 1
     fi
