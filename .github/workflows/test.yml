@@ -42,6 +42,9 @@ jobs:
           chmod +x scripts/test.sh
           ./scripts/test.sh entrypoint
 
+      - name: Verify Docker protected default route
+        run: bash scripts/test-docker-protected-route.sh
+
       - name: Verify k3s full-outbound routing
         run: sudo bash scripts/test-k3s-routing.sh
 

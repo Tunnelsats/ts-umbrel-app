@@ -14,6 +14,9 @@ RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
+DOCKER_MIN_GW_PRIORITY=100
+DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
+DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 KILL_SWITCH_PREF=32762
@@ -185,6 +188,10 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
+TARGET_IPV4_ENDPOINTS=()
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+DOCKER_POLICY_STATE_LOADED="false"
 FORWARDING_PORT=""
 BRIDGE_NAME=""
 K3S_TARGET_POD_NAME=""
@@ -311,6 +318,337 @@ docker_api_with_code() {
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     fi
+}
+
+detect_docker_gw_priority_support() {
+    [[ "${DOCKER_GW_PRIORITY_SUPPORTED}" != "unknown" ]] && return 0
+
+    local version
+    local api_version
+    local major
+    local minor
+    version=$(docker_api "GET" "/version") || {
+        LAST_ERROR="Unable to inspect Docker Engine API version"
+        return 1
+    }
+    api_version=$(printf '%s' "${version}" | jq -r '.ApiVersion // empty')
+    if [[ ! "${api_version}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+        LAST_ERROR="Docker Engine returned an invalid API version: ${api_version:-missing}"
+        return 1
+    fi
+
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if [ "${major}" -gt 1 ] || { [ "${major}" -eq 1 ] && [ "${minor}" -ge 48 ]; }; then
+        DOCKER_GW_PRIORITY_SUPPORTED="true"
+    else
+        DOCKER_GW_PRIORITY_SUPPORTED="false"
+        log WARN "Docker Engine API ${api_version} does not support GwPriority; route verification remains mandatory"
+    fi
+}
+
+load_managed_docker_policy_state() {
+    [ "${DOCKER_POLICY_STATE_LOADED}" = "false" ] || return 0
+
+    local current_boot
+    local state
+    local saved_boot
+    local parsed
+    local entry
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for Docker policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to load Docker policy ownership"
+        return 1
+    }
+
+    if [ ! -e "${DOCKER_POLICY_STATE_FILE}" ]; then
+        DOCKER_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+    state=$(cat "${DOCKER_POLICY_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read Docker policy ownership state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.boot_id | type == "string") and
+        (.endpoints | type == "array") and
+        all(.endpoints[]; type == "string")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="Docker policy ownership state is malformed"
+        return 1
+    fi
+    saved_boot=$(printf '%s' "${state}" | jq -r '.boot_id')
+    if [ "${saved_boot}" != "${current_boot}" ]; then
+        # Policy rules do not survive a host reboot. Never claim a prior
+        # boot's source addresses as rules owned by this process.
+        MANAGED_DOCKER_IPV4_ENDPOINTS=()
+        DOCKER_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+
+    if ! parsed=$(printf '%s' "${state}" | jq -r '.endpoints[]' | python3 -c '
+import ipaddress
+import sys
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    parts = raw.split("|")
+    if len(parts) != 5:
+        raise SystemExit("invalid endpoint field count")
+    address, subnet, gateway, is_tunnel, priority = parts
+    address = str(ipaddress.IPv4Address(address))
+    network = ipaddress.IPv4Network(subnet, strict=True)
+    if ipaddress.IPv4Address(address) not in network:
+        raise SystemExit("endpoint source is outside its subnet")
+    if gateway:
+        gateway = str(ipaddress.IPv4Address(gateway))
+    if is_tunnel not in {"0", "1"}:
+        raise SystemExit("invalid tunnel marker")
+    priority = str(int(priority))
+    print(f"{address}|{network}|{gateway}|{is_tunnel}|{priority}")
+'); then
+        LAST_ERROR="Docker policy ownership endpoints are malformed"
+        return 1
+    fi
+
+    MANAGED_DOCKER_IPV4_ENDPOINTS=()
+    while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        MANAGED_DOCKER_IPV4_ENDPOINTS+=("${entry}")
+    done <<< "${parsed}"
+    DOCKER_POLICY_STATE_LOADED="true"
+}
+
+persist_managed_docker_policy_state() {
+    local current_boot
+    local state_dir
+    local state_tmp
+    local endpoints_json
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for Docker policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to persist Docker policy ownership"
+        return 1
+    }
+
+    state_dir="${DOCKER_POLICY_STATE_FILE%/*}"
+    [ "${state_dir}" != "${DOCKER_POLICY_STATE_FILE}" ] || state_dir="."
+    if ! mkdir -p "${state_dir}"; then
+        LAST_ERROR="Failed to create Docker policy ownership directory"
+        return 1
+    fi
+    state_tmp=$(mktemp "${DOCKER_POLICY_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary Docker policy ownership state"
+        return 1
+    }
+    endpoints_json=$(printf '%s\n' "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}" \
+        | jq -Rsc 'split("\n") | map(select(length > 0))') || {
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to encode Docker policy ownership endpoints"
+        return 1
+    }
+    if ! jq -n \
+        --arg boot_id "${current_boot}" \
+        --argjson endpoints "${endpoints_json}" \
+        '{version:1, boot_id:$boot_id, endpoints:$endpoints}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${DOCKER_POLICY_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist Docker policy ownership state"
+        return 1
+    fi
+}
+
+refresh_docker_target_endpoints() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+    [ -n "${TARGET_CONTAINER_ID}" ] || {
+        LAST_ERROR="Cannot inspect Docker target networks without a container ID"
+        return 1
+    }
+    if ! load_managed_docker_policy_state; then
+        return 1
+    fi
+
+    local inspect
+    local parsed
+    local entry
+    local managed_entry
+    local already_managed
+    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || {
+        LAST_ERROR="Failed to inspect networks for ${TARGET_CONTAINER_NAME:-Docker target}"
+        return 1
+    }
+    if ! parsed=$(printf '%s' "${inspect}" | python3 -c '
+import ipaddress
+import json
+import sys
+
+target_network = sys.argv[1]
+data = json.load(sys.stdin)
+networks = data.get("NetworkSettings", {}).get("Networks", {})
+if not isinstance(networks, dict):
+    raise SystemExit("NetworkSettings.Networks is unavailable")
+
+found = 0
+for name in sorted(networks):
+    endpoint = networks[name]
+    if not isinstance(endpoint, dict):
+        continue
+    address = endpoint.get("IPAddress")
+    if not address:
+        continue
+    prefix = endpoint.get("IPPrefixLen")
+    interface = ipaddress.IPv4Interface(f"{address}/{prefix}")
+    gateway = endpoint.get("Gateway") or ""
+    if gateway:
+        gateway = str(ipaddress.IPv4Address(gateway))
+    priority = endpoint.get("GwPriority", 0)
+    if not isinstance(priority, int):
+        raise SystemExit(f"invalid GwPriority for {name}")
+    print(
+        f"{interface.ip}|{interface.network}|{gateway}|"
+        f"{1 if name == target_network else 0}|{priority}"
+    )
+    found += 1
+if not found:
+    raise SystemExit("target has no assigned IPv4 endpoints")
+' "${DOCKER_NETWORK_NAME}"); then
+        LAST_ERROR="Failed to parse IPv4 endpoints for ${TARGET_CONTAINER_NAME:-Docker target}: ${parsed//$'\n'/ }"
+        return 1
+    fi
+
+    TARGET_IPV4_ENDPOINTS=()
+    while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        TARGET_IPV4_ENDPOINTS+=("${entry}")
+        already_managed=false
+        for managed_entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+            if [ "${managed_entry}" = "${entry}" ]; then
+                already_managed=true
+                break
+            fi
+        done
+        if [ "${already_managed}" = false ]; then
+            MANAGED_DOCKER_IPV4_ENDPOINTS+=("${entry}")
+        fi
+    done <<< "${parsed}"
+
+    [ "${#TARGET_IPV4_ENDPOINTS[@]}" -gt 0 ] || {
+        LAST_ERROR="Docker target has no assigned IPv4 endpoints"
+        return 1
+    }
+    persist_managed_docker_policy_state
+}
+
+docker_exec_route_get() {
+    local destination="$1"
+    local created
+    local exec_id
+    local output
+    local exec_state
+    local exit_code
+
+    created=$(docker_api "POST" "/containers/${TARGET_CONTAINER_ID}/exec" "$(
+        jq -cn --arg destination "${destination}" \
+            '{AttachStdout:true,AttachStderr:true,Tty:true,Cmd:["ip","-4","route","get",$destination]}'
+    )") || {
+        LAST_ERROR="Failed to create route inspection in ${TARGET_CONTAINER_NAME}"
+        return 1
+    }
+    exec_id=$(printf '%s' "${created}" | jq -r '.Id // empty')
+    [ -n "${exec_id}" ] || {
+        LAST_ERROR="Docker did not return an exec ID for route inspection"
+        return 1
+    }
+
+    output=$(docker_api "POST" "/exec/${exec_id}/start" '{"Detach":false,"Tty":true}') || {
+        LAST_ERROR="Failed to start route inspection in ${TARGET_CONTAINER_NAME}"
+        return 1
+    }
+    exec_state=$(docker_api "GET" "/exec/${exec_id}/json") || {
+        LAST_ERROR="Failed to read route inspection status in ${TARGET_CONTAINER_NAME}"
+        return 1
+    }
+    exit_code=$(printf '%s' "${exec_state}" | jq -r '.ExitCode // empty')
+    if [ "${exit_code}" != "0" ]; then
+        LAST_ERROR="Route inspection failed in ${TARGET_CONTAINER_NAME}: ${output//$'\n'/ }"
+        return 1
+    fi
+
+    printf '%s\n' "${output//$'\r'/}"
+}
+
+verify_docker_target_routes() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+
+    if ! detect_docker_gw_priority_support || ! refresh_docker_target_endpoints; then
+        return 1
+    fi
+
+    local entry
+    local source
+    local subnet
+    local gateway
+    local is_tunnel
+    local priority
+    local tunnel_gateway=""
+    local tunnel_priority=""
+    local other_priority
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        if [ "${is_tunnel}" = "1" ]; then
+            if [ "${source}" != "${DOCKER_TARGET_IP}" ] || [ -z "${gateway}" ]; then
+                LAST_ERROR="${DOCKER_NETWORK_NAME} endpoint does not have protected IPv4 source ${DOCKER_TARGET_IP} and a gateway"
+                return 1
+            fi
+            tunnel_gateway="${gateway}"
+            tunnel_priority="${priority}"
+        fi
+    done
+    if [ -z "${tunnel_gateway}" ]; then
+        LAST_ERROR="${TARGET_CONTAINER_NAME} is not attached to ${DOCKER_NETWORK_NAME}"
+        return 1
+    fi
+
+    if [ "${DOCKER_GW_PRIORITY_SUPPORTED}" = "true" ]; then
+        if [ "${tunnel_priority}" -lt "${DOCKER_MIN_GW_PRIORITY}" ]; then
+            LAST_ERROR="${DOCKER_NETWORK_NAME} gateway priority ${tunnel_priority} is below ${DOCKER_MIN_GW_PRIORITY}"
+            return 1
+        fi
+        for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+            IFS='|' read -r source subnet gateway is_tunnel other_priority <<< "${entry}"
+            if [ "${is_tunnel}" != "1" ] && [ "${other_priority}" -ge "${tunnel_priority}" ]; then
+                LAST_ERROR="${DOCKER_NETWORK_NAME} gateway priority ${tunnel_priority} does not outrank a competing endpoint (${other_priority})"
+                return 1
+            fi
+        done
+    fi
+
+    local destination
+    local route_info
+    local selected_source
+    local selected_gateway
+    for destination in "${DOCKER_ROUTE_PROBE_DESTINATIONS[@]}"; do
+        route_info=$(docker_exec_route_get "${destination}") || return 1
+        selected_source=$(printf '%s\n' "${route_info}" | awk '
+            NR == 1 { for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }
+        ')
+        selected_gateway=$(printf '%s\n' "${route_info}" | awk '
+            NR == 1 { for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }
+        ')
+        if [ "${selected_source}" != "${DOCKER_TARGET_IP}" ] || [ "${selected_gateway}" != "${tunnel_gateway}" ]; then
+            LAST_ERROR="Unsafe route to ${destination} in ${TARGET_CONTAINER_NAME}: expected via ${tunnel_gateway} src ${DOCKER_TARGET_IP}, got ${route_info//$'\n'/ }"
+            return 1
+        fi
+    done
 }
 
 k8s_api() {
@@ -1007,6 +1345,10 @@ resolve_bridge_name() {
 ensure_container_attached() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
     [[ "${SECURE_MODE}" == "true" ]] && return 0
+    if ! detect_docker_gw_priority_support; then
+        return 1
+    fi
+
     local inspect
     inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || return 1
 
@@ -1014,21 +1356,81 @@ ensure_container_attached() {
     attached=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net] != null')
     local current_ip
     current_ip=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net].IPAddress // empty')
+    local current_priority=0
+    local desired_priority=0
+    local other_max_priority=0
 
-    if [ "${attached}" = "true" ] && [ "${current_ip}" = "${DOCKER_TARGET_IP}" ]; then
+    if [ "${DOCKER_GW_PRIORITY_SUPPORTED}" = "true" ]; then
+        current_priority=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+            '.NetworkSettings.Networks[$net].GwPriority // 0')
+        other_max_priority=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+            '[.NetworkSettings.Networks | to_entries[] | select(.key != $net) | (.value.GwPriority // 0)] | max // 0')
+        if [[ ! "${current_priority}" =~ ^-?[0-9]+$ ]] || [[ ! "${other_max_priority}" =~ ^-?[0-9]+$ ]]; then
+            LAST_ERROR="Docker returned an invalid endpoint gateway priority"
+            return 1
+        fi
+        if [ "${other_max_priority}" -ge 2147483647 ]; then
+            LAST_ERROR="Cannot assign ${DOCKER_NETWORK_NAME} a priority above competing endpoint ${other_max_priority}"
+            return 1
+        fi
+        desired_priority=$((other_max_priority + 1))
+        if [ "${desired_priority}" -lt "${DOCKER_MIN_GW_PRIORITY}" ]; then
+            desired_priority="${DOCKER_MIN_GW_PRIORITY}"
+        fi
+    fi
+
+    if [ "${attached}" = "true" ] && [ "${current_ip}" = "${DOCKER_TARGET_IP}" ] && \
+       { [ "${DOCKER_GW_PRIORITY_SUPPORTED}" != "true" ] || [ "${current_priority}" -eq "${desired_priority}" ]; }; then
+        refresh_docker_target_endpoints
         return 0
     fi
 
-    if [ "${attached}" = "true" ] && [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
-        log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (force clean for IP: ${current_ip:-NONE})"
-        docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')" >/dev/null || true
+    if [ "${attached}" = "true" ]; then
+        log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (IP=${current_ip:-NONE}, GwPriority=${current_priority})"
+        if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')" >/dev/null; then
+            LAST_ERROR="Failed to disconnect stale ${DOCKER_NETWORK_NAME} endpoint from ${TARGET_CONTAINER_NAME}"
+            return 1
+        fi
     fi
 
-    log INFO "Connecting ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME} (${DOCKER_TARGET_IP})"
-    if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" --arg ip "${DOCKER_TARGET_IP}" '{Container:$c, EndpointConfig:{IPAMConfig:{IPv4Address:$ip}}}')" >/dev/null; then
+    local connect_payload
+    if [ "${DOCKER_GW_PRIORITY_SUPPORTED}" = "true" ]; then
+        connect_payload=$(jq -cn \
+            --arg c "${TARGET_CONTAINER_ID}" \
+            --arg ip "${DOCKER_TARGET_IP}" \
+            --argjson priority "${desired_priority}" \
+            '{Container:$c, EndpointConfig:{IPAMConfig:{IPv4Address:$ip}, GwPriority:$priority}}')
+        log INFO "Connecting ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME} (${DOCKER_TARGET_IP}, GwPriority=${desired_priority})"
+    else
+        connect_payload=$(jq -cn --arg c "${TARGET_CONTAINER_ID}" --arg ip "${DOCKER_TARGET_IP}" \
+            '{Container:$c, EndpointConfig:{IPAMConfig:{IPv4Address:$ip}}}')
+        log INFO "Connecting ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME} (${DOCKER_TARGET_IP}, legacy Engine compatibility mode)"
+    fi
+    if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "${connect_payload}" >/dev/null; then
         LAST_ERROR="Failed to connect ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME}"
         return 1
     fi
+
+    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || {
+        LAST_ERROR="Failed to verify ${DOCKER_NETWORK_NAME} attachment"
+        return 1
+    }
+    current_ip=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+        '.NetworkSettings.Networks[$net].IPAddress // empty')
+    if [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
+        LAST_ERROR="${DOCKER_NETWORK_NAME} attachment did not receive ${DOCKER_TARGET_IP}"
+        return 1
+    fi
+    if [ "${DOCKER_GW_PRIORITY_SUPPORTED}" = "true" ]; then
+        current_priority=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+            '.NetworkSettings.Networks[$net].GwPriority // 0')
+        if [ "${current_priority}" != "${desired_priority}" ]; then
+            LAST_ERROR="Docker did not apply ${DOCKER_NETWORK_NAME} GwPriority=${desired_priority}"
+            return 1
+        fi
+    fi
+
+    refresh_docker_target_endpoints
 }
 
 ensure_wg_up() {
@@ -1406,7 +1808,36 @@ ensure_source_blackhole_rule() {
     SOURCE_BLACKHOLE_CHANGED="1"
 }
 
+ensure_docker_target_kill_switches() {
+    local refresh_error=""
+    local entry
+    local source
+    local subnet
+    local gateway
+    local is_tunnel
+    local priority
+
+    if ! refresh_docker_target_endpoints; then
+        refresh_error="${LAST_ERROR}"
+    fi
+
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        if ! ensure_source_blackhole_rule \
+            "${source}" "${KILL_SWITCH_PREF}" \
+            "Failed to install reconciliation kill switch for ${TARGET_CONTAINER_NAME} source ${source}"; then
+            return 1
+        fi
+    done
+
+    if [ -n "${refresh_error}" ]; then
+        LAST_ERROR="${refresh_error}"
+        return 1
+    fi
+}
+
 ensure_reconcile_kill_switch() {
+    local include_detected_target="${1:-true}"
     [[ "${K3S_MODE}" == "true" ]] && return 0
 
     if [[ "${SECURE_MODE}" == "true" ]]; then
@@ -1419,9 +1850,15 @@ ensure_reconcile_kill_switch() {
         return 0
     fi
 
-    ensure_source_blackhole_rule \
+    if ! ensure_source_blackhole_rule \
         "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}" \
-        "Failed to install reconciliation kill switch for ${DOCKER_NETWORK_SUBNET}"
+        "Failed to install reconciliation kill switch for ${DOCKER_NETWORK_SUBNET}"; then
+        return 1
+    fi
+
+    if [ "${include_detected_target}" = "true" ] && [ -n "${TARGET_CONTAINER_ID}" ]; then
+        ensure_docker_target_kill_switches
+    fi
 }
 
 remove_source_blackhole_rule() {
@@ -1449,7 +1886,24 @@ remove_reconcile_kill_switch() {
         return
     fi
 
-    remove_source_blackhole_rule "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}"
+    local entry
+    local source
+    local subnet
+    local gateway
+    local is_tunnel
+    local priority
+    local failed=false
+
+    if ! remove_source_blackhole_rule "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}"; then
+        failed=true
+    fi
+    for entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        if ! remove_source_blackhole_rule "${source}" "${KILL_SWITCH_PREF}"; then
+            failed=true
+        fi
+    done
+    [ "${failed}" = false ]
 }
 
 wireguard_handshake_is_fresh() {
@@ -1795,6 +2249,158 @@ ensure_k3s_policy_table_defaults() {
     return 0
 }
 
+ensure_docker_source_policy_rules() {
+    local changed=0
+    local entry
+    local source
+    local subnet
+    local gateway
+    local is_tunnel
+    local priority
+    local escaped_source
+    local escaped_subnet
+
+    if ! refresh_docker_target_endpoints; then
+        return 1
+    fi
+    if ! remove_stale_docker_source_policy_rules; then
+        return 1
+    fi
+    if [ "${DOCKER_STALE_POLICY_CHANGED}" = "1" ]; then
+        changed=1
+    fi
+
+    # Install every source fallback before adding any usable main/WireGuard
+    # route. If reconciliation stops midway, no target address can fall through
+    # to the host's ordinary default route.
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        if ! ensure_fallback_blackhole_rule \
+            "${source}" \
+            "Failed to add fallback blackhole rule for ${TARGET_CONTAINER_NAME} source ${source}"; then
+            return 1
+        fi
+        if [ "${BLACKHOLE_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+    done
+
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        escaped_source="${source//./\\.}"
+        escaped_subnet="${subnet//./\\.}"
+
+        # Only the endpoint's directly connected subnet bypasses WireGuard.
+        # This preserves local Bitcoin/Tor dependencies without admitting an
+        # external-capable destination through the ordinary Docker gateway.
+        if ! ip rule show pref 32500 2>/dev/null | grep -qE \
+            "from[[:space:]]+${escaped_source}(/32)?[[:space:]]+to[[:space:]]+${escaped_subnet}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]]|$)"; then
+            if ! ip rule add from "${source}" to "${subnet}" table main pref 32500 >/dev/null 2>&1; then
+                LAST_ERROR="Failed to add local bypass for ${source} to ${subnet}"
+                return 1
+            fi
+            changed=1
+        fi
+
+        if ! ip rule show pref 32764 2>/dev/null | grep -qE \
+            "from[[:space:]]+${escaped_source}(/32)?[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]]|$)"; then
+            if ! ip rule add from "${source}" table 51820 pref 32764 >/dev/null 2>&1; then
+                LAST_ERROR="Failed to route ${TARGET_CONTAINER_NAME} source ${source} through WireGuard"
+                return 1
+            fi
+            changed=1
+        fi
+    done
+
+    DOCKER_SOURCE_POLICY_CHANGED="${changed}"
+}
+
+docker_source_policy_rules_are_synced() {
+    local entry
+    local source
+    local subnet
+    local gateway
+    local is_tunnel
+    local priority
+    local escaped_source
+    local escaped_subnet
+
+    if ! refresh_docker_target_endpoints; then
+        log WARN "rules_are_synced: ${LAST_ERROR}"
+        return 1
+    fi
+
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source subnet gateway is_tunnel priority <<< "${entry}"
+        escaped_source="${source//./\\.}"
+        escaped_subnet="${subnet//./\\.}"
+        if ! ip rule show pref 32500 2>/dev/null | grep -qE \
+            "from[[:space:]]+${escaped_source}(/32)?[[:space:]]+to[[:space:]]+${escaped_subnet}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]]|$)"; then
+            log WARN "rules_are_synced: local bypass for ${source} to ${subnet} FAIL"
+            return 1
+        fi
+        if ! ip rule show pref 32764 2>/dev/null | grep -qE \
+            "from[[:space:]]+${escaped_source}(/32)?[[:space:]]+(lookup|table)[[:space:]]+51820([[:space:]]|$)"; then
+            log WARN "rules_are_synced: WireGuard source rule for ${source} FAIL"
+            return 1
+        fi
+        if ! ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -qE \
+            "^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_source}(/32)?[[:space:]]+blackhole[[:space:]]*$"; then
+            log WARN "rules_are_synced: source fallback blackhole for ${source} FAIL"
+            return 1
+        fi
+    done
+}
+
+remove_stale_docker_source_policy_rules() {
+    local managed_entry
+    local current_entry
+    local managed_source
+    local managed_subnet
+    local current_source
+    local current_subnet
+    local source_is_current
+    local subnet_is_current
+    local -a current_managed=()
+    DOCKER_STALE_POLICY_CHANGED="0"
+
+    for managed_entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r managed_source managed_subnet _ <<< "${managed_entry}"
+        source_is_current=false
+        subnet_is_current=false
+        for current_entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+            IFS='|' read -r current_source current_subnet _ <<< "${current_entry}"
+            if [ "${current_source}" = "${managed_source}" ]; then
+                source_is_current=true
+                if [ "${current_subnet}" = "${managed_subnet}" ]; then
+                    subnet_is_current=true
+                fi
+            fi
+        done
+
+        if [ "${subnet_is_current}" = false ]; then
+            ip rule del from "${managed_source}" to "${managed_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+        fi
+        if [ "${source_is_current}" = false ]; then
+            ip rule del from "${managed_source}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            ip rule del from "${managed_source}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
+            ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            DOCKER_STALE_POLICY_CHANGED="1"
+        fi
+    done
+
+    # Retain only the currently inspected endpoint identities. This bounds the
+    # ownership set and prevents a reassigned stale Docker IP from remaining
+    # routed or blackholed after a disconnect/reconnect cycle.
+    for current_entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        current_managed+=("${current_entry}")
+    done
+    MANAGED_DOCKER_IPV4_ENDPOINTS=("${current_managed[@]}")
+    if ! persist_managed_docker_policy_state; then
+        return 1
+    fi
+}
+
 ensure_policy_routing() {
     local changed=0
     local installed_rule
@@ -1918,6 +2524,13 @@ ensure_policy_routing() {
         fi
     else
         # Docker mode: subnet-based rules for the bridge network.
+        if ! ensure_docker_source_policy_rules; then
+            return 1
+        fi
+        if [ "${DOCKER_SOURCE_POLICY_CHANGED}" = "1" ]; then
+            changed=1
+        fi
+
         # Priority 32500: Local-to-Local bypass.
         # Keep bridge internal traffic out of the VPN table 51820 to prevent "No route to host" errors.
         if ! ip rule show | grep -qE "from ${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+to[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+main"; then
@@ -2381,6 +2994,15 @@ rules_are_synced() {
 
     # Docker mode checks
 
+    if ! docker_source_policy_rules_are_synced; then
+        return 1
+    fi
+
+    if ! verify_docker_target_routes; then
+        log WARN "rules_are_synced: ${LAST_ERROR}"
+        return 1
+    fi
+
     # 1. IP Rule check (Subnet routing)
     if ! ip rule show | grep -F "from ${DOCKER_NETWORK_SUBNET}" | grep -q "lookup 51820"; then
         log WARN "rules_are_synced: IP Subnet rule FAIL"
@@ -2521,6 +3143,23 @@ cleanup_dataplane() {
             fi
         done
 
+        local managed_endpoint
+        local managed_source
+        local managed_subnet
+        for managed_endpoint in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+            IFS='|' read -r managed_source managed_subnet _ <<< "${managed_endpoint}"
+            ip rule del from "${managed_source}" to "${managed_subnet}" table main pref 32500 >/dev/null 2>&1 || true
+            ip rule del from "${managed_source}" table 51820 pref 32764 >/dev/null 2>&1 || true
+            if [ "${keep_tunnel}" = false ]; then
+                ip rule del from "${managed_source}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
+                ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
+        done
+        if [ "${keep_tunnel}" = false ] && [ "${DOCKER_POLICY_STATE_LOADED}" = "true" ]; then
+            MANAGED_DOCKER_IPV4_ENDPOINTS=()
+            persist_managed_docker_policy_state || log WARN "${LAST_ERROR}"
+        fi
+
         if [[ "${SECURE_MODE}" != "true" ]]; then
             # Remove local bypass rule (pref 32500)
             ip rule del from "${DOCKER_NETWORK_SUBNET}" to "${DOCKER_NETWORK_SUBNET}" table main pref 32500 >/dev/null 2>&1 || true
@@ -2641,7 +3280,7 @@ reconcile_once() {
 
     log INFO "reconcile_start reason=${reason}"
 
-    if ! ensure_reconcile_kill_switch; then
+    if ! ensure_reconcile_kill_switch false; then
         LAST_ERROR="${LAST_ERROR:-Failed to install reconciliation kill switch}"
         write_state
         if [ -n "${request_id}" ]; then
@@ -2668,6 +3307,15 @@ reconcile_once() {
             fail_reconcile_closed "${request_id}"
         fi
         return 1
+    fi
+
+    # Discovery exposes the target's pre-existing Docker network sources.
+    # Quarantine them before changing attachments or bringing up the tunnel.
+    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]]; then
+        if ! ensure_reconcile_kill_switch; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
     fi
 
     if [[ "${K3S_MODE}" == "true" ]]; then
@@ -2722,6 +3370,15 @@ reconcile_once() {
     if ! ensure_container_attached; then
         fail_reconcile_closed "${request_id}"
         return 1
+    fi
+
+    # Attaching the protected endpoint changes the target's address set. Keep
+    # every source quarantined until both host policy and container routes pass.
+    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]]; then
+        if ! ensure_reconcile_kill_switch; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
     fi
 
     if ! resolve_bridge_name; then

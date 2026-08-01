@@ -13,6 +13,9 @@ def run_bash(script):
     with tempfile.TemporaryDirectory() as temp_dir:
         env = os.environ.copy()
         env["POLICY_TEST_STATE_FILE"] = os.path.join(temp_dir, "state")
+        env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
+            temp_dir, "docker-policy-sources.json"
+        )
         env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
@@ -83,6 +86,292 @@ GUARDS=""
 SECURE_MODE="true"
 ensure_reconcile_kill_switch
 [[ "${GUARDS}" == $'10.21.21.9:32762\n10.21.21.96:32762\n' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_sets_priority_above_competing_endpoint():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lnd"
+DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+
+docker_api() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/version")
+            printf '%s\n' '{"ApiVersion":"1.48"}'
+            ;;
+        "GET:/containers/target-id/json")
+            if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":251}}}}'
+            else
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}}}}'
+            fi
+            ;;
+        "POST:/networks/docker-tunnelsats/disconnect")
+            printf '%s\n' "disconnect" >> "${POLICY_TEST_STATE_FILE}.events"
+            ;;
+        "POST:/networks/docker-tunnelsats/connect")
+            printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
+            printf '%s\n' "connect" >> "${POLICY_TEST_STATE_FILE}.events"
+            touch "${POLICY_TEST_STATE_FILE}.connected"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_container_attached
+[[ "$(jq -r '.EndpointConfig.GwPriority' "${POLICY_TEST_STATE_FILE}.payload")" == "251" ]]
+[[ "$(jq -r '.EndpointConfig.IPAMConfig.IPv4Address' "${POLICY_TEST_STATE_FILE}.payload")" == "10.9.9.9" ]]
+[[ "$(cat "${POLICY_TEST_STATE_FILE}.events")" == $'disconnect\nconnect' ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_uses_legacy_payload_on_pre_148_engine():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lnd"
+DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+
+docker_api() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/version") printf '%s\n' '{"ApiVersion":"1.47"}' ;;
+        "GET:/containers/target-id/json")
+            if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1"}}}}'
+            else
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"}}}}'
+            fi
+            ;;
+        "POST:/networks/docker-tunnelsats/connect")
+            printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
+            touch "${POLICY_TEST_STATE_FILE}.connected"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_container_attached
+[[ "$(jq 'has("GwPriority") or (.EndpointConfig | has("GwPriority"))' "${POLICY_TEST_STATE_FILE}.payload")" == "false" ]]
+[[ "${DOCKER_GW_PRIORITY_SUPPORTED}" == "false" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_route_verification_requires_priority_source_and_gateway():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lnd"
+DOCKER_GW_PRIORITY_SUPPORTED="true"
+ROUTE_MODE="safe"
+
+refresh_docker_target_endpoints() {
+    TARGET_IPV4_ENDPOINTS=(
+        "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+        "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+    )
+}
+docker_exec_route_get() {
+    printf '%s\n' "$1" >> "${POLICY_TEST_STATE_FILE}.probes"
+    if [ "${ROUTE_MODE}" = "safe" ]; then
+        printf '%s via 10.9.9.1 dev eth1 src 10.9.9.9\n' "$1"
+    elif [ "${ROUTE_MODE}" = "wrong-source" ]; then
+        printf '%s via 10.21.0.1 dev eth0 src 10.21.0.9\n' "$1"
+    else
+        printf '%s via 10.9.9.1 dev eth1 src 10.9.9.9\n' "$1"
+    fi
+}
+
+verify_docker_target_routes
+[[ "$(cat "${POLICY_TEST_STATE_FILE}.probes")" == $'1.1.1.1\n8.8.8.8' ]]
+
+ROUTE_MODE="wrong-source"
+if verify_docker_target_routes; then exit 1; fi
+[[ "${LAST_ERROR}" == *"Unsafe route to 1.1.1.1"* ]]
+
+TARGET_IPV4_ENDPOINTS=()
+refresh_docker_target_endpoints() {
+    TARGET_IPV4_ENDPOINTS=(
+        "10.9.9.9|10.9.9.0/25|10.9.9.1|1|100"
+        "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+    )
+}
+if verify_docker_target_routes; then exit 1; fi
+[[ "${LAST_ERROR}" == *"does not outrank"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_source_policy_protects_every_assigned_ipv4():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_NAME="lnd"
+RULES=""
+ADD_COUNT=0
+
+refresh_docker_target_endpoints() {
+    TARGET_IPV4_ENDPOINTS=(
+        "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+        "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+    )
+}
+ip() {
+    if [[ "$*" == "rule show pref "* ]]; then
+        local pref="${4}"
+        printf '%s' "${RULES}" | grep "^${pref}:" || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule add" ]]; then
+        ADD_COUNT=$((ADD_COUNT + 1))
+        case "$*" in
+            "rule add from "*" blackhole pref 32765")
+                RULES+="32765:"$'\t'"from $4 blackhole"$'\n'
+                ;;
+            "rule add from "*" to "*" table main pref 32500")
+                RULES+="32500:"$'\t'"from $4 to $6 lookup main"$'\n'
+                ;;
+            "rule add from "*" table 51820 pref 32764")
+                RULES+="32764:"$'\t'"from $4 lookup 51820"$'\n'
+                ;;
+            *) return 1 ;;
+        esac
+        return 0
+    fi
+    return 1
+}
+
+ensure_docker_source_policy_rules
+[[ "${RULES}" == *$'from 10.9.9.9 to 10.9.9.0/25 lookup main'* ]]
+[[ "${RULES}" == *$'from 10.21.0.9 to 10.21.0.0/16 lookup main'* ]]
+[[ "${RULES}" == *$'from 10.9.9.9 lookup 51820'* ]]
+[[ "${RULES}" == *$'from 10.21.0.9 lookup 51820'* ]]
+[[ "${RULES}" == *$'from 10.9.9.9 blackhole'* ]]
+[[ "${RULES}" == *$'from 10.21.0.9 blackhole'* ]]
+docker_source_policy_rules_are_synced
+
+FIRST_ADD_COUNT="${ADD_COUNT}"
+ensure_docker_source_policy_rules
+[[ "${ADD_COUNT}" == "${FIRST_ADD_COUNT}" ]]
+
+RULES="${RULES//$'32764:\tfrom 10.21.0.9 lookup 51820\n'/}"
+if docker_source_policy_rules_are_synced; then exit 1; fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_stale_docker_source_policy_is_retired_after_network_reconnect():
+    result = run_bash(
+        r'''
+source "$1"
+
+TARGET_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.10|10.21.0.0/16|10.21.0.1|0|100"
+)
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+)
+DELETED=""
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+
+remove_stale_docker_source_policy_rules
+[[ "${DOCKER_STALE_POLICY_CHANGED}" == "1" ]]
+[[ "${DELETED}" == *"from 10.21.0.9 to 10.21.0.0/16 table main pref 32500"* ]]
+[[ "${DELETED}" == *"from 10.21.0.9 table 51820 pref 32764"* ]]
+[[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32762"* ]]
+[[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32765"* ]]
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" != *"10.21.0.9"* ]]
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.10"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_policy_state_recovers_stale_sources_across_entrypoint_restart():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+)
+persist_managed_docker_policy_state
+[[ "$(stat -c '%a' "${DOCKER_POLICY_STATE_FILE}")" == "600" ]]
+
+# Simulate a fresh entrypoint process after Docker reassigned the ordinary IP.
+DOCKER_POLICY_STATE_LOADED="false"
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+load_managed_docker_policy_state
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.9"* ]]
+
+TARGET_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|501"
+    "10.21.0.10|10.21.0.0/16|10.21.0.1|0|500"
+)
+DELETED=""
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+remove_stale_docker_source_policy_rules
+[[ "${DELETED}" == *"from 10.21.0.9 table 51820 pref 32764"* ]]
+
+# A second restart sees only the current ownership set.
+DOCKER_POLICY_STATE_LOADED="false"
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+load_managed_docker_policy_state
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" != *"10.21.0.9"* ]]
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.10"* ]]
 '''
     )
 
