@@ -13,6 +13,9 @@ def run_bash(script):
     with tempfile.TemporaryDirectory() as temp_dir:
         env = os.environ.copy()
         env["POLICY_TEST_STATE_FILE"] = os.path.join(temp_dir, "state")
+        env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
+            temp_dir, "docker-policy-sources.json"
+        )
         env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
@@ -321,6 +324,52 @@ remove_stale_docker_source_policy_rules
 [[ "${DELETED}" == *"from 10.21.0.9 table 51820 pref 32764"* ]]
 [[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32762"* ]]
 [[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32765"* ]]
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" != *"10.21.0.9"* ]]
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.10"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_policy_state_recovers_stale_sources_across_entrypoint_restart():
+    result = run_bash(
+        r'''
+source "$1"
+
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+)
+persist_managed_docker_policy_state
+[[ "$(stat -c '%a' "${DOCKER_POLICY_STATE_FILE}")" == "600" ]]
+
+# Simulate a fresh entrypoint process after Docker reassigned the ordinary IP.
+DOCKER_POLICY_STATE_LOADED="false"
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+load_managed_docker_policy_state
+[[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.9"* ]]
+
+TARGET_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|501"
+    "10.21.0.10|10.21.0.0/16|10.21.0.1|0|500"
+)
+DELETED=""
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+remove_stale_docker_source_policy_rules
+[[ "${DELETED}" == *"from 10.21.0.9 table 51820 pref 32764"* ]]
+
+# A second restart sees only the current ownership set.
+DOCKER_POLICY_STATE_LOADED="false"
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+load_managed_docker_policy_state
 [[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" != *"10.21.0.9"* ]]
 [[ "${MANAGED_DOCKER_IPV4_ENDPOINTS[*]}" == *"10.21.0.10"* ]]
 '''

@@ -16,6 +16,7 @@ DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
 DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
+DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 KILL_SWITCH_PREF=32762
@@ -190,6 +191,7 @@ TARGET_IMPL=""
 TARGET_IPV4_ENDPOINTS=()
 MANAGED_DOCKER_IPV4_ENDPOINTS=()
 DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+DOCKER_POLICY_STATE_LOADED="false"
 FORWARDING_PORT=""
 BRIDGE_NAME=""
 K3S_TARGET_POD_NAME=""
@@ -345,6 +347,124 @@ detect_docker_gw_priority_support() {
     fi
 }
 
+load_managed_docker_policy_state() {
+    [ "${DOCKER_POLICY_STATE_LOADED}" = "false" ] || return 0
+
+    local current_boot
+    local state
+    local saved_boot
+    local parsed
+    local entry
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for Docker policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to load Docker policy ownership"
+        return 1
+    }
+
+    if [ ! -e "${DOCKER_POLICY_STATE_FILE}" ]; then
+        DOCKER_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+    state=$(cat "${DOCKER_POLICY_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read Docker policy ownership state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.boot_id | type == "string") and
+        (.endpoints | type == "array") and
+        all(.endpoints[]; type == "string")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="Docker policy ownership state is malformed"
+        return 1
+    fi
+    saved_boot=$(printf '%s' "${state}" | jq -r '.boot_id')
+    if [ "${saved_boot}" != "${current_boot}" ]; then
+        # Policy rules do not survive a host reboot. Never claim a prior
+        # boot's source addresses as rules owned by this process.
+        MANAGED_DOCKER_IPV4_ENDPOINTS=()
+        DOCKER_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+
+    if ! parsed=$(printf '%s' "${state}" | jq -r '.endpoints[]' | python3 -c '
+import ipaddress
+import sys
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    parts = raw.split("|")
+    if len(parts) != 5:
+        raise SystemExit("invalid endpoint field count")
+    address, subnet, gateway, is_tunnel, priority = parts
+    address = str(ipaddress.IPv4Address(address))
+    network = ipaddress.IPv4Network(subnet, strict=True)
+    if ipaddress.IPv4Address(address) not in network:
+        raise SystemExit("endpoint source is outside its subnet")
+    if gateway:
+        gateway = str(ipaddress.IPv4Address(gateway))
+    if is_tunnel not in {"0", "1"}:
+        raise SystemExit("invalid tunnel marker")
+    priority = str(int(priority))
+    print(f"{address}|{network}|{gateway}|{is_tunnel}|{priority}")
+'); then
+        LAST_ERROR="Docker policy ownership endpoints are malformed"
+        return 1
+    fi
+
+    MANAGED_DOCKER_IPV4_ENDPOINTS=()
+    while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        MANAGED_DOCKER_IPV4_ENDPOINTS+=("${entry}")
+    done <<< "${parsed}"
+    DOCKER_POLICY_STATE_LOADED="true"
+}
+
+persist_managed_docker_policy_state() {
+    local current_boot
+    local state_dir
+    local state_tmp
+    local endpoints_json
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for Docker policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to persist Docker policy ownership"
+        return 1
+    }
+
+    state_dir="${DOCKER_POLICY_STATE_FILE%/*}"
+    [ "${state_dir}" != "${DOCKER_POLICY_STATE_FILE}" ] || state_dir="."
+    if ! mkdir -p "${state_dir}"; then
+        LAST_ERROR="Failed to create Docker policy ownership directory"
+        return 1
+    fi
+    state_tmp=$(mktemp "${DOCKER_POLICY_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary Docker policy ownership state"
+        return 1
+    }
+    endpoints_json=$(printf '%s\n' "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}" \
+        | jq -Rsc 'split("\n") | map(select(length > 0))') || {
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to encode Docker policy ownership endpoints"
+        return 1
+    }
+    if ! jq -n \
+        --arg boot_id "${current_boot}" \
+        --argjson endpoints "${endpoints_json}" \
+        '{version:1, boot_id:$boot_id, endpoints:$endpoints}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${DOCKER_POLICY_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist Docker policy ownership state"
+        return 1
+    fi
+}
+
 refresh_docker_target_endpoints() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
     [[ "${SECURE_MODE}" == "true" ]] && return 0
@@ -352,6 +472,9 @@ refresh_docker_target_endpoints() {
         LAST_ERROR="Cannot inspect Docker target networks without a container ID"
         return 1
     }
+    if ! load_managed_docker_policy_state; then
+        return 1
+    fi
 
     local inspect
     local parsed
@@ -421,6 +544,7 @@ if not found:
         LAST_ERROR="Docker target has no assigned IPv4 endpoints"
         return 1
     }
+    persist_managed_docker_policy_state
 }
 
 docker_exec_route_get() {
@@ -2139,7 +2263,9 @@ ensure_docker_source_policy_rules() {
     if ! refresh_docker_target_endpoints; then
         return 1
     fi
-    remove_stale_docker_source_policy_rules
+    if ! remove_stale_docker_source_policy_rules; then
+        return 1
+    fi
     if [ "${DOCKER_STALE_POLICY_CHANGED}" = "1" ]; then
         changed=1
     fi
@@ -2270,6 +2396,9 @@ remove_stale_docker_source_policy_rules() {
         current_managed+=("${current_entry}")
     done
     MANAGED_DOCKER_IPV4_ENDPOINTS=("${current_managed[@]}")
+    if ! persist_managed_docker_policy_state; then
+        return 1
+    fi
 }
 
 ensure_policy_routing() {
@@ -3026,6 +3155,10 @@ cleanup_dataplane() {
                 ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
             fi
         done
+        if [ "${keep_tunnel}" = false ] && [ "${DOCKER_POLICY_STATE_LOADED}" = "true" ]; then
+            MANAGED_DOCKER_IPV4_ENDPOINTS=()
+            persist_managed_docker_policy_state || log WARN "${LAST_ERROR}"
+        fi
 
         if [[ "${SECURE_MODE}" != "true" ]]; then
             # Remove local bypass rule (pref 32500)
