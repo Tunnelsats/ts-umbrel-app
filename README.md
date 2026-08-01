@@ -91,6 +91,11 @@ When `SECURE_MODE=false` and the Docker socket is explicitly mounted, the runtim
    - Policy routing table `51820` with blackhole fallback.
    - Inbound DNAT from WireGuard forwarding port to `10.9.9.9:9735` (or dynamically selected ports).
    - FORWARD rules between the WireGuard interface and the docker bridge.
+   - A `GwPriority` higher than every competing endpoint on Docker Engine API 1.48+.
+   - Per-source policy and fallback rules for every IPv4 assigned to the Lightning container, with only each directly connected subnet bypassing WireGuard.
+   - Live route checks to multiple public IPv4 destinations from inside the Lightning container on every reconciliation. Protection is never reported when the selected source is not `10.9.9.9` or the selected gateway is not `docker-tunnelsats`.
+
+Older Docker Engines do not support `GwPriority`; they use the compatible attach payload but must still pass the same live route checks before the reconciliation kill switch is released.
 
 ### k3s dataplane
 
