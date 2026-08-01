@@ -1863,7 +1863,7 @@ def claim_subscription():
             if sanitize_error:
                 app.logger.error(f"Upstream claim returned unsafe WireGuard config: {sanitize_error}")
                 return jsonify({"success": False, "error": "Invalid upstream payload: Unsafe WireGuard configuration"}), 400
-            full_config = sanitized_full_config or ""
+            full_config = _ensure_peer_persistent_keepalive(sanitized_full_config or "", keepalive=25)
 
             sub = data.get("subscription")
             subscription_data = sub if isinstance(sub, dict) else {}

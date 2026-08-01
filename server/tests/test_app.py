@@ -350,6 +350,34 @@ class TestClaimSavesConfig:
         conf_files = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
         assert len(conf_files) == 1
 
+    @patch('app.requests.post')
+    def test_claim_adds_missing_persistent_keepalive(self, mock_post, client, data_dir):
+        """Claimed peers must keep handshakes fresh while source traffic is quarantined."""
+        claim_response = MOCK_CLAIM_RESPONSE.copy()
+        claim_response["config"] = claim_response["config"].replace(
+            "PersistentKeepalive = 25\n", ""
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = claim_response
+        mock_resp.content = json.dumps(claim_response).encode()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_post.return_value = mock_resp
+
+        res = client.post(
+            '/api/subscription/claim',
+            json={"paymentHash": "test-hash-123", "referralCode": None},
+            content_type='application/json',
+        )
+
+        assert res.status_code == 200
+        conf_files = [f for f in os.listdir(data_dir) if f.endswith('.conf')]
+        assert len(conf_files) == 1
+        with open(os.path.join(data_dir, conf_files[0])) as config_file:
+            saved_config = config_file.read()
+        assert saved_config.count("PersistentKeepalive = 25") == 1
+
     @patch('app.requests.post', side_effect=_mock_claim_post)
     def test_claim_saves_metadata_json(self, mock_post, client, data_dir):
         """A metadata file must be created with fields from the response."""
