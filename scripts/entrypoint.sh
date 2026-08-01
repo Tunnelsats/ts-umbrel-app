@@ -614,6 +614,49 @@ read_wg_config_path() {
     echo "${files[0]:-}"
 }
 
+ensure_runtime_wireguard_keepalive() {
+    local config_path="$1"
+    local config_tmp
+
+    [ -f "${config_path}" ] || return 1
+    config_tmp="$(mktemp "${config_path}.tmp.XXXXXX")" || return 1
+
+    if ! awk '
+        function add_keepalive_if_missing() {
+            if (in_peer && !peer_has_keepalive) {
+                print "PersistentKeepalive = 25"
+            }
+        }
+        {
+            normalized = tolower($0)
+            gsub(/[[:space:]]/, "", normalized)
+            if (normalized ~ /^\[[^]]+\]$/) {
+                add_keepalive_if_missing()
+                in_peer = (normalized == "[peer]")
+                peer_has_keepalive = 0
+                print
+                next
+            }
+            directive = tolower($0)
+            if (in_peer && directive ~ /^[[:space:]]*persistentkeepalive[[:space:]]*=/) {
+                peer_has_keepalive = 1
+            }
+            print
+        }
+        END {
+            add_keepalive_if_missing()
+        }
+    ' "${config_path}" > "${config_tmp}"; then
+        rm -f "${config_tmp}"
+        return 1
+    fi
+
+    if ! mv -f "${config_tmp}" "${config_path}"; then
+        rm -f "${config_tmp}"
+        return 1
+    fi
+}
+
 extract_forwarding_port() {
     local cfg="$1"
     if [ -z "${cfg}" ] || [ ! -f "${cfg}" ]; then
@@ -998,6 +1041,10 @@ ensure_wg_up() {
 
     mkdir -p /etc/wireguard
     cp "${source_cfg}" "${WG_CONF_PATH}"
+    if ! ensure_runtime_wireguard_keepalive "${WG_CONF_PATH}"; then
+        LAST_ERROR="Failed to ensure PersistentKeepalive in runtime WireGuard config"
+        return 1
+    fi
 
     # Ensure WireGuard doesn't aggressively hijack the host routing table via AllowedIPs=0.0.0.0/0
     sed -i '/^\s*Table\s*=/Id' "${WG_CONF_PATH}"

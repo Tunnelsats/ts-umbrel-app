@@ -313,6 +313,33 @@ wireguard_handshake_is_fresh
     assert result.returncode == 0, result.stderr
 
 
+def test_runtime_wireguard_config_adds_keepalive_for_legacy_peer_idempotently():
+    result = run_bash(
+        r'''
+source "$1"
+
+CONFIG_FILE="${POLICY_TEST_STATE_FILE}.conf"
+cat > "${CONFIG_FILE}" <<'EOF_CONFIG'
+[Interface]
+PrivateKey = client-key
+
+[Peer]
+PublicKey = server-key
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.test:51820
+EOF_CONFIG
+
+ensure_runtime_wireguard_keepalive "${CONFIG_FILE}"
+[[ "$(grep -c '^PersistentKeepalive = 25$' "${CONFIG_FILE}")" == "1" ]]
+
+ensure_runtime_wireguard_keepalive "${CONFIG_FILE}"
+[[ "$(grep -c '^PersistentKeepalive = 25$' "${CONFIG_FILE}")" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_fail_closed_policy_prerequisites_require_both_blackholes_and_wg_default():
     result = run_bash(
         r'''
