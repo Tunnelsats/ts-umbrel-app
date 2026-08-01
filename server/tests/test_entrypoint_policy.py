@@ -2,6 +2,8 @@ import os
 import subprocess
 import tempfile
 
+import pytest
+
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ENTRYPOINT_PATH = os.path.join(REPO_ROOT, "scripts", "entrypoint.sh")
@@ -58,6 +60,311 @@ ensure_fallback_blackhole_rule "10.9.9.0/25" "test failure"
 [[ "${BLACKHOLE_CHANGED}" == "0" ]]
 [[ "${DELETE_COUNT}" == "2" ]]
 [[ "${ADD_COUNT}" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_startup_kill_switch_covers_docker_subnet_and_secure_candidates():
+    result = run_bash(
+        r'''
+source "$1"
+
+GUARDS=""
+ensure_source_blackhole_rule() { GUARDS+="$1:$2"$'\n'; }
+
+K3S_MODE="false"
+SECURE_MODE="false"
+ensure_reconcile_kill_switch
+[[ "${GUARDS}" == $'10.9.9.0/25:32762\n' ]]
+
+GUARDS=""
+SECURE_MODE="true"
+ensure_reconcile_kill_switch
+[[ "${GUARDS}" == $'10.21.21.9:32762\n10.21.21.96:32762\n' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_detection_failure_is_guarded_before_discovery_and_stays_fail_closed():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+EVENTS=""
+
+ensure_source_blackhole_rule() { EVENTS+="guard:$1"$'\n'; }
+detect_lightning_container() { EVENTS+="detect"$'\n'; return 1; }
+cleanup_dataplane() { EVENTS+="cleanup:$1"$'\n'; }
+write_state() { EVENTS+="state:${RULES_SYNCED}"$'\n'; }
+
+if reconcile_once "test"; then exit 1; fi
+
+[[ "${EVENTS}" == $'guard:10.21.21.9\nguard:10.21.21.96\ndetect\nguard:10.21.21.9\nguard:10.21.21.96\ncleanup:--keep-tunnel\nguard:10.21.21.9\nguard:10.21.21.96\nstate:false\n' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "failed_stage",
+    ["docker_network", "container_attach", "bridge", "wireguard", "policy", "nat"],
+)
+def test_each_reconciliation_failure_restores_the_kill_switch(failed_stage):
+    result = run_bash(
+        rf'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+FAILED_STAGE="{failed_stage}"
+GUARD_COUNT=0
+CLEANUP_COUNT=0
+
+ensure_source_blackhole_rule() {{ GUARD_COUNT=$((GUARD_COUNT + 1)); }}
+detect_lightning_container() {{ DOCKER_TARGET_IP="10.21.21.9"; TARGET_CONTAINER_NAME="lnd"; return 0; }}
+stage() {{ [[ "${{FAILED_STAGE}}" != "$1" ]]; }}
+ensure_docker_network() {{ stage docker_network; }}
+ensure_container_attached() {{ stage container_attach; }}
+resolve_bridge_name() {{ stage bridge; }}
+ensure_wg_up() {{ stage wireguard; }}
+wireguard_handshake_is_fresh() {{ return 0; }}
+ensure_policy_routing() {{ POLICY_CHANGED=0; stage policy; }}
+ensure_nat_forward_rules() {{ NAT_CHANGED=0; stage nat; }}
+rules_are_synced() {{ return 0; }}
+cleanup_dataplane() {{ [[ "$1" == "--keep-tunnel" ]]; CLEANUP_COUNT=$((CLEANUP_COUNT + 1)); }}
+write_state() {{ :; }}
+
+if reconcile_once "test"; then exit 1; fi
+[[ "${{CLEANUP_COUNT}}" == "1" ]]
+[[ "${{GUARD_COUNT}}" == "6" ]]
+[[ "${{RULES_SYNCED}}" == "false" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_failed_precleanup_guard_still_cleans_partial_dataplane_and_retries_guard():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+GUARD_COUNT=0
+CLEANUP_COUNT=0
+STATE_ERROR=""
+
+ensure_reconcile_kill_switch() {
+    GUARD_COUNT=$((GUARD_COUNT + 1))
+    if [ "${GUARD_COUNT}" = "1" ]; then
+        LAST_ERROR="pre-cleanup guard failed"
+        return 1
+    fi
+    return 0
+}
+cleanup_dataplane() {
+    [[ "$1" == "--keep-tunnel" ]]
+    CLEANUP_COUNT=$((CLEANUP_COUNT + 1))
+}
+write_state() { STATE_ERROR="${LAST_ERROR}"; }
+
+LAST_ERROR="NAT staging failed"
+if fail_reconcile_closed; then exit 1; fi
+
+[[ "${CLEANUP_COUNT}" == "1" ]]
+[[ "${GUARD_COUNT}" == "2" ]]
+[[ "${STATE_ERROR}" == *"NAT staging failed"* ]]
+[[ "${STATE_ERROR}" == *"pre-cleanup kill switch warning: pre-cleanup guard failed"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_stale_wireguard_handshake_never_activates_policy_routing():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+POLICY_COUNT=0
+CLEANUP_COUNT=0
+
+ensure_source_blackhole_rule() { :; }
+detect_lightning_container() { DOCKER_TARGET_IP="10.21.21.9"; return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { return 0; }
+wireguard_handshake_is_fresh() { LAST_ERROR="WireGuard handshake is stale"; return 1; }
+ensure_policy_routing() { POLICY_COUNT=$((POLICY_COUNT + 1)); return 0; }
+cleanup_dataplane() { CLEANUP_COUNT=$((CLEANUP_COUNT + 1)); }
+write_state() { :; }
+
+if reconcile_once "test"; then exit 1; fi
+[[ "${POLICY_COUNT}" == "0" ]]
+[[ "${CLEANUP_COUNT}" == "1" ]]
+[[ "${LAST_ERROR}" == *"handshake is stale"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_unsynced_dataplane_is_requarantined_and_reported_as_failure():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+CLEANUP_COUNT=0
+RELEASE_COUNT=0
+
+ensure_source_blackhole_rule() { :; }
+detect_lightning_container() { DOCKER_TARGET_IP="10.21.21.9"; return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED=0; return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED=0; return 0; }
+rules_are_synced() { return 1; }
+remove_reconcile_kill_switch() { RELEASE_COUNT=$((RELEASE_COUNT + 1)); }
+cleanup_dataplane() { CLEANUP_COUNT=$((CLEANUP_COUNT + 1)); }
+write_state() { :; }
+
+if reconcile_once "test"; then exit 1; fi
+[[ "${RELEASE_COUNT}" == "0" ]]
+[[ "${CLEANUP_COUNT}" == "1" ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+[[ "${LAST_ERROR}" == "Dataplane rules are not fully synced" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_guard_is_released_only_after_staged_and_active_verification():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+VERIFY_COUNT=0
+RELEASE_COUNT=0
+CLEANUP_COUNT=0
+
+ensure_source_blackhole_rule() { :; }
+detect_lightning_container() { DOCKER_TARGET_IP="10.21.21.9"; TARGET_CONTAINER_NAME="lnd"; return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED=1; return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED=1; return 0; }
+rules_are_synced() { VERIFY_COUNT=$((VERIFY_COUNT + 1)); return 0; }
+remove_reconcile_kill_switch() { RELEASE_COUNT=$((RELEASE_COUNT + 1)); return 0; }
+cleanup_dataplane() { CLEANUP_COUNT=$((CLEANUP_COUNT + 1)); }
+write_state() { :; }
+
+reconcile_once "test"
+[[ "${VERIFY_COUNT}" == "2" ]]
+[[ "${RELEASE_COUNT}" == "1" ]]
+[[ "${CLEANUP_COUNT}" == "0" ]]
+[[ "${RULES_SYNCED}" == "true" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_wireguard_handshake_freshness_rejects_missing_and_stale_values():
+    result = run_bash(
+        r'''
+source "$1"
+
+HANDSHAKE=0
+wg() { printf 'peer-key\t%s\n' "${HANDSHAKE}"; }
+date() { printf '%s\n' 1000; }
+
+if wireguard_handshake_is_fresh; then exit 1; fi
+[[ "${LAST_ERROR}" == *"no completed handshake"* ]]
+HANDSHAKE=819
+if wireguard_handshake_is_fresh; then exit 1; fi
+[[ "${LAST_ERROR}" == *"handshake is stale"* ]]
+HANDSHAKE=820
+wireguard_handshake_is_fresh
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_runtime_wireguard_config_adds_keepalive_for_legacy_peer_idempotently():
+    result = run_bash(
+        r'''
+source "$1"
+
+CONFIG_FILE="${POLICY_TEST_STATE_FILE}.conf"
+cat > "${CONFIG_FILE}" <<'EOF_CONFIG'
+[Interface]
+PrivateKey = client-key
+
+[Peer]
+PublicKey = server-key
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.test:51820
+EOF_CONFIG
+
+ensure_runtime_wireguard_keepalive "${CONFIG_FILE}"
+[[ "$(grep -c '^PersistentKeepalive = 25$' "${CONFIG_FILE}")" == "1" ]]
+
+ensure_runtime_wireguard_keepalive "${CONFIG_FILE}"
+[[ "$(grep -c '^PersistentKeepalive = 25$' "${CONFIG_FILE}")" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_fail_closed_policy_prerequisites_require_both_blackholes_and_wg_default():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="true"
+DOCKER_TARGET_IP="10.21.21.9"
+RULES=$'32765:\tfrom 10.21.21.9 blackhole\n'
+ROUTES=$'default dev tunnelsatsv2 metric 2\nblackhole default metric 3\n'
+
+ip() {
+    if [[ "$*" == "rule show pref 32765" ]]; then printf '%s' "${RULES}"; return 0; fi
+    if [[ "$*" == "route show table 51820" ]]; then printf '%s' "${ROUTES}"; return 0; fi
+    return 1
+}
+
+fail_closed_policy_prerequisites_are_synced
+RULES=""
+if fail_closed_policy_prerequisites_are_synced; then exit 1; fi
+RULES=$'32765:\tfrom 10.21.21.9 blackhole\n'
+ROUTES=$'default dev tunnelsatsv2 metric 2\n'
+if fail_closed_policy_prerequisites_are_synced; then exit 1; fi
+ROUTES=$'blackhole default metric 3\n'
+if fail_closed_policy_prerequisites_are_synced; then exit 1; fi
 '''
     )
 
