@@ -48,8 +48,8 @@ ip -n "${ROUTER_NS}" link set "${POD_ROUTER_TMP}" name pod-r
 ip -n "${POD_NS}" link set "${POD_TMP}" name pod0
 ip -n "${ROUTER_NS}" addr add 10.42.1.1/24 dev pod-r
 ip -n "${POD_NS}" addr add 10.42.1.7/24 dev pod0
-ip -n "${ROUTER_NS}" -6 addr add 2001:db8:42::1/64 dev pod-r
-ip -n "${POD_NS}" -6 addr add 2001:db8:42::7/64 dev pod0
+ip -n "${ROUTER_NS}" -6 addr add 2001:db8:42::1/64 dev pod-r nodad
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::7/64 dev pod0 nodad
 ip -n "${ROUTER_NS}" link set pod-r up
 ip -n "${POD_NS}" link set pod0 up
 ip -n "${POD_NS}" route add default via 10.42.1.1
@@ -80,9 +80,9 @@ ip -n "${CLEAR_NS}" link set "${CLEAR_TMP}" name clear-peer
 ip -n "${ROUTER_NS}" addr add 192.0.2.1/24 dev clear0
 ip -n "${CLEAR_NS}" addr add 192.0.2.2/24 dev clear-peer
 ip -n "${CLEAR_NS}" addr add 198.51.100.2/32 dev lo
-ip -n "${ROUTER_NS}" -6 addr add 2001:db8:100::1/64 dev clear0
-ip -n "${CLEAR_NS}" -6 addr add 2001:db8:100::2/64 dev clear-peer
-ip -n "${CLEAR_NS}" -6 addr add 2001:db8:ffff::2/128 dev lo
+ip -n "${ROUTER_NS}" -6 addr add 2001:db8:100::1/64 dev clear0 nodad
+ip -n "${CLEAR_NS}" -6 addr add 2001:db8:100::2/64 dev clear-peer nodad
+ip -n "${CLEAR_NS}" -6 addr add 2001:db8:ffff::2/128 dev lo nodad
 ip -n "${ROUTER_NS}" link set clear0 up
 ip -n "${CLEAR_NS}" link set clear-peer up
 ip -n "${CLEAR_NS}" route add 10.42.1.0/24 via 192.0.2.1
