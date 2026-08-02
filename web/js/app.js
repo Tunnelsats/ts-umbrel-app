@@ -1363,6 +1363,71 @@ async function confirmRestartModal(nodeType) {
     });
 }
 
+async function confirmAnnouncementChanges(nodeType, conflicts) {
+    return new Promise((resolve) => {
+        const { overlay, panel, mountAndAnimate } = createModalOverlay('announcement-confirmation-modal');
+        let settled = false;
+        const complete = (confirmed, retainTorAnnouncements = true) => {
+            if (settled) return;
+            settled = true;
+            overlay.remove();
+            resolve({ confirmed, retainTorAnnouncements });
+        };
+
+        const title = document.createElement('h3');
+        title.className = 'text-xl font-bold text-white mb-4';
+        title.textContent = 'Real-IP announcement conflict detected';
+
+        const body = document.createElement('p');
+        body.className = 'text-sm text-gray-300 leading-relaxed mb-4';
+        body.textContent = `TunnelSats found ${nodeType.toUpperCase()} settings that can publish a non-TunnelSats address. Continuing will back up and disable these user-owned settings before restarting the node.`;
+
+        const list = document.createElement('ul');
+        list.className = 'list-disc pl-5 space-y-1 text-sm font-mono text-red-300 mb-4 break-all';
+        (Array.isArray(conflicts) ? conflicts : []).forEach((conflict) => {
+            const item = document.createElement('li');
+            item.textContent = conflict;
+            list.appendChild(item);
+        });
+
+        const torLabel = document.createElement('label');
+        torLabel.className = 'flex items-start gap-3 rounded-lg border border-gray-800 bg-black/30 p-3 text-sm text-gray-300 mb-4 cursor-pointer';
+        const torCheckbox = document.createElement('input');
+        torCheckbox.type = 'checkbox';
+        torCheckbox.checked = true;
+        torCheckbox.className = 'mt-1';
+        const torText = document.createElement('span');
+        torText.textContent = 'Retain existing Tor .onion announcements. Uncheck to disable and back them up too.';
+        torLabel.append(torCheckbox, torText);
+
+        const history = document.createElement('p');
+        history.className = 'text-xs text-tsyellow leading-relaxed mb-6';
+        history.textContent = 'This withdraws addresses from current gossip, but third-party explorers and historical collectors may retain earlier snapshots.';
+
+        const actions = document.createElement('div');
+        actions.className = 'flex gap-3';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'flex-1 rounded-xl border border-gray-700 px-4 py-3 text-sm font-bold text-gray-300';
+        cancelBtn.textContent = 'Cancel';
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'flex-1 rounded-xl bg-red-500 px-4 py-3 text-sm font-bold text-white';
+        confirmBtn.textContent = 'Back Up & Disable';
+        actions.append(cancelBtn, confirmBtn);
+
+        cancelBtn.addEventListener('click', () => complete(false));
+        confirmBtn.addEventListener('click', () => complete(true, torCheckbox.checked));
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) complete(false);
+        });
+
+        panel.append(title, body, list, torLabel, history, actions);
+        mountAndAnimate();
+        confirmBtn.focus();
+    });
+}
+
 function createModalOverlay(id) {
     const existingModal = document.getElementById(id);
     if (existingModal) {
@@ -1399,7 +1464,7 @@ function createModalOverlay(id) {
     return { overlay, panel, closeModal, mountAndAnimate };
 }
 
-function showManualConfigModal(nodeType, path, lines) {
+function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipCommand = '', historicalWarning = '') {
     const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-config-modal');
 
     const title = document.createElement('h3');
@@ -1442,6 +1507,40 @@ function showManualConfigModal(nodeType, path, lines) {
     copyLinesBtn.textContent = 'Copy Configuration Lines';
     copyLinesBtn.addEventListener('click', () => copyToClipboard(linesContent, 'Configuration lines'));
 
+    const privacyBox = document.createElement('div');
+    privacyBox.className = 'rounded-xl border border-red-500/40 bg-red-950/20 p-4 mb-6 text-sm text-gray-300 space-y-3';
+    const privacyTitle = document.createElement('p');
+    privacyTitle.className = 'font-bold text-red-300';
+    privacyTitle.textContent = 'Required privacy cleanup';
+    privacyBox.appendChild(privacyTitle);
+    if (cleanupLines.length > 0) {
+        const cleanupList = document.createElement('ul');
+        cleanupList.className = 'list-disc pl-5 space-y-1 font-mono text-xs break-all';
+        cleanupLines.forEach((line) => {
+            const item = document.createElement('li');
+            item.textContent = `Remove/comment or disable: ${line}`;
+            cleanupList.appendChild(item);
+        });
+        privacyBox.appendChild(cleanupList);
+    }
+    if (gossipCommand) {
+        const command = document.createElement('pre');
+        command.className = 'bg-black/60 border border-gray-800 rounded-lg p-3 text-xs text-tsgreen overflow-x-auto whitespace-pre-wrap break-all';
+        command.textContent = gossipCommand;
+        const copyCommand = document.createElement('button');
+        copyCommand.type = 'button';
+        copyCommand.className = 'w-full rounded-lg border border-gray-700 py-2 text-xs font-bold text-gray-200';
+        copyCommand.textContent = 'Copy gossip-withdrawal command';
+        copyCommand.addEventListener('click', () => copyToClipboard(gossipCommand, 'Gossip-withdrawal command'));
+        privacyBox.append(command, copyCommand);
+    }
+    if (historicalWarning) {
+        const warning = document.createElement('p');
+        warning.className = 'text-xs text-tsyellow leading-relaxed';
+        warning.textContent = historicalWarning;
+        privacyBox.appendChild(warning);
+    }
+
     const instructionsHeader = document.createElement('p');
     instructionsHeader.className = 'font-bold text-sm text-white mb-2';
     instructionsHeader.textContent = 'Instructions:';
@@ -1452,14 +1551,18 @@ function showManualConfigModal(nodeType, path, lines) {
         ol.innerHTML = `
             <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
             <li>Navigate to the configuration file path shown above.</li>
-            <li>Add (or update if already present) the configuration line under the existing <b>[Application Options]</b> section (do not create a duplicate section header or duplicate lines).</li>
+            <li>Remove/comment every active <code>externalip=</code> line and set <code>nat=false</code>. You may retain deliberate <code>.onion</code> announcements.</li>
+            <li>Add or update the TunnelSats lines under the existing <b>[Application Options]</b> section (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
+            <li>For every previously announced clearnet address, replace the placeholder in the command above and run it over SSH.</li>
+            <li>Run <code>docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
         `;
     } else {
         ol.innerHTML = `
             <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
             <li>Navigate to the configuration file path shown above.</li>
-            <li>Add (or update if already present) each configuration line shown above (do not create duplicate lines).</li>
+            <li>Remove/comment non-TunnelSats <code>announce-addr=</code> lines, retain deliberate <code>.onion</code> values if desired, and disable <code>ip-discovery</code>.</li>
+            <li>Add or update each TunnelSats configuration line shown above (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Core Lightning</b> app.</li>
         `;
     }
@@ -1469,7 +1572,7 @@ function showManualConfigModal(nodeType, path, lines) {
     doneBtn.textContent = 'Done';
     doneBtn.addEventListener('click', closeModal);
 
-    panel.append(title, desc, pathLabel, pathValContainer, linesLabel, pre, copyLinesBtn, instructionsHeader, ol, doneBtn);
+    panel.append(title, desc, pathLabel, pathValContainer, linesLabel, pre, copyLinesBtn, privacyBox, instructionsHeader, ol, doneBtn);
     mountAndAnimate();
 }
 
@@ -1526,7 +1629,15 @@ function showManualRestoreModal(targets) {
             linesList.appendChild(li);
         });
 
-        itemDiv.append(nodeLabel, pathValContainer, linesLabel, linesList);
+        const notesList = document.createElement('ul');
+        notesList.className = 'list-disc pl-5 mt-3 text-xs text-tsyellow space-y-1';
+        (Array.isArray(t.restore_notes) ? t.restore_notes : []).forEach((note) => {
+            const li = document.createElement('li');
+            li.textContent = note;
+            notesList.appendChild(li);
+        });
+
+        itemDiv.append(nodeLabel, pathValContainer, linesLabel, linesList, notesList);
         container.appendChild(itemDiv);
     });
 
@@ -1604,17 +1715,42 @@ async function configureNode() {
     setActionMessage('configure-node-msg', 'Applying node configuration...', 'info');
 
     try {
-        const res = await fetch('/api/local/configure-node', {
+        let res = await fetch('/api/local/configure-node', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nodeType: selectedNodeType })
         });
-        const data = await safeFetchJson(res);
+        let data = await safeFetchJson(res);
+
+        if (res.status === 409 && data.requires_confirmation === true) {
+            const decision = await confirmAnnouncementChanges(selectedNodeType, data.conflicts);
+            if (!decision.confirmed) {
+                setActionMessage('configure-node-msg', 'Configuration cancelled; existing announcement settings were not changed.', 'info');
+                return;
+            }
+            res = await fetch('/api/local/configure-node', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    nodeType: selectedNodeType,
+                    confirmAddressChanges: true,
+                    retainTorAnnouncements: decision.retainTorAnnouncements
+                })
+            });
+            data = await safeFetchJson(res);
+        }
 
         if (res.ok && data.success !== false) {
             if (data.manual_mode) {
                 setActionMessage('configure-node-msg', 'Manual configuration required.', 'info');
-                showManualConfigModal(data.node_type, data.config_path, data.config_lines);
+                showManualConfigModal(
+                    data.node_type,
+                    data.config_path,
+                    data.config_lines,
+                    data.cleanup_lines,
+                    data.gossip_command,
+                    data.historical_warning
+                );
             } else {
                 const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
                 setActionMessage('configure-node-msg', `Node configured successfully: ${location}`, 'success');

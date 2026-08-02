@@ -25,6 +25,14 @@ def clear_caches():
         app_module._in_flight_probes.clear()
     yield
 
+
+@pytest.fixture(autouse=True)
+def mock_lnd_announcement_cleanup():
+    """Keep legacy endpoint tests focused; privacy-specific tests override this result."""
+    original = app_module.clean_and_verify_lnd_announcements
+    with patch('app.clean_and_verify_lnd_announcements', return_value=(True, [], [])) as mocked:
+        yield mocked, original
+
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
@@ -1491,7 +1499,10 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        res = client.post('/api/local/configure-node', json={
+                            'nodeType': 'cln',
+                            'confirmAddressChanges': True,
+                        })
 
             assert res.status_code == 200
             payload = json.loads(res.data)
@@ -1528,7 +1539,10 @@ class TestDataplaneAndRegressionFixes:
             with patch('app.DATA_DIR', tmp_dir):
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.restart_container_by_pattern', return_value=True):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                        res = client.post('/api/local/configure-node', json={
+                            'nodeType': 'cln',
+                            'confirmAddressChanges': True,
+                        })
 
             assert res.status_code == 200
             with open(cln_path, 'r') as f:
@@ -1537,7 +1551,8 @@ class TestDataplaneAndRegressionFixes:
             assert cln_content.count('announce-addr=de2.tunnelsats.com:35825\n') == 1
             assert cln_content.count('always-use-proxy=false\n') == 1
             assert cln_content.count('bind-addr=0.0.0.0:9736\n') == 1
-            assert 'old.tunnelsats.com' not in cln_content
+            assert '\nannounce-addr=old.tunnelsats.com' not in cln_content
+            assert '# TunnelSats disabled: announce-addr=old.tunnelsats.com:2222' in cln_content
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_cln_leaves_file_unchanged_when_atomic_write_fails(self, mock_ids, client):
@@ -1559,12 +1574,15 @@ class TestDataplaneAndRegressionFixes:
                 with patch('app.CLN_CONFIG_PATH', cln_path):
                     with patch('app.os.replace', side_effect=OSError('replace failed')):
                         with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                            res = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                            res = client.post('/api/local/configure-node', json={
+                                'nodeType': 'cln',
+                                'confirmAddressChanges': True,
+                            })
 
             assert res.status_code == 500
             payload = json.loads(res.data)
             assert payload['success'] is False
-            assert payload['error'] == 'Failed to modify CLN config.'
+            assert payload['error'] == 'Failed to back up CLN announcement settings.'
             mock_restart.assert_not_called()
 
             with open(cln_path, 'r') as f:
@@ -1591,7 +1609,7 @@ class TestDataplaneAndRegressionFixes:
             payload = json.loads(res.data)
             assert payload['success'] is True
             assert payload['lnd'] is True
-            assert payload['lnd_changed'] is False
+            assert payload['lnd_changed'] is True
             mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
 
     @patch('app.container_ids_by_match', return_value=['mock'])
@@ -1640,7 +1658,7 @@ class TestDataplaneAndRegressionFixes:
             assert res.status_code == 200
             payload = json.loads(res.data)
             assert payload['success'] is True
-            assert payload['lnd_changed'] is False
+            assert payload['lnd_changed'] is True
             mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
 
             with open(meta_path, 'r') as f:
@@ -1972,6 +1990,249 @@ class TestDataplaneAndRegressionFixes:
                 assert res.status_code == 200
                 with open(meta_path, 'r') as f:
                     assert json.load(f) == []
+
+
+class TestAnnouncementPrivacy:
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_lnd_conflicts_require_confirmation_then_backup_disable_and_restore(
+        self, _mock_ids, mock_lnd_announcement_cleanup, client
+    ):
+        cleanup_mock, _original_cleanup = mock_lnd_announcement_cleanup
+        cleanup_mock.return_value = (True, ['198.51.100.10:9735'], [])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            original = (
+                '[Application Options]\n'
+                'externalip=198.51.100.10:9735\n'
+                'externalip=203.0.113.9:9735\n'
+                'externalip=examplehiddenservice.onion:9735\n'
+                'externalhosts=old.example.com:9735\n'
+                'nat=1\n'
+                'nat=true # automatic discovery'
+            )
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            with open(lnd_path, 'w') as f:
+                f.write(original)
+
+            with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
+                    patch('app.restart_container_by_pattern', return_value=True):
+                blocked = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
+                assert blocked.status_code == 409
+                assert json.loads(blocked.data)['requires_confirmation'] is True
+                with open(lnd_path) as f:
+                    assert f.read() == original
+
+                configured = client.post('/api/local/configure-node', json={
+                    'nodeType': 'lnd',
+                    'confirmAddressChanges': True,
+                    'retainTorAnnouncements': True,
+                })
+                assert configured.status_code == 200
+
+                with open(lnd_path) as f:
+                    protected = f.read()
+                assert '# TunnelSats disabled: externalip=198.51.100.10:9735' in protected
+                assert '# TunnelSats disabled: externalip=203.0.113.9:9735' in protected
+                assert 'externalip=examplehiddenservice.onion:9735\n' in protected
+                assert 'externalhosts=de2.tunnelsats.com:35825\n' in protected
+                assert 'nat=false\n' in protected
+                assert '\nnat=1\n' not in protected
+                assert '# TunnelSats disabled: nat=true # automatic discovery\n' in protected
+
+                with open(meta_path) as f:
+                    protected_meta = json.load(f)
+                assert protected_meta['backupConfig']['lnd']['lines'] == [
+                    'externalip=198.51.100.10:9735',
+                    'externalip=203.0.113.9:9735',
+                    'externalip=examplehiddenservice.onion:9735',
+                    'externalhosts=old.example.com:9735',
+                    'nat=1',
+                    'nat=true # automatic discovery',
+                ]
+                assert protected_meta['lndAnnouncementVerification']['verified'] is True
+                cleanup_mock.assert_called_once_with('de2.tunnelsats.com', 35825, True)
+
+                restored = client.post('/api/local/restore-node')
+                assert restored.status_code == 200
+                with open(lnd_path) as f:
+                    restored_content = f.read()
+                for expected in original.splitlines()[1:]:
+                    assert f'\n{expected}\n' in restored_content
+                assert '\nexternalhosts=de2.tunnelsats.com:35825\n' not in restored_content
+                with open(meta_path) as f:
+                    restored_meta = json.load(f)
+                assert 'backupConfig' not in restored_meta
+                assert 'lndAnnouncementVerification' not in restored_meta
+
+    @patch('app.container_ids_by_match', return_value=['mock'])
+    def test_cln_discovery_and_clearnet_announcement_require_confirmation(self, _mock_ids, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+            cln_path = os.path.join(tmp_dir, 'config')
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            with open(cln_path, 'w') as f:
+                f.write(
+                    'announce-addr=198.51.100.20:9735\n'
+                    'announce-addr=keepme.onion:9735\n'
+                    'ip-discovery=true\n'
+                )
+
+            with patch('app.DATA_DIR', tmp_dir), patch('app.CLN_CONFIG_PATH', cln_path), \
+                    patch('app.restart_container_by_pattern', return_value=True):
+                blocked = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                payload = json.loads(blocked.data)
+                assert blocked.status_code == 409
+                assert payload['conflicts'] == [
+                    'announce-addr=198.51.100.20:9735',
+                    'ip-discovery=true',
+                ]
+                configured = client.post('/api/local/configure-node', json={
+                    'nodeType': 'cln',
+                    'confirmAddressChanges': True,
+                    'retainTorAnnouncements': True,
+                })
+                assert configured.status_code == 200
+
+                with open(cln_path) as f:
+                    first_configured_content = f.read()
+                configured_again = client.post('/api/local/configure-node', json={'nodeType': 'cln'})
+                assert configured_again.status_code == 200
+                assert json.loads(configured_again.data)['cln_changed'] is False
+                with open(cln_path) as f:
+                    assert f.read() == first_configured_content
+
+            with open(cln_path) as f:
+                content = f.read()
+            assert '\nannounce-addr=198.51.100.20:9735\n' not in content
+            assert 'announce-addr=keepme.onion:9735\n' in content
+            assert 'announce-addr=de2.tunnelsats.com:35825\n' in content
+            assert 'ip-discovery=false\n' in content
+
+    def test_live_lnd_cleanup_withdraws_real_address_and_verifies_again(
+        self, mock_lnd_announcement_cleanup
+    ):
+        _cleanup_mock, original_cleanup = mock_lnd_announcement_cleanup
+        first = json.dumps({'uris': [
+            'pubkey@198.51.100.10:9735',
+            'pubkey@nodehidden.onion:9735',
+            'pubkey@de2.tunnelsats.com:35825',
+        ]})
+        final = json.dumps({'uris': [
+            'pubkey@nodehidden.onion:9735',
+            'pubkey@de2.tunnelsats.com:35825',
+        ]})
+        with patch('app.container_id_by_match', return_value='container123'), \
+                patch('app.docker_exec', side_effect=[
+                    (True, first),
+                    (True, ''),
+                    (True, final),
+                ]) as exec_mock:
+            result = original_cleanup('de2.tunnelsats.com', 35825, True)
+
+        assert result == (True, ['198.51.100.10:9735'], [])
+        assert exec_mock.call_args_list[1].args[1] == [
+            'lncli', 'peers', 'updatenodeannouncement',
+            '--address_remove=198.51.100.10:9735',
+        ]
+
+    def test_status_fails_closed_on_active_lnd_announcement_conflicts(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            with open(lnd_path, 'w') as f:
+                f.write(
+                    '[Application Options]\n'
+                    'externalhosts=de2.tunnelsats.com:35825\n'
+                    'externalip=198.51.100.42:9735\n'
+                    'nat=true\n'
+                )
+            with open(os.path.join(tmp_dir, app_module.META_FILE), 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            dataplane = app_module.read_dataplane_state()
+            dataplane.update({'rules_synced': True, 'last_error': None})
+            containers = [{
+                'Names': ['/lightning_lnd_1'], 'Id': 'lnd1',
+                'NetworkSettings': {'Networks': {'main': {'IPAddress': '10.21.21.9'}}},
+            }]
+            run_result = MagicMock(returncode=1, stdout='')
+            with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
+                    patch('app._get_wireguard_state', return_value=('Connected', '')), \
+                    patch('app.list_containers', return_value=containers), \
+                    patch('app.read_dataplane_state', return_value=dataplane), \
+                    patch('app.subprocess.run', return_value=run_result):
+                response = client.get('/api/local/status')
+
+        payload = json.loads(response.data)
+        assert payload['rules_synced'] is False
+        assert payload['last_error'] == app_module.ANNOUNCEMENT_CONFLICT_ERROR
+        assert payload['announcement_conflicts'] == [
+            'lnd:externalip=198.51.100.42:9735',
+            'lnd:nat=true',
+        ]
+
+    def test_status_requires_endpoint_bound_rpc_verification_and_secure_mode_stays_unverified(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+            with open(lnd_path, 'w') as f:
+                f.write(
+                    '[Application Options]\n'
+                    'externalhosts=de2.tunnelsats.com:35825\n'
+                    'nat=false\n'
+                )
+            with open(meta_path, 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            dataplane = app_module.read_dataplane_state()
+            dataplane.update({'rules_synced': True, 'last_error': None})
+            containers = [{
+                'Names': ['/lightning_lnd_1'], 'Id': 'lnd1',
+                'NetworkSettings': {'Networks': {'main': {'IPAddress': '10.21.21.9'}}},
+            }]
+            common_patches = (
+                patch('app.DATA_DIR', tmp_dir),
+                patch('app.LND_CONFIG_PATH', lnd_path),
+                patch('app._get_wireguard_state', return_value=('Connected', '')),
+                patch('app.list_containers', return_value=containers),
+                patch('app.read_dataplane_state', return_value=dataplane),
+                patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')),
+            )
+            with common_patches[0], common_patches[1], common_patches[2], \
+                    common_patches[3], common_patches[4], common_patches[5]:
+                unverified = json.loads(client.get('/api/local/status').data)
+
+            assert unverified['rules_synced'] is False
+            assert unverified['last_error'] == app_module.ANNOUNCEMENT_VERIFICATION_ERROR
+
+            with open(meta_path, 'w') as f:
+                json.dump({
+                    'vpnPort': 35825,
+                    'serverDomain': 'de2.tunnelsats.com',
+                    'lndAnnouncementVerification': {
+                        'verified': True,
+                        'endpoint': 'de2.tunnelsats.com:35825',
+                    },
+                }, f)
+            with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
+                    patch('app._get_wireguard_state', return_value=('Connected', '')), \
+                    patch('app.list_containers', return_value=containers), \
+                    patch('app.read_dataplane_state', return_value=dataplane), \
+                    patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+                verified = json.loads(client.get('/api/local/status').data)
+            assert verified['rules_synced'] is True
+            assert verified['announcement_verified'] is True
+
+            with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
+                    patch('app.SECURE_MODE', True), patch('app.lnd_exists', return_value=True), \
+                    patch('app.cln_exists', return_value=False), \
+                    patch('app._get_wireguard_state', return_value=('Connected', '')), \
+                    patch('app.read_dataplane_state', return_value=dataplane), \
+                    patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+                secure = json.loads(client.get('/api/local/status').data)
+            assert secure['rules_synced'] is False
+            assert secure['announcement_verified'] is False
+            assert secure['last_error'] == app_module.ANNOUNCEMENT_VERIFICATION_ERROR
 
 class TestFullE2E_Workflow:
     @patch('app.requests.post')

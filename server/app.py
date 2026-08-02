@@ -109,6 +109,12 @@ LND_MIDDLEWARE_PATTERN = r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)
 CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-]|\d|$)"
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
+ANNOUNCEMENT_CONFLICT_ERROR = (
+    "Conflicting real-IP announcement setting detected in node configuration."
+)
+ANNOUNCEMENT_VERIFICATION_ERROR = (
+    "LND gossip announcements have not been verified free of conflicting clearnet addresses."
+)
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
@@ -732,6 +738,339 @@ def upsert_config_line_in_section(path: str, section_header: str, prefix: str, r
     return True, changed
 
 
+def _parse_active_config_entries(lines: Iterable[str]) -> List[Dict[str, str]]:
+    """Parse active key/value config lines without treating commented values as active."""
+    entries: List[Dict[str, str]] = []
+    for index, line in enumerate(lines):
+        stripped = str(line).strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        match = re.match(r"^([A-Za-z0-9_.-]+)\s*=\s*(.*?)\s*$", stripped)
+        if not match:
+            continue
+        entries.append({
+            "index": str(index),
+            "key": match.group(1).lower(),
+            "value": match.group(2).strip(),
+            "line": stripped,
+        })
+    return entries
+
+
+def _address_host(address: str) -> str:
+    endpoint = str(address or "").strip()
+    if "@" in endpoint:
+        endpoint = endpoint.rsplit("@", 1)[1]
+    if endpoint.startswith("[") and "]" in endpoint:
+        return endpoint[1:endpoint.index("]")].lower().rstrip(".")
+    host, separator, _port = endpoint.rpartition(":")
+    if separator and host:
+        return host.lower().rstrip(".")
+    return endpoint.lower().rstrip(".")
+
+
+def _is_onion_address(address: str) -> bool:
+    return _address_host(address).endswith(".onion")
+
+
+def _is_expected_tunnelsats_address(address: str, dns: str, port: int) -> bool:
+    endpoint = str(address or "").strip()
+    if "@" in endpoint:
+        endpoint = endpoint.rsplit("@", 1)[1]
+    return endpoint.lower().rstrip(".") == f"{dns}:{port}".lower().rstrip(".")
+
+
+def _config_bool(value: str) -> Optional[bool]:
+    token = re.split(r"\s*[#;]\s*|\s+", str(value or "").strip(), maxsplit=1)[0].lower()
+    if token in ("true", "1", "yes", "on"):
+        return True
+    if token in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+def _node_announcement_keys(node_type: str) -> Tuple[str, ...]:
+    if node_type == "lnd":
+        return ("externalip", "externalhosts", "nat")
+    return ("announce-addr", "ip-discovery", "bind-addr", "always-use-proxy")
+
+
+def audit_node_announcement_config(
+    node_type: str,
+    path: str,
+    dns: str,
+    port: int,
+) -> Dict[str, Any]:
+    """Return active announcement settings and privacy conflicts for one node config."""
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            lines = conf_fp.readlines()
+    except FileNotFoundError:
+        return {"readable": False, "settings": [], "conflicts": []}
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to audit {node_type.upper()} announcement config {path}: {exc}")
+        return {"readable": False, "settings": [], "conflicts": [f"{node_type}:config-unreadable"]}
+
+    keys = set(_node_announcement_keys(node_type))
+    entries = [entry for entry in _parse_active_config_entries(lines) if entry["key"] in keys]
+    conflicts: List[str] = []
+    for entry in entries:
+        key = entry["key"]
+        value = entry["value"]
+        if node_type == "lnd":
+            if key == "externalip" and not _is_onion_address(value):
+                conflicts.append(f"externalip={value}")
+            elif key == "externalhosts" and not (
+                _is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port)
+            ):
+                conflicts.append(f"externalhosts={value}")
+            elif key == "nat" and _config_bool(value) is True:
+                conflicts.append(f"nat={value}")
+        else:
+            if key == "announce-addr" and not (
+                _is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port)
+            ):
+                conflicts.append(f"announce-addr={value}")
+            elif key == "ip-discovery" and _config_bool(value) is True:
+                conflicts.append(f"ip-discovery={value}")
+
+    return {"readable": True, "settings": entries, "conflicts": conflicts}
+
+
+def _write_config_lines_atomic(path: str, lines: List[str]) -> bool:
+    file_mode = 0o600
+    file_uid = 1000
+    file_gid = 1000
+    if os.path.exists(path):
+        try:
+            stat_result = os.stat(path)
+            file_mode = stat_result.st_mode & 0o777
+            file_uid = stat_result.st_uid
+            file_gid = stat_result.st_gid
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to read config ownership for {path}: {exc}")
+
+    parent_dir = os.path.dirname(path) or "."
+    tmp_path = os.path.join(parent_dir, f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
+    try:
+        os.makedirs(parent_dir, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as conf_fp:
+            conf_fp.writelines(lines)
+        os.chmod(tmp_path, file_mode)
+        try:
+            os.chown(tmp_path, file_uid, file_gid)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+        return True
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to atomically update node config {path}: {exc}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
+def _ensure_lnd_application_lines(lines: List[str], desired: List[str]) -> List[str]:
+    section_start = None
+    section_end = len(lines)
+    for index, line in enumerate(lines):
+        if line.strip().lower() != "[application options]":
+            continue
+        section_start = index
+        for next_index in range(index + 1, len(lines)):
+            candidate = lines[next_index].strip()
+            if candidate.startswith("[") and candidate.endswith("]"):
+                section_end = next_index
+                break
+        break
+    if section_start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.extend(["[Application Options]\n", *[f"{line}\n" for line in desired]])
+        return lines
+    if section_end > 0 and not lines[section_end - 1].endswith("\n"):
+        lines[section_end - 1] += "\n"
+    lines[section_end:section_end] = [f"{line}\n" for line in desired]
+    return lines
+
+
+def apply_node_announcement_protection(
+    node_type: str,
+    path: str,
+    dns: str,
+    port: int,
+    retain_tor: bool,
+) -> Tuple[bool, bool, List[str]]:
+    """Disable conflicting settings and install the TunnelSats announcement atomically."""
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            original_lines = conf_fp.readlines()
+    except FileNotFoundError:
+        original_lines = []
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to read {node_type.upper()} config for protection: {exc}")
+        return False, False, []
+
+    entries = _parse_active_config_entries(original_lines)
+    relevant_keys = set(_node_announcement_keys(node_type))
+    backup_lines = [entry["line"] for entry in entries if entry["key"] in relevant_keys]
+    expected = f"{dns}:{port}"
+    kept: set = set()
+    updated_lines: List[str] = []
+
+    for index, line in enumerate(original_lines):
+        entry = next((item for item in entries if int(item["index"]) == index), None)
+        if entry is None or entry["key"] not in relevant_keys:
+            updated_lines.append(line)
+            continue
+
+        key = entry["key"]
+        value = entry["value"]
+        keep = False
+        mark_kept = True
+        if node_type == "lnd":
+            if key == "externalhosts" and _is_expected_tunnelsats_address(value, dns, port):
+                keep = "externalhosts" not in kept
+            elif key == "externalip" and retain_tor and _is_onion_address(value):
+                keep = True
+                mark_kept = False
+            elif key == "externalhosts" and retain_tor and _is_onion_address(value):
+                keep = True
+                mark_kept = False
+            elif key == "nat" and _config_bool(value) is False:
+                keep = "nat" not in kept
+        else:
+            if key == "announce-addr" and _is_expected_tunnelsats_address(value, dns, port):
+                keep = "announce-addr" not in kept
+            elif key == "announce-addr" and retain_tor and _is_onion_address(value):
+                keep = True
+                mark_kept = False
+            elif key == "ip-discovery" and _config_bool(value) is False:
+                keep = "ip-discovery" not in kept
+            elif key == "bind-addr" and value == "0.0.0.0:9736":
+                keep = "bind-addr" not in kept
+            elif key == "always-use-proxy" and value.lower() == "false":
+                keep = "always-use-proxy" not in kept
+
+        if keep:
+            if mark_kept:
+                kept.add(key)
+            updated_lines.append(line)
+        else:
+            newline = "\n" if line.endswith("\n") else ""
+            updated_lines.append(f"# TunnelSats disabled: {entry['line']}{newline}")
+
+    desired: List[str] = []
+    if node_type == "lnd":
+        if "externalhosts" not in kept:
+            desired.append(f"externalhosts={expected}")
+        if "nat" not in kept:
+            desired.append("nat=false")
+        updated_lines = _ensure_lnd_application_lines(updated_lines, desired)
+    else:
+        if "announce-addr" not in kept:
+            desired.append(f"announce-addr={expected}")
+        if "ip-discovery" not in kept:
+            desired.append("ip-discovery=false")
+        if "bind-addr" not in kept:
+            desired.append("bind-addr=0.0.0.0:9736")
+        if "always-use-proxy" not in kept:
+            desired.append("always-use-proxy=false")
+        if updated_lines and not updated_lines[-1].endswith("\n"):
+            updated_lines[-1] += "\n"
+        updated_lines.extend(f"{line}\n" for line in desired)
+
+    changed = updated_lines != original_lines
+    if changed and not _write_config_lines_atomic(path, updated_lines):
+        return False, False, backup_lines
+    return True, changed, backup_lines
+
+
+def restore_node_announcement_config(
+    node_type: str,
+    path: str,
+    backup_lines: List[str],
+    dns: str,
+    port: int,
+) -> Tuple[bool, bool]:
+    """Remove managed values and reactivate exactly the settings captured before setup."""
+    if not os.path.exists(path):
+        return False, False
+    try:
+        with open(path, "r", encoding="utf-8") as conf_fp:
+            original_lines = conf_fp.readlines()
+    except (IOError, OSError) as exc:
+        app.logger.warning(f"Failed to read {node_type.upper()} config for restore: {exc}")
+        return False, False
+
+    expected_counts: Dict[str, int] = {}
+    for saved_line in backup_lines:
+        expected_counts[saved_line] = expected_counts.get(saved_line, 0) + 1
+    restored_counts: Dict[str, int] = {}
+    expected_endpoint = f"{dns}:{port}"
+    updated_lines: List[str] = []
+
+    for line in original_lines:
+        stripped = line.strip()
+        tagged = re.match(r"^#\s*TunnelSats disabled:\s*(.*?)\s*$", stripped)
+        if tagged:
+            saved = tagged.group(1)
+            if restored_counts.get(saved, 0) < expected_counts.get(saved, 0):
+                updated_lines.append(f"{saved}\n")
+                restored_counts[saved] = restored_counts.get(saved, 0) + 1
+            else:
+                updated_lines.append(line)
+            continue
+
+        parsed = _parse_active_config_entries([line])
+        if not parsed:
+            updated_lines.append(line)
+            continue
+        entry = parsed[0]
+        saved = entry["line"]
+        if restored_counts.get(saved, 0) < expected_counts.get(saved, 0):
+            updated_lines.append(line)
+            restored_counts[saved] = restored_counts.get(saved, 0) + 1
+            continue
+
+        managed = False
+        if node_type == "lnd":
+            managed = (
+                entry["key"] == "externalhosts"
+                and _is_expected_tunnelsats_address(entry["value"], dns, port)
+            ) or (entry["key"] == "nat" and _config_bool(entry["value"]) is False)
+        else:
+            managed = (
+                entry["key"] == "announce-addr"
+                and entry["value"].lower() == expected_endpoint.lower()
+            ) or (
+                entry["key"] == "ip-discovery" and _config_bool(entry["value"]) is False
+            ) or (
+                entry["key"] == "bind-addr" and entry["value"] == "0.0.0.0:9736"
+            ) or (
+                entry["key"] == "always-use-proxy" and entry["value"].lower() == "false"
+            )
+        if managed:
+            newline = "\n" if line.endswith("\n") else ""
+            updated_lines.append(f"# TunnelSats disabled managed: {entry['line']}{newline}")
+        else:
+            updated_lines.append(line)
+
+    for saved_line, count in expected_counts.items():
+        missing = count - restored_counts.get(saved_line, 0)
+        updated_lines.extend(f"{saved_line}\n" for _ in range(max(0, missing)))
+
+    changed = updated_lines != original_lines
+    if changed and not _write_config_lines_atomic(path, updated_lines):
+        return False, False
+    return True, changed
+
+
 def _parse_config_comments(config_text):
     meta: Dict[str, Any] = {}
     for line in config_text.split("\n"):
@@ -819,6 +1158,63 @@ def _set_restart_pending(meta_path, _ignored_meta, key, is_pending):
         except (IOError, OSError) as exc:
             app.logger.warning(f"Failed to persist restart-pending state for {key}: {exc}")
             return False
+
+
+def _update_announcement_metadata(
+    meta_path: str,
+    node_type: str,
+    backup_lines: Optional[List[str]] = None,
+    verification: Optional[Dict[str, Any]] = None,
+    clear_backup: bool = False,
+) -> bool:
+    with _metadata_lock:
+        try:
+            with open(meta_path, "r", encoding="utf-8") as meta_fp:
+                meta = json.load(meta_fp)
+        except (IOError, OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(meta, dict):
+            return False
+
+        backup_config = meta.get("backupConfig")
+        if not isinstance(backup_config, dict):
+            backup_config = {}
+        if backup_lines is not None and node_type not in backup_config:
+            backup_config[node_type] = {
+                "lines": list(backup_lines),
+                "capturedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        if clear_backup:
+            backup_config.pop(node_type, None)
+        if backup_config:
+            meta["backupConfig"] = backup_config
+        else:
+            meta.pop("backupConfig", None)
+
+        if node_type == "lnd":
+            if verification is None:
+                meta.pop("lndAnnouncementVerification", None)
+            else:
+                meta["lndAnnouncementVerification"] = verification
+        try:
+            _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            return True
+        except (IOError, OSError) as exc:
+            app.logger.warning(f"Failed to persist announcement metadata: {exc}")
+            return False
+
+
+def _backup_lines_from_meta(meta: Dict[str, Any], node_type: str) -> Optional[List[str]]:
+    backup_config = meta.get("backupConfig")
+    if not isinstance(backup_config, dict):
+        return None
+    node_backup = backup_config.get(node_type)
+    if not isinstance(node_backup, dict):
+        return None
+    lines = node_backup.get("lines")
+    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+        return None
+    return lines
 
 
 def _has_required_wireguard_blocks(config_text):
@@ -1107,6 +1503,139 @@ def docker_api_post(path):
     except (subprocess.SubprocessError, FileNotFoundError, TimeoutError, OSError) as exc:
         app.logger.warning(f"Docker API POST failed for path {path}: {exc}")
         return False
+
+
+def docker_exec(container_id: str, command: List[str]) -> Tuple[bool, str]:
+    """Execute a fixed argv inside a container through the mounted Docker socket."""
+    if not os.path.exists(DOCKER_SOCK) or not re.fullmatch(r"[A-Za-z0-9_.-]+", container_id or ""):
+        return False, ""
+    create_payload = json.dumps({
+        "AttachStdout": True,
+        "AttachStderr": True,
+        "Tty": True,
+        "Cmd": [str(part) for part in command],
+    })
+    try:
+        create_result = subprocess.run(
+            [
+                "curl", "-sS", "--fail", "-X", "POST", "--unix-socket", DOCKER_SOCK,
+                "-H", "Content-Type: application/json", "--data-binary", create_payload,
+                f"http://localhost/containers/{container_id}/exec",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if create_result.returncode != 0:
+            return False, create_result.stderr.strip()
+        exec_id = str(json.loads(create_result.stdout).get("Id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", exec_id):
+            return False, ""
+
+        start_result = subprocess.run(
+            [
+                "curl", "-sS", "--fail", "-X", "POST", "--unix-socket", DOCKER_SOCK,
+                "-H", "Content-Type: application/json", "--data-binary",
+                json.dumps({"Detach": False, "Tty": True}),
+                f"http://localhost/exec/{exec_id}/start",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        inspect_result = subprocess.run(
+            [
+                "curl", "-sS", "--fail", "--unix-socket", DOCKER_SOCK,
+                f"http://localhost/exec/{exec_id}/json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if start_result.returncode != 0 or inspect_result.returncode != 0:
+            return False, (start_result.stdout + start_result.stderr).strip()
+        inspect_payload = json.loads(inspect_result.stdout)
+        return inspect_payload.get("ExitCode") == 0, start_result.stdout.strip()
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as exc:
+        app.logger.warning(f"Docker exec failed for container {container_id[:12]}: {exc}")
+        return False, ""
+
+
+def _parse_lnd_getinfo_uris(output: str) -> Optional[List[str]]:
+    raw = str(output or "").replace("\r", "")
+    start = raw.find("{")
+    if start < 0:
+        return None
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError:
+        return None
+    uris = payload.get("uris")
+    if not isinstance(uris, list) or not all(isinstance(uri, str) for uri in uris):
+        return None
+    addresses = []
+    for uri in uris:
+        endpoint = uri.rsplit("@", 1)[-1].strip()
+        if endpoint and endpoint not in addresses:
+            addresses.append(endpoint)
+    return addresses
+
+
+def _query_lnd_addresses(container_id: str, attempts: int = 5) -> Optional[List[str]]:
+    """Allow LND a short readiness window after its required restart."""
+    for attempt in range(max(1, attempts)):
+        ok, output = docker_exec(container_id, ["lncli", "getinfo"])
+        addresses = _parse_lnd_getinfo_uris(output) if ok else None
+        if addresses is not None:
+            return addresses
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    return None
+
+
+def clean_and_verify_lnd_announcements(
+    dns: str,
+    port: int,
+    retain_tor: bool,
+) -> Tuple[bool, List[str], List[str]]:
+    """Withdraw live non-TunnelSats clearnet LND URIs, then verify the live set."""
+    container_id = container_id_by_match(LND_CONTAINER_PATTERN)
+    if not container_id:
+        return False, [], []
+
+    addresses = _query_lnd_addresses(container_id)
+    if addresses is None:
+        return False, [], []
+
+    conflicts = [
+        address for address in addresses
+        if not _is_expected_tunnelsats_address(address, dns, port)
+        and not (retain_tor and _is_onion_address(address))
+    ]
+    removed: List[str] = []
+    for address in conflicts:
+        removed_ok, _ = docker_exec(
+            container_id,
+            ["lncli", "peers", "updatenodeannouncement", f"--address_remove={address}"],
+        )
+        if not removed_ok:
+            return False, removed, conflicts
+        removed.append(address)
+
+    verified_addresses = _query_lnd_addresses(container_id)
+    if verified_addresses is None:
+        return False, removed, conflicts
+    remaining = [
+        address for address in verified_addresses
+        if not _is_expected_tunnelsats_address(address, dns, port)
+        and not (retain_tor and _is_onion_address(address))
+    ]
+    if not any(
+        _is_expected_tunnelsats_address(address, dns, port)
+        for address in verified_addresses
+    ):
+        remaining.append(f"missing expected announcement {dns}:{port}")
+    return not remaining, removed, remaining
 
 
 def _k8s_list_pods_in_namespace(ns, token):
@@ -2046,12 +2575,14 @@ def local_status():
     server_domain = ""
     expires_at = ""
     vpn_port = ""
+    meta_data: Dict[str, Any] = {}
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
                 if isinstance(meta, dict):
+                    meta_data = meta
                     server_domain = meta.get("serverDomain", "")
                     expires_at = meta.get("expiresAt", "")
                     vpn_port = meta.get("vpnPort", "")
@@ -2059,6 +2590,44 @@ def local_status():
             pass
         except (IOError, OSError, json.JSONDecodeError) as exc:
             app.logger.warning(f"Failed to read or parse metadata file {meta_path}: {exc}")
+
+    try:
+        expected_port = int(vpn_port or 0)
+    except (TypeError, ValueError):
+        expected_port = 0
+    announcement_conflicts: List[str] = []
+    if lnd_detected or os.path.exists(LND_CONFIG_PATH):
+        lnd_audit = audit_node_announcement_config(
+            "lnd", LND_CONFIG_PATH, str(server_domain), expected_port
+        )
+        announcement_conflicts.extend(f"lnd:{item}" for item in lnd_audit["conflicts"])
+    if cln_detected or (cln_container_config and os.path.exists(cln_container_config)):
+        cln_audit = audit_node_announcement_config(
+            "cln", cln_container_config, str(server_domain), expected_port
+        )
+        announcement_conflicts.extend(f"cln:{item}" for item in cln_audit["conflicts"])
+
+    verification_required = bool(lnd_detected and lnd_routing_active)
+    verification = meta_data.get("lndAnnouncementVerification")
+    expected_endpoint = f"{server_domain}:{expected_port}"
+    announcement_verified: Optional[bool] = None
+    if verification_required:
+        announcement_verified = bool(
+            not SECURE_MODE
+            and not K3S_MODE
+            and isinstance(verification, dict)
+            and verification.get("verified") is True
+            and verification.get("endpoint") == expected_endpoint
+        )
+
+    effective_rules_synced = bool(dataplane["rules_synced"])
+    effective_error = dataplane["last_error"]
+    if announcement_conflicts:
+        effective_rules_synced = False
+        effective_error = ANNOUNCEMENT_CONFLICT_ERROR
+    elif verification_required and not announcement_verified:
+        effective_rules_synced = False
+        effective_error = ANNOUNCEMENT_VERIFICATION_ERROR
 
     # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
@@ -2101,14 +2670,17 @@ def local_status():
             "docker_network": dataplane["docker_network"],
             "forwarding_port": dataplane["forwarding_port"],
             "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
-            "rules_synced": dataplane["rules_synced"],
+            "rules_synced": effective_rules_synced,
             "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
             "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
             "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
             "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
             "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
             "last_reconcile_at": dataplane["last_reconcile_at"],
-            "last_error": dataplane["last_error"],
+            "last_error": effective_error,
+            "announcement_conflicts": announcement_conflicts,
+            "announcement_verification_required": verification_required,
+            "announcement_verified": announcement_verified,
         }
     )
 
@@ -2305,6 +2877,8 @@ def configure_node():
     app.logger.info("Action Request: Configuring Node")
     payload = request.get_json(silent=True) or {}
     node_type = str(payload.get("nodeType", "")).strip().lower()
+    confirmed = payload.get("confirmAddressChanges") is True
+    retain_tor = payload.get("retainTorAnnouncements", True) is not False
 
     if node_type not in ("lnd", "cln"):
         return jsonify({"success": False, "error": "Invalid nodeType. Use 'lnd' or 'cln'."}), 400
@@ -2341,17 +2915,25 @@ def configure_node():
 
     if SECURE_MODE:
         _, config_path = resolve_node_config(node_type)
-        config_lines = []
         if node_type == "lnd":
             config_lines = [
-                f"externalhosts={dns}:{port}"
+                f"externalhosts={dns}:{port}",
+                "nat=false",
             ]
+            cleanup_lines = ["externalip=", "nat=true", "nat=1"]
+            gossip_command = (
+                "docker exec lnd lncli peers updatenodeannouncement "
+                "--address_remove=<your-old-ip>:9735"
+            )
         else:
             config_lines = [
                 "bind-addr=0.0.0.0:9736",
                 f"announce-addr={dns}:{port}",
-                "always-use-proxy=false"
+                "ip-discovery=false",
+                "always-use-proxy=false",
             ]
+            cleanup_lines = ["announce-addr=<non-TunnelSats-address>", "ip-discovery=true"]
+            gossip_command = ""
 
         return jsonify({
             "success": True,
@@ -2359,6 +2941,13 @@ def configure_node():
             "node_type": node_type,
             "config_path": config_path,
             "config_lines": config_lines,
+            "cleanup_lines": cleanup_lines,
+            "gossip_command": gossip_command,
+            "retain_tor_supported": True,
+            "historical_warning": (
+                "Withdrawing an address updates live Lightning gossip, but third-party "
+                "explorers and historical collectors may retain addresses published earlier."
+            ),
             "port": port,
             "dns": dns
         })
@@ -2379,11 +2968,23 @@ def configure_node():
                 "dns": dns
             }), 422
 
-        lnd_processed, lnd_changed = upsert_config_line_in_section(
-            LND_CONFIG_PATH,
-            "[Application Options]",
-            "externalhosts=",
-            f"externalhosts={dns}:{port}",
+        audit = audit_node_announcement_config("lnd", LND_CONFIG_PATH, dns, port)
+        if audit["conflicts"] and not confirmed:
+            return jsonify({
+                "success": False,
+                "requires_confirmation": True,
+                "node_type": "lnd",
+                "conflicts": audit["conflicts"],
+                "retain_tor_supported": True,
+                "error": ANNOUNCEMENT_CONFLICT_ERROR,
+            }), 409
+        original_settings = [entry["line"] for entry in audit["settings"]]
+        if not _update_announcement_metadata(
+            meta_path, "lnd", backup_lines=original_settings, verification=None
+        ):
+            return jsonify({"success": False, "error": "Failed to back up LND announcement settings."}), 500
+        lnd_processed, lnd_changed, _ = apply_node_announcement_protection(
+            "lnd", LND_CONFIG_PATH, dns, port, retain_tor
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
@@ -2392,12 +2993,32 @@ def configure_node():
             return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
 
+        verified, removed, remaining = clean_and_verify_lnd_announcements(dns, port, retain_tor)
+        verification = {
+            "endpoint": f"{dns}:{port}",
+            "verified": verified,
+            "checkedAt": datetime.now(timezone.utc).isoformat(),
+            "removed": removed,
+            "remainingConflicts": remaining,
+        }
+        if not _update_announcement_metadata(meta_path, "lnd", verification=verification):
+            return jsonify({"success": False, "error": "Failed to save LND announcement verification."}), 500
+        if not verified:
+            return jsonify({
+                "success": False,
+                "error": ANNOUNCEMENT_VERIFICATION_ERROR,
+                "removed_addresses": removed,
+                "remaining_conflicts": remaining,
+            }), 500
+
         return jsonify(
             {
                 "success": True,
                 "lnd": True,
                 "cln": False,
                 "lnd_changed": lnd_changed,
+                "announcement_verified": True,
+                "removed_addresses": removed,
                 "port": port,
                 "dns": dns,
             }
@@ -2416,13 +3037,23 @@ def configure_node():
             "dns": dns
         }), 422
 
-    cln_steps = (
-        ("bind-addr=", "bind-addr=0.0.0.0:9736"),
-        ("announce-addr=", f"announce-addr={dns}:{port}"),
-        ("always-use-proxy=", "always-use-proxy=false"),
-    )
     cln_container_config, _ = resolve_node_config("cln")
-    cln_processed, cln_changed = upsert_config_lines(cln_container_config, cln_steps)
+    audit = audit_node_announcement_config("cln", cln_container_config, dns, port)
+    if audit["conflicts"] and not confirmed:
+        return jsonify({
+            "success": False,
+            "requires_confirmation": True,
+            "node_type": "cln",
+            "conflicts": audit["conflicts"],
+            "retain_tor_supported": True,
+            "error": ANNOUNCEMENT_CONFLICT_ERROR,
+        }), 409
+    original_settings = [entry["line"] for entry in audit["settings"]]
+    if not _update_announcement_metadata(meta_path, "cln", backup_lines=original_settings):
+        return jsonify({"success": False, "error": "Failed to back up CLN announcement settings."}), 500
+    cln_processed, cln_changed, _ = apply_node_announcement_protection(
+        "cln", cln_container_config, dns, port, retain_tor
+    )
     if not cln_processed:
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
@@ -2456,8 +3087,13 @@ def restore_node():
                 "node_type": "lnd",
                 "config_path": lnd_path,
                 "config_lines": [
-                    "externalhosts="
-                ]
+                    "externalhosts=",
+                    "nat=false",
+                ],
+                "restore_notes": [
+                    "Only re-enable old externalip or nat settings you deliberately want to publish.",
+                    "Previously published IP addresses may remain in third-party historical snapshots.",
+                ],
             })
         if cln_detected:
             _, cln_path = resolve_node_config("cln")
@@ -2467,8 +3103,12 @@ def restore_node():
                 "config_lines": [
                     "bind-addr=",
                     "announce-addr=",
-                    "always-use-proxy="
-                ]
+                    "ip-discovery=false",
+                    "always-use-proxy=",
+                ],
+                "restore_notes": [
+                    "Only re-enable old announce-addr or ip-discovery settings you deliberately want to publish."
+                ],
             })
         return jsonify({
             "success": True,
@@ -2482,13 +3122,32 @@ def restore_node():
     lnd_detected = lnd_exists()
     cln_detected = cln_exists()
 
-    lnd_processed, lnd_changed = comment_out_config_lines(
-        LND_CONFIG_PATH,
-        (
-            "externalhosts=",
-            "tor.skip-proxy-for-clearnet-targets=",
-        ),
-    )
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    meta: Dict[str, Any] = {}
+    try:
+        with _metadata_lock:
+            with open(meta_path, "r", encoding="utf-8") as meta_fp:
+                loaded_meta = json.load(meta_fp)
+                if isinstance(loaded_meta, dict):
+                    meta = loaded_meta
+    except (FileNotFoundError, IOError, OSError, json.JSONDecodeError):
+        pass
+    dns = str(meta.get("serverDomain", "")).strip()
+    try:
+        port = int(meta.get("vpnPort", 0))
+    except (TypeError, ValueError):
+        port = 0
+
+    lnd_backup = _backup_lines_from_meta(meta, "lnd")
+    if lnd_backup is None:
+        lnd_processed, lnd_changed = comment_out_config_lines(
+            LND_CONFIG_PATH,
+            ("externalhosts=", "tor.skip-proxy-for-clearnet-targets="),
+        )
+    else:
+        lnd_processed, lnd_changed = restore_node_announcement_config(
+            "lnd", LND_CONFIG_PATH, lnd_backup, dns, port
+        )
     if lnd_processed and lnd_detected:
         if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
             errors.append("Failed to restart LND container.")
@@ -2496,14 +3155,16 @@ def restore_node():
         app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
 
     cln_container_config, _ = resolve_node_config("cln")
-    cln_processed, cln_changed = comment_out_config_lines(
-        cln_container_config,
-        (
-            "bind-addr=",
-            "announce-addr=",
-            "always-use-proxy=",
-        ),
-    )
+    cln_backup = _backup_lines_from_meta(meta, "cln")
+    if cln_backup is None:
+        cln_processed, cln_changed = comment_out_config_lines(
+            cln_container_config,
+            ("bind-addr=", "announce-addr=", "always-use-proxy="),
+        )
+    else:
+        cln_processed, cln_changed = restore_node_announcement_config(
+            "cln", cln_container_config, cln_backup, dns, port
+        )
     if cln_processed and cln_detected:
         if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
             errors.append("Failed to restart CLN container.")
@@ -2512,6 +3173,12 @@ def restore_node():
 
     if errors:
         return jsonify({"success": False, "error": " ".join(errors)}), 500
+
+    if meta:
+        if lnd_processed:
+            _update_announcement_metadata(meta_path, "lnd", clear_backup=True, verification=None)
+        if cln_processed:
+            _update_announcement_metadata(meta_path, "cln", clear_backup=True)
 
     return jsonify(
         {

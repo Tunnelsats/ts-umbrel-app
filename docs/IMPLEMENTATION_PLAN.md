@@ -1,69 +1,82 @@
-# Issue #127 implementation plan: fail-closed IPv6 denial
+# Issue #126 implementation plan: remove stale real-IP announcements
 
 ## Decision
 
-Implement Option B from issue #127. The deployed TunnelSats WireGuard fleet
-assigns only IPv4 client addresses and provides only IPv4 transit, so advertising
-IPv6 tunnel support would require new customer configurations and a coordinated
-backend/server rollout. Until that exists, the selected Lightning workload must
-not have non-local IPv6 egress.
+Treat Lightning gossip announcements as part of the protected state, independently
+from packet routing. TunnelSats must disable automatic or explicit clearnet
+announcement settings, withdraw stale LND gossip addresses when it has direct
+container access, and fail closed whenever the remaining state cannot be verified.
 
 ## Security invariants
 
-- Keep the existing IPv4 policy-routing and WireGuard behavior unchanged.
-- Treat IPv6 as a separately verified dataplane family with policy `deny`.
-- Discover every non-link-local IPv6 address assigned to the selected Docker
-  container or Kubernetes pod before reporting protection.
-- Install two independent IPv6 controls for each discovered source: a policy
-  rule into a table whose default is blackholed, followed by a source blackhole
-  fallback, and a tagged `ip6tables` FORWARD drop for non-local egress.
-- Preserve IPv6 loopback inside the workload and link-local traffic required for
-  neighbor discovery; do not add any global/ULA bypass.
-- Never set aggregate `rules_synced` to true unless both IPv4 routing and IPv6
-  containment verify successfully. A global/ULA target address whose rules
-  cannot be installed or verified remains unprotected and reports an error.
+- Never display `Protected` while an active LND `externalip`/`nat=true` or CLN
+  non-TunnelSats `announce-addr`/`ip-discovery=true` conflict is present.
+- Preserve explicitly retained Tor `.onion` announcements; remove other non-
+  TunnelSats public announcements.
+- Require an explicit privacy confirmation before changing user-owned address
+  discovery or announcement settings.
+- Save the original active settings only once in `backupConfig` and restore only
+  that saved set. Repeated configuration and restore operations remain idempotent.
+- In direct mode, do not mark LND gossip verified until `lncli getinfo` has been
+  queried after restart, every conflicting live URI has been withdrawn with
+  `peers updatenodeannouncement`, and a second query is clean.
+- In secure or k3s modes where authenticated LND RPC is unavailable, keep the
+  aggregate status in a warning state instead of trusting a manual confirmation.
+- Explain that withdrawing an address updates current gossip but cannot erase
+  historical snapshots held by third parties.
 
 ## Implementation
 
-1. Extend target discovery in `scripts/entrypoint.sh`.
-   - Parse IPv6 endpoint addresses and IPv6 gateways from Docker inspect data.
-   - Parse the complete Kubernetes `status.podIPs` array while retaining the
-     IPv4 pod IP for the existing dataplane.
-   - Normalize and deduplicate non-loopback, non-link-local IPv6 addresses.
-2. Add an idempotent IPv6 containment reconciler.
-   - Seed a dedicated IPv6 policy table with a blackhole default.
-   - Install per-source lookup and fallback-blackhole rules before the packet
-     filter is considered ready.
-   - Maintain a tagged `ip6tables` chain that returns link-local/ND traffic and
-     drops all other forwarded IPv6 from current target addresses.
-   - Remove stale rules only when they are provably owned by TunnelSats.
-3. Split validation and status by address family.
-   - Preserve `rules_synced` as the aggregate compatibility field.
-   - Add `ipv4_rules_synced`, `ipv6_rules_synced`, `ipv6_policy`,
-     `target_ipv6_addresses`, and `target_ipv6_default_route` to state and the
-     local status API.
-   - Require aggregate `rules_synced: true` before the dashboard renders the
-     workload as Protected, even when no detailed error string is available.
-   - Reconciliation evaluates both validators independently so diagnostics do
-     not hide the state of one family behind a failure in the other.
-4. Keep cleanup fail-closed during ordinary reconciliation failures and remove
-   owned IPv6 state only during a full shutdown cleanup.
-5. Add tests.
-   - Unit-test Docker and k3s IPv6 discovery, idempotent containment, stale rule
-     cleanup, independent status fields, and verification failure behavior.
-   - Extend the root-only namespace integration test with a dual-stack pod and
-     clear-net observer. Prove IPv4 traverses the VPN observer, IPv6 is denied,
-     and removing a containment route cannot fall through to the ordinary IPv6
-     default route.
-   - Run shell syntax checks, backend tests, frontend tests, and the available
-     root-only integration tests.
-6. Document the explicit IPv6 product policy in `README.md` and `k3s/README.md`.
+1. Add shared configuration parsing and atomic transformation helpers in
+   `server/app.py`.
+   - Audit active LND `externalip`, `externalhosts`, and `nat` values.
+   - Audit active CLN `announce-addr` and `ip-discovery` values.
+   - Classify TunnelSats and `.onion` endpoints separately from conflicting
+     clearnet endpoints.
+2. Harden direct-mode configuration.
+   - Return a conflict response until the caller confirms address changes.
+   - Persist original conflicting settings under `backupConfig.lnd` or
+     `backupConfig.cln` before editing the node config.
+   - Disable conflicting announcements/discovery, retain requested Tor entries,
+     and install only the intended TunnelSats announcement.
+   - Restart the selected node after the atomic config update.
+3. Purge and verify LND gossip in direct mode.
+   - Execute authenticated `lncli getinfo` inside the detected LND container.
+   - Remove each live non-TunnelSats, non-retained-Tor URI with
+     `lncli peers updatenodeannouncement --address_remove=...`.
+   - Query again and persist an endpoint-bound verification result. Return an
+     error and leave protection fail-closed if inspection, removal, or
+     verification fails.
+4. Make restore deliberate and idempotent.
+   - Disable TunnelSats-managed announcement lines.
+   - Restore exactly the settings captured in `backupConfig` and clear only the
+     successfully restored backup entry.
+   - Restart only detected node implementations whose config was processed.
+5. Improve secure-mode guidance.
+   - Tell LND users to remove/comment `externalip`, set `nat=false`, restart,
+     withdraw each old address with the copyable Umbrel `docker exec lnd lncli`
+     command, and verify live URIs.
+   - Tell CLN users to remove non-TunnelSats `announce-addr` values and disable
+     `ip-discovery` before restart.
+   - Include the historical-gossip retention warning in setup and restore UI.
+6. Gate local status.
+   - Audit readable node configs on every `/api/local/status` request.
+   - Override aggregate `rules_synced` and `last_error` when a config conflict
+     exists, direct-mode LND gossip has not been verified for the current
+     TunnelSats endpoint, or the deployment mode cannot perform that verification.
+   - Return structured announcement-conflict and verification fields for UI and
+     diagnostics while preserving existing dataplane fields.
+7. Add backend and frontend regression coverage for multiple values, `nat=true`
+   and `nat=1`, CLN discovery, confirmation, backup/restore, retained Tor,
+   already-advertised real addresses, RPC failure, secure-mode instructions, and
+   protected-status suppression.
 
 ## Review gates
 
-1. Local review/fix cycle: inspect the complete branch diff for security,
-   ownership, cleanup, race, compatibility, and test gaps; fix every finding and
-   rerun the relevant checks until clean.
+1. Local review/fix cycle: inspect the complete branch diff for privacy leaks,
+   backup corruption, partial failure behavior, restore safety, parsing gaps,
+   command injection, status fail-open behavior, and missing tests; fix all
+   findings and rerun the full relevant test suite until clean.
 2. Greptile review/fix cycle: push the branch, open a pull request, request a
    Greptile review, resolve every actionable finding, and repeat review/checks
-   until Greptile has no findings left.
+   until Greptile reports no findings.
