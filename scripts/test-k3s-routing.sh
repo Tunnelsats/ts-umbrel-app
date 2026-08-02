@@ -91,6 +91,8 @@ ip -n "${ROUTER_NS}" -6 route add default via 2001:db8:100::2 dev clear0
 
 ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv4.ip_forward=1
 ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv6.conf.all.forwarding=1
+ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv6.conf.pod-r.forwarding=1
+ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv6.conf.clear0.forwarding=1
 ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv4.conf.all.rp_filter=0
 ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv4.conf.pod-r.rp_filter=0
 ip netns exec "${ROUTER_NS}" sysctl -q -w net.ipv4.conf.tunnelsatsv2.rp_filter=0
@@ -104,6 +106,13 @@ if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
 fi
 if ! ip netns exec "${POD_NS}" ping -6 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
     echo "FAIL: baseline IPv6 clear-egress path is unreachable" >&2
+    ip -n "${POD_NS}" -6 address show >&2
+    ip -n "${POD_NS}" -6 route show table all >&2
+    ip -n "${ROUTER_NS}" -6 address show >&2
+    ip -n "${ROUTER_NS}" -6 route show table all >&2
+    ip -n "${CLEAR_NS}" -6 address show >&2
+    ip -n "${CLEAR_NS}" -6 route show table all >&2
+    ip netns exec "${POD_NS}" ping -6 -c 1 -W 2 2001:db8:100::2 >&2 || true
     exit 1
 fi
 
