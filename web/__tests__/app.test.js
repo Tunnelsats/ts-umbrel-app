@@ -297,6 +297,31 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(true);
     });
 
+    test('fetchStatus never reports Protected when rules are unsynced without a detailed error', async () => {
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    target_impl: 'lnd',
+                    rules_synced: false,
+                    last_error: null
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).toBe('Connected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Dataplane Blocked');
+        expect(document.getElementById('txt-routing-error').textContent).toBe('Dataplane protection is not fully synced.');
+    });
+
     test('fetchStatus adjusts UI for secure_mode: true', async () => {
         global.fetch = jest.fn(() =>
             Promise.resolve({

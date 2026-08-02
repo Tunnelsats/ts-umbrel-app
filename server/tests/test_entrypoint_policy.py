@@ -92,6 +92,185 @@ ensure_reconcile_kill_switch
     assert result.returncode == 0, result.stderr
 
 
+def test_docker_endpoint_refresh_discovers_ipv6_address_gateway_and_mac():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lnd"
+DOCKER_POLICY_STATE_LOADED="true"
+persist_managed_docker_policy_state() { :; }
+docker_api() {
+    printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0,"GlobalIPv6Address":"2001:db8:21::9","GlobalIPv6PrefixLen":64,"IPv6Gateway":"2001:db8:21::1","MacAddress":"02:42:ac:11:00:09"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100,"GlobalIPv6Address":"","IPv6Gateway":"","MacAddress":"02:42:0a:09:09:09"}}}}'
+}
+
+refresh_docker_target_endpoints
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+[[ "${#TARGET_IPV6_ADDRESSES[@]}" == "1" ]]
+[[ "${TARGET_IPV6_ADDRESSES[0]}" == "2001:db8:21::9" ]]
+[[ "${TARGET_IPV6_MACS[0]}" == "02:42:ac:11:00:09" ]]
+[[ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" == "true" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_ipv6_containment_is_idempotent_and_fails_verification_on_route_drift():
+    result = run_bash(
+        r'''
+source "$1"
+
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+TARGET_IPV6_MACS=()
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+IPV6_POLICY_STATE_LOADED="true"
+MANAGED_TARGET_IPV6_ADDRESSES=()
+RULE_64=""
+RULE_65=""
+ROUTES=""
+FILTER_INSTALLED="false"
+ADD_COUNT=0
+persist_managed_ipv6_policy_state() { :; }
+
+ip() {
+    case "$*" in
+        "-6 rule show pref 32764") printf '%s\n' "${RULE_64}" ;;
+        "-6 rule show pref 32765") printf '%s\n' "${RULE_65}" ;;
+        "-6 rule add from 2001:db8:42::7 blackhole pref 32765")
+            RULE_65=$'32765:\tfrom 2001:db8:42::7 blackhole'
+            ADD_COUNT=$((ADD_COUNT + 1))
+            ;;
+        "-6 rule add from 2001:db8:42::7 table 51821 pref 32764")
+            RULE_64=$'32764:\tfrom 2001:db8:42::7 lookup 51821'
+            ADD_COUNT=$((ADD_COUNT + 1))
+            ;;
+        "-6 route show table 51821") printf '%s\n' "${ROUTES}" ;;
+        "-6 route replace blackhole default metric 42760 table 51821")
+            ROUTES="blackhole default metric 42760"
+            ADD_COUNT=$((ADD_COUNT + 1))
+            ;;
+        *) return 1 ;;
+    esac
+}
+ip6tables() {
+    if [[ "$*" == "-S FORWARD" ]]; then
+        if [ "${FILTER_INSTALLED}" = "true" ]; then
+            printf '%s\n' '-A FORWARD -s 2001:db8:42::7/128 ! -d fe80::/10 -m comment --comment tunnelsats-ipv6-deny -j DROP'
+        fi
+        return 0
+    fi
+    if [[ "$1" == "-C" ]]; then
+        [ "${FILTER_INSTALLED}" = "true" ]
+        return
+    fi
+    if [[ "$1" == "-I" ]]; then
+        FILTER_INSTALLED="true"
+        ADD_COUNT=$((ADD_COUNT + 1))
+        return 0
+    fi
+    return 1
+}
+
+ensure_ipv6_containment
+ipv6_containment_is_synced
+[[ "${ADD_COUNT}" == "4" ]]
+ensure_ipv6_containment
+ipv6_containment_is_synced
+[[ "${ADD_COUNT}" == "4" ]]
+
+ROUTES=""
+if ipv6_containment_is_synced; then exit 1; fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_ipv6_containment_refuses_to_claim_matching_unowned_policy_rule():
+    result = run_bash(
+        r'''
+source "$1"
+
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+TARGET_IPV6_MACS=()
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+IPV6_POLICY_STATE_LOADED="true"
+IPV6_POLICY_TABLE_MANAGED="false"
+MANAGED_TARGET_IPV6_ADDRESSES=()
+DELETE_COUNT=0
+persist_managed_ipv6_policy_state() { :; }
+ip6tables() {
+    case "$1" in
+        -C) return 0 ;;
+        -S) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+ip() {
+    case "$*" in
+        "-6 rule show pref 32765")
+            printf '%s\n' $'32765:\tfrom 2001:db8:42::7 blackhole'
+            ;;
+        "-6 rule show pref 32764") return 0 ;;
+        "-6 rule del"*) DELETE_COUNT=$((DELETE_COUNT + 1)); return 1 ;;
+        "-6 route show table 51821") return 0 ;;
+        "-6 route replace blackhole default metric 42760 table 51821") return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+if ensure_ipv6_containment; then exit 1; fi
+[[ "${DELETE_COUNT}" == "0" ]]
+[[ "${MANAGED_TARGET_IPV6_ADDRESSES[*]}" == "" ]]
+[[ "${LAST_ERROR}" == *"unowned rule"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_rules_synced_reports_ipv4_and_ipv6_independently():
+    result = run_bash(
+        r'''
+source "$1"
+ipv4_rules_are_synced() { return 1; }
+ipv6_containment_is_synced() { return 0; }
+if rules_are_synced; then exit 1; fi
+[[ "${IPV4_RULES_SYNCED}" == "false" ]]
+[[ "${IPV6_RULES_SYNCED}" == "true" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_write_state_reports_ipv6_policy_and_independent_family_status():
+    result = run_bash(
+        r'''
+source "$1"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7" "fd00:42::7")
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+RULES_SYNCED="false"
+IPV4_RULES_SYNCED="false"
+IPV6_RULES_SYNCED="true"
+
+write_state
+[[ "$(jq -r '.ipv6_policy' "${STATE_FILE}")" == "deny" ]]
+[[ "$(jq -r '.ipv4_rules_synced' "${STATE_FILE}")" == "false" ]]
+[[ "$(jq -r '.ipv6_rules_synced' "${STATE_FILE}")" == "true" ]]
+[[ "$(jq -r '.target_ipv6_default_route' "${STATE_FILE}")" == "true" ]]
+[[ "$(jq -r '.target_ipv6_addresses | join(",")' "${STATE_FILE}")" == "2001:db8:42::7,fd00:42::7" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_docker_attach_sets_priority_above_competing_endpoint():
     result = run_bash(
         r'''
@@ -676,13 +855,15 @@ resolve_svc_ip() {
     printf '%s\n' "10.43.0.10"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-local"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","conditions":[{"type":"Ready","status":"True"}]}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-local"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","podIPs":[{"ip":"10.42.1.7"},{"ip":"2001:db8:42::7"}],"conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 detect_k3s_target
 [[ "${TARGET_IMPL}" == "lnd" ]]
 [[ "${TARGET_CONTAINER_NAME}" == "lnd" ]]
 [[ "${DOCKER_TARGET_IP}" == "10.42.1.7" ]]
+[[ "${TARGET_IPV6_ADDRESSES[0]}" == "2001:db8:42::7" ]]
+[[ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" == "true" ]]
 [[ "${LN_TARGET_PORT}" == "9735" ]]
 [[ -z "${LAST_ERROR}" ]]
 '''

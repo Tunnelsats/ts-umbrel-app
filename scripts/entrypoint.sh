@@ -17,6 +17,12 @@ DOCKER_TARGET_IP="10.9.9.9"
 DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
 DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
+IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_FILE:-/data/tunnelsats-ipv6-policy-sources.json}"
+IPV6_POLICY_TABLE="${IPV6_POLICY_TABLE:-51821}"
+IPV6_TUNNEL_RULE_PREF="${IPV6_TUNNEL_RULE_PREF:-32764}"
+IPV6_BLACKHOLE_RULE_PREF="${IPV6_BLACKHOLE_RULE_PREF:-32765}"
+IPV6_BLACKHOLE_METRIC="${IPV6_BLACKHOLE_METRIC:-42760}"
+IPV6_RULE_MARKER="tunnelsats-ipv6-deny"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 KILL_SWITCH_PREF=32762
@@ -190,6 +196,12 @@ TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
 TARGET_IPV4_ENDPOINTS=()
 MANAGED_DOCKER_IPV4_ENDPOINTS=()
+TARGET_IPV6_ADDRESSES=()
+TARGET_IPV6_MACS=()
+MANAGED_TARGET_IPV6_ADDRESSES=()
+IPV6_POLICY_STATE_LOADED="false"
+IPV6_POLICY_TABLE_MANAGED="false"
+TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
 DOCKER_GW_PRIORITY_SUPPORTED="unknown"
 DOCKER_POLICY_STATE_LOADED="false"
 FORWARDING_PORT=""
@@ -198,6 +210,8 @@ K3S_TARGET_POD_NAME=""
 K3S_TARGET_POD_NAMESPACE=""
 K3S_TARGET_POD_SELECTOR=""
 RULES_SYNCED="false"
+IPV4_RULES_SYNCED="false"
+IPV6_RULES_SYNCED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
@@ -241,6 +255,13 @@ write_state() {
         dataplane_mode="docker-full-parity"
     fi
 
+    local target_ipv6_addresses_json
+    target_ipv6_addresses_json=$(printf '%s\n' "${TARGET_IPV6_ADDRESSES[@]}" \
+        | jq -Rsc 'split("\n") | map(select(length > 0))') || {
+        rm -f "${tmp}"
+        return 1
+    }
+
     if jq -n \
         --arg dataplane_mode "${dataplane_mode}" \
         --arg target_container "${TARGET_CONTAINER_NAME:-}" \
@@ -248,6 +269,11 @@ write_state() {
         --arg target_impl "${TARGET_IMPL:-}" \
         --arg forwarding_port "${FORWARDING_PORT:-}" \
         --argjson rules_synced "${RULES_SYNCED}" \
+        --argjson ipv4_rules_synced "${IPV4_RULES_SYNCED}" \
+        --argjson ipv6_rules_synced "${IPV6_RULES_SYNCED}" \
+        --arg ipv6_policy "deny" \
+        --argjson target_ipv6_addresses "${target_ipv6_addresses_json}" \
+        --argjson target_ipv6_default_route "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" \
         --arg last_error "${LAST_ERROR:-}" \
         --arg docker_network_name "${DOCKER_NETWORK_NAME}" \
         --arg docker_network_subnet "${DOCKER_NETWORK_SUBNET}" \
@@ -261,6 +287,11 @@ write_state() {
             target_impl: $target_impl,
             forwarding_port: $forwarding_port,
             rules_synced: $rules_synced,
+            ipv4_rules_synced: $ipv4_rules_synced,
+            ipv6_rules_synced: $ipv6_rules_synced,
+            ipv6_policy: $ipv6_policy,
+            target_ipv6_addresses: $target_ipv6_addresses,
+            target_ipv6_default_route: $target_ipv6_default_route,
             k3s_bypass_cidrs: (
                 if $k3s_bypass_cidrs == ""
                 then []
@@ -465,6 +496,136 @@ persist_managed_docker_policy_state() {
     fi
 }
 
+load_managed_ipv6_policy_state() {
+    [ "${IPV6_POLICY_STATE_LOADED}" = "false" ] || return 0
+
+    local current_boot state saved_boot parsed address
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for IPv6 policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to load IPv6 policy ownership"
+        return 1
+    }
+    if [ ! -e "${IPV6_POLICY_STATE_FILE}" ]; then
+        IPV6_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+
+    state=$(cat "${IPV6_POLICY_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read IPv6 policy ownership state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.boot_id | type == "string") and
+        (.table_managed | type == "boolean") and
+        (.addresses | type == "array") and
+        all(.addresses[]; type == "string")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="IPv6 policy ownership state is malformed"
+        return 1
+    fi
+    saved_boot=$(printf '%s' "${state}" | jq -r '.boot_id')
+    if [ "${saved_boot}" != "${current_boot}" ]; then
+        MANAGED_TARGET_IPV6_ADDRESSES=()
+        IPV6_POLICY_TABLE_MANAGED="false"
+        IPV6_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+    IPV6_POLICY_TABLE_MANAGED=$(printf '%s' "${state}" | jq -r '.table_managed')
+    if ! parsed=$(printf '%s' "${state}" | jq -r '.addresses[]' | python3 -c '
+import ipaddress
+import sys
+
+for raw in sys.stdin:
+    address = ipaddress.IPv6Address(raw.strip())
+    if address.is_unspecified or address.is_loopback or address.is_link_local or address.is_multicast:
+        raise SystemExit("non-routable address in state")
+    print(address)
+'); then
+        LAST_ERROR="IPv6 policy ownership addresses are malformed"
+        return 1
+    fi
+
+    MANAGED_TARGET_IPV6_ADDRESSES=()
+    while IFS= read -r address; do
+        [ -n "${address}" ] || continue
+        MANAGED_TARGET_IPV6_ADDRESSES+=("${address}")
+    done <<< "${parsed}"
+    IPV6_POLICY_STATE_LOADED="true"
+}
+
+persist_managed_ipv6_policy_state() {
+    local current_boot state_dir state_tmp addresses_json
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for IPv6 policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to persist IPv6 policy ownership"
+        return 1
+    }
+    state_dir="${IPV6_POLICY_STATE_FILE%/*}"
+    [ "${state_dir}" != "${IPV6_POLICY_STATE_FILE}" ] || state_dir="."
+    mkdir -p "${state_dir}" || {
+        LAST_ERROR="Failed to create IPv6 policy ownership directory"
+        return 1
+    }
+    state_tmp=$(mktemp "${IPV6_POLICY_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary IPv6 policy ownership state"
+        return 1
+    }
+    addresses_json=$(printf '%s\n' "${MANAGED_TARGET_IPV6_ADDRESSES[@]}" \
+        | jq -Rsc 'split("\n") | map(select(length > 0))') || {
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to encode IPv6 policy ownership addresses"
+        return 1
+    }
+    if ! jq -n \
+        --arg boot_id "${current_boot}" \
+        --argjson table_managed "${IPV6_POLICY_TABLE_MANAGED}" \
+        --argjson addresses "${addresses_json}" \
+        '{version:1, boot_id:$boot_id, table_managed:$table_managed, addresses:$addresses}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${IPV6_POLICY_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist IPv6 policy ownership state"
+        return 1
+    fi
+}
+
+normalize_target_ipv6_addresses() {
+    local normalized address
+    if ! normalized=$(printf '%s\n' "${TARGET_IPV6_ADDRESSES[@]}" | python3 -c '
+import ipaddress
+import sys
+
+addresses = set()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    address = ipaddress.ip_address(raw.split("%", 1)[0])
+    if address.version != 6:
+        raise SystemExit(f"{raw!r} is not an IPv6 address")
+    if address.is_unspecified or address.is_loopback or address.is_link_local or address.is_multicast:
+        continue
+    addresses.add(address)
+for address in sorted(addresses, key=int):
+    print(address)
+'); then
+        LAST_ERROR="Failed to normalize target IPv6 addresses: ${normalized//$'\n'/ }"
+        return 1
+    fi
+    TARGET_IPV6_ADDRESSES=()
+    while IFS= read -r address; do
+        [ -n "${address}" ] || continue
+        TARGET_IPV6_ADDRESSES+=("${address}")
+    done <<< "${normalized}"
+}
+
 refresh_docker_target_endpoints() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
     [[ "${SECURE_MODE}" == "true" ]] && return 0
@@ -478,7 +639,11 @@ refresh_docker_target_endpoints() {
 
     local inspect
     local parsed
+    local ipv6_parsed
     local entry
+    local address
+    local gateway
+    local mac
     local managed_entry
     local already_managed
     inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || {
@@ -524,6 +689,36 @@ if not found:
         return 1
     fi
 
+    if ! ipv6_parsed=$(printf '%s' "${inspect}" | python3 -c '
+import ipaddress
+import json
+import sys
+
+data = json.load(sys.stdin)
+networks = data.get("NetworkSettings", {}).get("Networks", {})
+if not isinstance(networks, dict):
+    raise SystemExit("NetworkSettings.Networks is unavailable")
+
+for name in sorted(networks):
+    endpoint = networks[name]
+    if not isinstance(endpoint, dict):
+        continue
+    raw_address = endpoint.get("GlobalIPv6Address") or ""
+    raw_gateway = endpoint.get("IPv6Gateway") or ""
+    mac = str(endpoint.get("MacAddress") or "").lower()
+    address = ""
+    gateway = ""
+    if raw_address:
+        address = str(ipaddress.IPv6Address(raw_address))
+    if raw_gateway:
+        gateway = str(ipaddress.IPv6Address(raw_gateway))
+    if address or gateway:
+        print(f"{address}|{gateway}|{mac}")
+'); then
+        LAST_ERROR="Failed to parse IPv6 endpoints for ${TARGET_CONTAINER_NAME:-Docker target}: ${ipv6_parsed//$'\n'/ }"
+        return 1
+    fi
+
     TARGET_IPV4_ENDPOINTS=()
     while IFS= read -r entry; do
         [ -n "${entry}" ] || continue
@@ -544,6 +739,23 @@ if not found:
         LAST_ERROR="Docker target has no assigned IPv4 endpoints"
         return 1
     }
+    TARGET_IPV6_ADDRESSES=()
+    TARGET_IPV6_MACS=()
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
+    while IFS='|' read -r address gateway mac; do
+        if [ -n "${address}" ]; then
+            TARGET_IPV6_ADDRESSES+=("${address}")
+        fi
+        if [ -n "${gateway}" ]; then
+            TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        fi
+        if [ -n "${mac}" ]; then
+            TARGET_IPV6_MACS+=("${mac}")
+        fi
+    done <<< "${ipv6_parsed}"
+    if ! normalize_target_ipv6_addresses; then
+        return 1
+    fi
     persist_managed_docker_policy_state
 }
 
@@ -1046,7 +1258,7 @@ resolve_k3s_target_pod() {
     local namespace="$2"
     local selector="$3"
     local encoded_selector pod_list running_pods pod
-    local pod_name pod_ip pod_node
+    local pod_name pod_ip pod_node pod_addresses parsed_pod_addresses family address
 
     encoded_selector=$(urlencode "${selector}")
     if ! pod_list=$(k8s_api "/api/v1/namespaces/${namespace}/pods?labelSelector=${encoded_selector}"); then
@@ -1117,8 +1329,48 @@ resolve_k3s_target_pod() {
     fi
 
     pod_name=$(printf '%s' "${pod}" | jq -r '.metadata.name // empty')
-    pod_ip=$(printf '%s' "${pod}" | jq -r '.status.podIP // empty')
     pod_node=$(printf '%s' "${pod}" | jq -r '.spec.nodeName // empty')
+
+    pod_addresses=$(printf '%s' "${pod}" | jq -r '
+        [(.status.podIPs[]?.ip // empty), (.status.podIP // empty)]
+        | unique[]
+    ' 2>/dev/null || true)
+    if ! parsed_pod_addresses=$(printf '%s\n' "${pod_addresses}" | python3 -c '
+import ipaddress
+import sys
+
+seen = set()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    address = ipaddress.ip_address(raw)
+    if address in seen:
+        continue
+    seen.add(address)
+    print(f"{address.version}|{address}")
+'); then
+        LAST_ERROR="k3s: ${impl^^} pod contains an invalid pod IP"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+    pod_ip=""
+    TARGET_IPV6_ADDRESSES=()
+    TARGET_IPV6_MACS=()
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
+    while IFS='|' read -r family address; do
+        [ -n "${address}" ] || continue
+        if [ "${family}" = "4" ] && [ -z "${pod_ip}" ]; then
+            pod_ip="${address}"
+        elif [ "${family}" = "6" ]; then
+            TARGET_IPV6_ADDRESSES+=("${address}")
+            TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        fi
+    done <<< "${parsed_pod_addresses}"
+    if ! normalize_target_ipv6_addresses; then
+        LAST_ERROR="k3s: ${LAST_ERROR}"
+        return 1
+    fi
 
     if [ -z "${pod_name}" ] || [ -z "${pod_ip}" ] || [ -z "${pod_node}" ]; then
         LAST_ERROR="k3s: ${impl^^} pod metadata incomplete (namespace=${namespace}, pod=${pod_name:-unknown}, pod_ip=${pod_ip:-missing}, node=${pod_node:-missing})"
@@ -1145,6 +1397,9 @@ detect_k3s_target() {
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
     DOCKER_TARGET_IP=""
+    TARGET_IPV6_ADDRESSES=()
+    TARGET_IPV6_MACS=()
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
     K3S_TARGET_POD_NAME=""
     K3S_TARGET_POD_NAMESPACE=""
     K3S_TARGET_POD_SELECTOR=""
@@ -1195,6 +1450,9 @@ detect_lightning_container() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    TARGET_IPV6_ADDRESSES=()
+    TARGET_IPV6_MACS=()
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
 
     if [[ "${K3S_MODE}" == "true" ]]; then
         detect_k3s_target || return 1
@@ -1234,6 +1492,7 @@ detect_lightning_container() {
             LN_TARGET_PORT="9735"
             DOCKER_TARGET_IP="10.21.21.9"
             log INFO "SecureMode: Detected LND node at ${DOCKER_TARGET_IP}"
+            discover_secure_ipv6_target || return 1
             return 0
         elif [ "${cln_ok}" -eq 1 ]; then
             TARGET_IMPL="cln"
@@ -1241,6 +1500,7 @@ detect_lightning_container() {
             LN_TARGET_PORT="9736"
             DOCKER_TARGET_IP="10.21.21.96"
             log INFO "SecureMode: Detected CLN node at ${DOCKER_TARGET_IP}"
+            discover_secure_ipv6_target || return 1
             return 0
         fi
         LAST_ERROR="SecureMode: No Lightning node detected (probed 10.21.21.9 and 10.21.21.96)"
@@ -1742,6 +2002,58 @@ release_k3s_reconcile_guards() {
         sleep "${K3S_ISOLATION_RETRY_INTERVAL}"
     done
     return 0
+}
+
+discover_secure_ipv6_target() {
+    [[ "${SECURE_MODE}" == "true" ]] || return 0
+    [ -n "${DOCKER_TARGET_IP:-}" ] || {
+        LAST_ERROR="SecureMode: Cannot inspect IPv6 without a selected target"
+        return 1
+    }
+
+    local route_info target_dev target_mac ipv6_context neighbor_line neighbor_address
+    route_info=$(ip -4 route get "${DOCKER_TARGET_IP}" 2>/dev/null || true)
+    target_dev=$(printf '%s\n' "${route_info}" | awk '
+        NR == 1 { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }
+    ')
+    [ -n "${target_dev}" ] || {
+        LAST_ERROR="SecureMode: Cannot resolve target interface for IPv6 containment"
+        return 1
+    }
+
+    ipv6_context="$({
+        ip -6 -o addr show dev "${target_dev}" scope global 2>/dev/null || true
+        ip -6 route show default dev "${target_dev}" 2>/dev/null || true
+    } | sed '/^[[:space:]]*$/d')"
+    if [ -z "${ipv6_context}" ]; then
+        return 0
+    fi
+    if printf '%s\n' "${route_info}" | grep -qE '(^|[[:space:]])via([[:space:]]|$)'; then
+        LAST_ERROR="SecureMode: IPv6-capable target is routed through a gateway and cannot be isolated by MAC"
+        return 1
+    fi
+
+    # Secure Mode deliberately has no Docker socket. Match the selected
+    # container by the link-layer identity learned for its fixed IPv4 address;
+    # this blocks even temporary/privacy IPv6 addresses that are not yet in the
+    # neighbor cache.
+    target_mac=$(ip neigh show to "${DOCKER_TARGET_IP}" dev "${target_dev}" 2>/dev/null \
+        | awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}')
+    if [[ ! "${target_mac}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
+        LAST_ERROR="SecureMode: IPv6-capable target network detected but target MAC is unavailable"
+        return 1
+    fi
+
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+    TARGET_IPV6_MACS=("${target_mac}")
+    while IFS= read -r neighbor_line; do
+        [ -n "${neighbor_line}" ] || continue
+        [[ "${neighbor_line,,}" == *"lladdr ${target_mac}"* ]] || continue
+        neighbor_address="${neighbor_line%% *}"
+        [[ "${neighbor_address}" == *:* ]] || continue
+        TARGET_IPV6_ADDRESSES+=("${neighbor_address%%\%*}")
+    done < <(ip -6 neigh show dev "${target_dev}" 2>/dev/null || true)
+    normalize_target_ipv6_addresses
 }
 
 get_target_subnet() {
@@ -2401,6 +2713,353 @@ remove_stale_docker_source_policy_rules() {
     fi
 }
 
+ipv6_rules_for_source_pref() {
+    local source="$1"
+    local preference="$2"
+    ip -6 rule show pref "${preference}" 2>/dev/null | awk -v source="${source}" '
+        {
+            for (i = 1; i < NF; i++) {
+                if ($i == "from" && ($(i + 1) == source || $(i + 1) == source "/128")) {
+                    print
+                    break
+                }
+            }
+        }
+    '
+}
+
+ipv6_address_is_managed() {
+    local source="$1"
+    local managed_source
+    for managed_source in "${MANAGED_TARGET_IPV6_ADDRESSES[@]}"; do
+        [ "${managed_source}" = "${source}" ] && return 0
+    done
+    return 1
+}
+
+ensure_ipv6_source_blackhole_rule() {
+    local source="$1"
+    local rules rule_count exact_pattern
+    exact_pattern="^${IPV6_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${source}(/128)?[[:space:]]+blackhole[[:space:]]*$"
+    rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_BLACKHOLE_RULE_PREF}" || true)
+    rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+    if [ "${rule_count}" -gt 0 ] && ! ipv6_address_is_managed "${source}"; then
+        LAST_ERROR="IPv6 blackhole preference is occupied by an unowned rule for ${source}"
+        return 1
+    fi
+    if [ "${rule_count}" -eq 1 ] && printf '%s\n' "${rules}" | grep -qE "${exact_pattern}"; then
+        return 0
+    fi
+    if ipv6_address_is_managed "${source}"; then
+        for _delete_attempt in 1 2 3 4; do
+            ip -6 rule del from "${source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || break
+        done
+    fi
+    if [ -n "$(ipv6_rules_for_source_pref "${source}" "${IPV6_BLACKHOLE_RULE_PREF}" || true)" ]; then
+        LAST_ERROR="Failed to clear conflicting IPv6 blackhole rules for ${source}"
+        return 1
+    fi
+    if ! ip -6 rule add from "${source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1; then
+        LAST_ERROR="Failed to install IPv6 fallback blackhole for ${source}"
+        return 1
+    fi
+    rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_BLACKHOLE_RULE_PREF}" || true)
+    rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+    if [ "${rule_count}" -ne 1 ] || ! printf '%s\n' "${rules}" | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="IPv6 fallback blackhole verification failed for ${source}"
+        return 1
+    fi
+}
+
+ensure_ipv6_policy_table() {
+    local routes expected_count unexpected_count
+    routes=$(ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null || true)
+    expected_count=$(printf '%s\n' "${routes}" | grep -cE \
+        "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+${IPV6_BLACKHOLE_METRIC}([[:space:]]|$)" || true)
+    unexpected_count=$(printf '%s\n' "${routes}" | grep -cvE \
+        "^$|^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+${IPV6_BLACKHOLE_METRIC}([[:space:]]|$)" || true)
+    if [ "${unexpected_count}" -ne 0 ] || [ "${expected_count}" -gt 1 ]; then
+        LAST_ERROR="IPv6 policy table ${IPV6_POLICY_TABLE} contains unowned routes"
+        return 1
+    fi
+    if [ "${expected_count}" -eq 1 ] && [ "${IPV6_POLICY_TABLE_MANAGED}" != "true" ]; then
+        LAST_ERROR="IPv6 policy table ${IPV6_POLICY_TABLE} contains an unowned blackhole"
+        return 1
+    fi
+    if [ "${expected_count}" -eq 0 ]; then
+        if ! ip -6 route replace blackhole default metric "${IPV6_BLACKHOLE_METRIC}" table "${IPV6_POLICY_TABLE}" >/dev/null 2>&1; then
+            LAST_ERROR="Failed to install IPv6 policy-table blackhole"
+            return 1
+        fi
+        IPV6_POLICY_TABLE_MANAGED="true"
+        if ! persist_managed_ipv6_policy_state; then
+            ip -6 route del blackhole default metric "${IPV6_BLACKHOLE_METRIC}" table "${IPV6_POLICY_TABLE}" >/dev/null 2>&1 || true
+            IPV6_POLICY_TABLE_MANAGED="false"
+            return 1
+        fi
+    fi
+    routes=$(ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null || true)
+    if [ "$(printf '%s\n' "${routes}" | sed '/^$/d' | wc -l)" -ne 1 ] || \
+       ! printf '%s\n' "${routes}" | grep -qE \
+        "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+${IPV6_BLACKHOLE_METRIC}([[:space:]]|$)"; then
+        LAST_ERROR="IPv6 policy-table blackhole verification failed"
+        return 1
+    fi
+}
+
+ensure_ipv6_source_policy_rule() {
+    local source="$1"
+    local rules rule_count exact_pattern
+    exact_pattern="^${IPV6_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${source}(/128)?[[:space:]]+(lookup|table)[[:space:]]+${IPV6_POLICY_TABLE}[[:space:]]*$"
+    rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_TUNNEL_RULE_PREF}" || true)
+    rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+    if [ "${rule_count}" -gt 0 ] && ! ipv6_address_is_managed "${source}"; then
+        LAST_ERROR="IPv6 policy preference is occupied by an unowned rule for ${source}"
+        return 1
+    fi
+    if [ "${rule_count}" -eq 1 ] && printf '%s\n' "${rules}" | grep -qE "${exact_pattern}"; then
+        return 0
+    fi
+    if ipv6_address_is_managed "${source}"; then
+        for _delete_attempt in 1 2 3 4; do
+            ip -6 rule del from "${source}" table "${IPV6_POLICY_TABLE}" pref "${IPV6_TUNNEL_RULE_PREF}" >/dev/null 2>&1 || break
+        done
+    fi
+    if [ -n "$(ipv6_rules_for_source_pref "${source}" "${IPV6_TUNNEL_RULE_PREF}" || true)" ]; then
+        LAST_ERROR="Failed to clear conflicting IPv6 policy rules for ${source}"
+        return 1
+    fi
+    if ! ip -6 rule add from "${source}" table "${IPV6_POLICY_TABLE}" pref "${IPV6_TUNNEL_RULE_PREF}" >/dev/null 2>&1; then
+        LAST_ERROR="Failed to install IPv6 policy rule for ${source}"
+        return 1
+    fi
+    rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_TUNNEL_RULE_PREF}" || true)
+    rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+    if [ "${rule_count}" -ne 1 ] || ! printf '%s\n' "${rules}" | grep -qE "${exact_pattern}"; then
+        LAST_ERROR="IPv6 policy-rule verification failed for ${source}"
+        return 1
+    fi
+}
+
+ipv6_filter_rule_is_current() {
+    local rule="$1"
+    local source mac
+    for source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+        if [[ "${rule}" == *" -s ${source}/128 "* ]] || [[ "${rule}" == *" -s ${source} "* ]]; then
+            return 0
+        fi
+    done
+    for mac in "${TARGET_IPV6_MACS[@]}"; do
+        [[ "${rule,,}" == *" --mac-source ${mac,,} "* ]] && return 0
+    done
+    return 1
+}
+
+remove_stale_ipv6_filter_rules() {
+    local rules rule
+    local -a parts
+    rules=$(ip6tables -S FORWARD 2>/dev/null | grep -F -- "--comment ${IPV6_RULE_MARKER}" || true)
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        ipv6_filter_rule_is_current "${rule}" && continue
+        read -r -a parts <<< "${rule}"
+        parts[0]="-D"
+        ip6tables "${parts[@]}" >/dev/null 2>&1 || {
+            LAST_ERROR="Failed to remove stale owned IPv6 filter rule"
+            return 1
+        }
+    done <<< "${rules}"
+}
+
+ensure_ipv6_containment() {
+    local source mac managed_source current_source already_current was_managed
+    local filter_ok=true
+    local routing_ok=true
+    local ip6tables_available=true
+    local containment_errors=""
+    local -a next_managed=()
+    if ! load_managed_ipv6_policy_state; then
+        return 1
+    fi
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+       [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ] && \
+       [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" != "true" ] && \
+       [ "${#MANAGED_TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+       [ "${IPV6_POLICY_TABLE_MANAGED}" != "true" ]; then
+        return 0
+    fi
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+       [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ] && \
+       [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" = "true" ]; then
+        LAST_ERROR="IPv6-capable target network detected without a safe workload selector"
+        return 1
+    fi
+    # Install the packet-filter control first so a later policy-routing failure
+    # cannot leave the workload on its ordinary IPv6 default route.
+    if ! command -v ip6tables >/dev/null 2>&1; then
+        filter_ok=false
+        ip6tables_available=false
+        containment_errors="ip6tables is unavailable for IPv6 fail-closed containment"
+    fi
+    for source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+        if [ "${ip6tables_available}" = true ] && ! ip6tables -C FORWARD -s "${source}" ! -d fe80::/10 \
+            -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+            if ! ip6tables -I FORWARD 1 -s "${source}" ! -d fe80::/10 \
+                -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+                filter_ok=false
+                containment_errors="${containment_errors:+${containment_errors}; }failed to install IPv6 egress filter for ${source}"
+            fi
+        fi
+    done
+    for mac in "${TARGET_IPV6_MACS[@]}"; do
+        if [ "${ip6tables_available}" = true ] && ! ip6tables -C FORWARD -m mac --mac-source "${mac}" ! -d fe80::/10 \
+            -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+            if ! ip6tables -I FORWARD 1 -m mac --mac-source "${mac}" ! -d fe80::/10 \
+                -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+                filter_ok=false
+                containment_errors="${containment_errors:+${containment_errors}; }failed to install IPv6 egress filter for target MAC ${mac}"
+            fi
+        fi
+    done
+
+    # The direct source blackhole is installed first. It remains effective if
+    # the dedicated policy table is later flushed or otherwise loses its route.
+    for source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+        was_managed=false
+        ipv6_address_is_managed "${source}" && was_managed=true
+        if ! ensure_ipv6_source_blackhole_rule "${source}"; then
+            routing_ok=false
+            containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+            continue
+        fi
+        if [ "${was_managed}" = false ]; then
+            MANAGED_TARGET_IPV6_ADDRESSES+=("${source}")
+            if ! persist_managed_ipv6_policy_state; then
+                ip -6 rule del from "${source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || true
+                MANAGED_TARGET_IPV6_ADDRESSES=("${MANAGED_TARGET_IPV6_ADDRESSES[@]:0:${#MANAGED_TARGET_IPV6_ADDRESSES[@]}-1}")
+                routing_ok=false
+                containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+            fi
+        fi
+    done
+    if ! ensure_ipv6_policy_table; then
+        routing_ok=false
+        containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+    fi
+    if [ "${IPV6_POLICY_TABLE_MANAGED}" = true ]; then
+        for source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+            ipv6_address_is_managed "${source}" || continue
+            if ! ensure_ipv6_source_policy_rule "${source}"; then
+                routing_ok=false
+                containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+            fi
+        done
+    fi
+    if [ "${filter_ok}" = true ]; then
+        if ! remove_stale_ipv6_filter_rules; then
+            filter_ok=false
+            containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+        fi
+    fi
+
+    # Retire stale routing rules only after every current selector is guarded.
+    next_managed=()
+    for managed_source in "${MANAGED_TARGET_IPV6_ADDRESSES[@]}"; do
+        already_current=false
+        for current_source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+            [ "${managed_source}" = "${current_source}" ] && already_current=true
+        done
+        if [ "${already_current}" = true ]; then
+            next_managed+=("${managed_source}")
+            continue
+        fi
+        for _delete_attempt in 1 2 3 4; do
+            ip -6 rule del from "${managed_source}" table "${IPV6_POLICY_TABLE}" pref "${IPV6_TUNNEL_RULE_PREF}" >/dev/null 2>&1 || break
+        done
+        for _delete_attempt in 1 2 3 4; do
+            ip -6 rule del from "${managed_source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || break
+        done
+    done
+    MANAGED_TARGET_IPV6_ADDRESSES=("${next_managed[@]}")
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+       [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ] && \
+       [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" != "true" ] && \
+       [ "${IPV6_POLICY_TABLE_MANAGED}" = "true" ]; then
+        ip -6 route del blackhole default metric "${IPV6_BLACKHOLE_METRIC}" table "${IPV6_POLICY_TABLE}" >/dev/null 2>&1 || true
+        if ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null | grep -qE \
+            "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+${IPV6_BLACKHOLE_METRIC}([[:space:]]|$)"; then
+            routing_ok=false
+            containment_errors="${containment_errors:+${containment_errors}; }failed to retire the owned IPv6 policy table"
+        else
+            IPV6_POLICY_TABLE_MANAGED="false"
+        fi
+    fi
+    if ! persist_managed_ipv6_policy_state; then
+        routing_ok=false
+        containment_errors="${containment_errors:+${containment_errors}; }${LAST_ERROR}"
+    fi
+    if [ "${filter_ok}" != true ] || [ "${routing_ok}" != true ]; then
+        LAST_ERROR="${containment_errors:-IPv6 containment reconciliation failed}"
+        return 1
+    fi
+}
+
+ipv6_containment_is_synced() {
+    local source mac rules rule_count routes exact_blackhole_pattern exact_policy_pattern
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+       [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ] && \
+       [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" != "true" ]; then
+        return 0
+    fi
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ]; then
+        log WARN "ipv6_rules_are_synced: IPv6-capable target has no safe selector"
+        return 1
+    fi
+    if [ "${IPV6_POLICY_TABLE_MANAGED}" != "true" ]; then
+        log WARN "ipv6_rules_are_synced: policy table is not owned"
+        return 1
+    fi
+    routes=$(ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null || true)
+    if [ "$(printf '%s\n' "${routes}" | sed '/^$/d' | wc -l)" -ne 1 ] || \
+       ! printf '%s\n' "${routes}" | grep -qE \
+        "^blackhole[[:space:]]+default([[:space:]].*)metric[[:space:]]+${IPV6_BLACKHOLE_METRIC}([[:space:]]|$)"; then
+        log WARN "ipv6_rules_are_synced: policy-table blackhole FAIL"
+        return 1
+    fi
+    for source in "${TARGET_IPV6_ADDRESSES[@]}"; do
+        if ! ipv6_address_is_managed "${source}"; then
+            log WARN "ipv6_rules_are_synced: source ${source} is not owned"
+            return 1
+        fi
+        exact_blackhole_pattern="^${IPV6_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${source}(/128)?[[:space:]]+blackhole[[:space:]]*$"
+        exact_policy_pattern="^${IPV6_TUNNEL_RULE_PREF}:[[:space:]]+from[[:space:]]+${source}(/128)?[[:space:]]+(lookup|table)[[:space:]]+${IPV6_POLICY_TABLE}[[:space:]]*$"
+        rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_BLACKHOLE_RULE_PREF}" || true)
+        rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+        if [ "${rule_count}" -ne 1 ] || ! printf '%s\n' "${rules}" | grep -qE "${exact_blackhole_pattern}"; then
+            log WARN "ipv6_rules_are_synced: source blackhole for ${source} FAIL"
+            return 1
+        fi
+        rules=$(ipv6_rules_for_source_pref "${source}" "${IPV6_TUNNEL_RULE_PREF}" || true)
+        rule_count=$(printf '%s\n' "${rules}" | sed '/^$/d' | wc -l)
+        if [ "${rule_count}" -ne 1 ] || ! printf '%s\n' "${rules}" | grep -qE "${exact_policy_pattern}"; then
+            log WARN "ipv6_rules_are_synced: source policy for ${source} FAIL"
+            return 1
+        fi
+        if ! ip6tables -C FORWARD -s "${source}" ! -d fe80::/10 \
+            -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+            log WARN "ipv6_rules_are_synced: filter for ${source} FAIL"
+            return 1
+        fi
+    done
+    for mac in "${TARGET_IPV6_MACS[@]}"; do
+        if ! ip6tables -C FORWARD -m mac --mac-source "${mac}" ! -d fe80::/10 \
+            -m comment --comment "${IPV6_RULE_MARKER}" -j DROP >/dev/null 2>&1; then
+            log WARN "ipv6_rules_are_synced: filter for target MAC ${mac} FAIL"
+            return 1
+        fi
+    done
+}
+
 ensure_policy_routing() {
     local changed=0
     local installed_rule
@@ -2832,7 +3491,7 @@ fail_closed_policy_prerequisites_are_synced() {
     fi
 }
 
-rules_are_synced() {
+ipv4_rules_are_synced() {
     if ! fail_closed_policy_prerequisites_are_synced; then
         return 1
     fi
@@ -3061,6 +3720,22 @@ rules_are_synced() {
     return 0
 }
 
+rules_are_synced() {
+    local ipv4_ok=true
+    local ipv6_ok=true
+
+    if ! ipv4_rules_are_synced; then
+        ipv4_ok=false
+    fi
+    if ! ipv6_containment_is_synced; then
+        ipv6_ok=false
+    fi
+
+    IPV4_RULES_SYNCED="${ipv4_ok}"
+    IPV6_RULES_SYNCED="${ipv6_ok}"
+    [ "${ipv4_ok}" = true ] && [ "${ipv6_ok}" = true ]
+}
+
 cleanup_k3s_policy_rules() {
     local keep_blackholes="$1"
     local pref
@@ -3101,6 +3776,34 @@ cleanup_k3s_policy_rules() {
             delete_policy_rule_line "${rule_line}"
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)
     done
+}
+
+cleanup_ipv6_containment() {
+    local rules rule managed_source
+    local -a parts
+
+    rules=$(ip6tables -S FORWARD 2>/dev/null | grep -F -- "--comment ${IPV6_RULE_MARKER}" || true)
+    while IFS= read -r rule; do
+        [ -n "${rule}" ] || continue
+        read -r -a parts <<< "${rule}"
+        parts[0]="-D"
+        ip6tables "${parts[@]}" >/dev/null 2>&1 || true
+    done <<< "${rules}"
+
+    if load_managed_ipv6_policy_state; then
+        for managed_source in "${MANAGED_TARGET_IPV6_ADDRESSES[@]}"; do
+            ip -6 rule del from "${managed_source}" table "${IPV6_POLICY_TABLE}" pref "${IPV6_TUNNEL_RULE_PREF}" >/dev/null 2>&1 || true
+            ip -6 rule del from "${managed_source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || true
+        done
+        MANAGED_TARGET_IPV6_ADDRESSES=()
+        if [ "${IPV6_POLICY_TABLE_MANAGED}" = "true" ]; then
+            ip -6 route del blackhole default metric "${IPV6_BLACKHOLE_METRIC}" table "${IPV6_POLICY_TABLE}" >/dev/null 2>&1 || true
+            IPV6_POLICY_TABLE_MANAGED="false"
+        fi
+        persist_managed_ipv6_policy_state || log WARN "${LAST_ERROR}"
+    else
+        log WARN "${LAST_ERROR}"
+    fi
 }
 
 cleanup_dataplane() {
@@ -3182,6 +3885,7 @@ cleanup_dataplane() {
     fi
 
     if [ "${keep_tunnel}" = false ]; then
+        cleanup_ipv6_containment
         ip route flush table 51820 >/dev/null 2>&1 || true
 
         if wg show "${WG_IFACE}" >/dev/null 2>&1; then
@@ -3277,6 +3981,8 @@ reconcile_once() {
 
     LAST_ERROR=""
     RULES_SYNCED="false"
+    IPV4_RULES_SYNCED="false"
+    IPV6_RULES_SYNCED="false"
 
     log INFO "reconcile_start reason=${reason}"
 
@@ -3317,6 +4023,20 @@ reconcile_once() {
             return 1
         fi
     fi
+
+    # IPv6 is an explicit deny-only family. Establish containment immediately
+    # after target discovery and before the IPv4 dataplane can be considered
+    # healthy.
+    if ! ensure_ipv6_containment; then
+        fail_reconcile_closed "${request_id}"
+        return 1
+    fi
+    if ! ipv6_containment_is_synced; then
+        LAST_ERROR="IPv6 containment is not fully synced"
+        fail_reconcile_closed "${request_id}"
+        return 1
+    fi
+    IPV6_RULES_SYNCED="true"
 
     if [[ "${K3S_MODE}" == "true" ]]; then
         # Keep an independent packet-filter guard in place until the complete

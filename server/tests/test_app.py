@@ -1178,6 +1178,11 @@ class TestDataplaneAndRegressionFixes:
         assert data['docker_network']['name'] == 'docker-tunnelsats'
         assert data['k3s_bypass_cidrs'] == []
         assert data['rules_synced'] is False
+        assert data['ipv4_rules_synced'] is False
+        assert data['ipv6_rules_synced'] is False
+        assert data['ipv6_policy'] == 'deny'
+        assert data['target_ipv6_addresses'] == []
+        assert data['target_ipv6_default_route'] is False
         assert data['last_error'] is None
 
     @patch('app.docker_api')

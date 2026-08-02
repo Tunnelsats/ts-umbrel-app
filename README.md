@@ -76,6 +76,22 @@ tunnel route is unavailable.
 
 Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
 
+### IPv6 policy: fail-closed denial
+
+TunnelSats VPN servers currently provide IPv4 transit only. TunnelSats therefore
+does **not** route IPv6 over WireGuard: it discovers non-link-local IPv6 addresses
+on the selected Lightning workload and blocks their egress with both IPv6 policy
+blackholes and tagged `ip6tables` rules. Loopback remains internal to the
+workload and link-local traffic remains available for neighbor discovery; global
+and unique-local IPv6 egress is denied.
+
+The local status API reports `ipv4_rules_synced` and `ipv6_rules_synced`
+independently, with `rules_synced` remaining the aggregate compatibility field.
+`ipv6_policy` is `deny`; `target_ipv6_addresses` and
+`target_ipv6_default_route` expose the detected IPv6 context. TunnelSats never
+reports aggregate protection when IPv6 is present but containment cannot be
+installed and verified.
+
 ### Secure Mode dataplane
 1. The container runs with `network_mode: "host"` and `NET_ADMIN` to manage WireGuard, routing, and firewall state.
 2. Runtime detects active Lightning nodes through TCP probes on Umbrel's default service IPs and read-only config path checks.
@@ -155,7 +171,8 @@ Target: us3.tunnelsats.com (178.156.167.202) : 12345
 ----------------------------------------------------------------
 ```
 - Check `GET /api/local/status` first to view the current `dataplane_mode` and `wg_status`.
-- If `rules_synced` is `false`, inspect `last_error` in the JSON response.
+- If `rules_synced` is `false`, inspect `ipv4_rules_synced`,
+  `ipv6_rules_synced`, and `last_error` in the JSON response.
 - **Trigger immediate Dataplane repair:**
   ```bash
   curl -X POST http://127.0.0.1:9739/api/local/reconcile

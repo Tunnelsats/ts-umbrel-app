@@ -180,6 +180,14 @@ new connections initiated by LND or CLN. If WireGuard routing becomes
 unavailable, a source-specific blackhole prevents the traffic from falling
 through to the node's ordinary default route.
 
+IPv6 is intentionally deny-only because the TunnelSats server fleet does not
+currently assign client IPv6 addresses or provide IPv6 transit. On a dual-stack
+pod, the reconciler reads every address in Kubernetes `status.podIPs`, installs
+per-source IPv6 policy and fallback blackholes, and adds a tagged `ip6tables`
+drop for non-link-local egress. IPv6 cluster/ULA ranges are not bypassed by
+`K3S_BYPASS_CIDRS`; that setting remains IPv4-only. A missing IPv6 control sets
+`ipv6_rules_synced: false` and prevents aggregate `rules_synced` protection.
+
 Cluster-internal destinations must be listed explicitly in
 `K3S_BYPASS_CIDRS`. The shipped Deployment uses the standard k3s ranges:
 
