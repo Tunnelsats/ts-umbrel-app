@@ -82,7 +82,6 @@ ip -n "${CLEAR_NS}" addr add 192.0.2.2/24 dev clear-peer
 ip -n "${CLEAR_NS}" addr add 198.51.100.2/32 dev lo
 ip -n "${ROUTER_NS}" -6 addr add 2001:db8:100::1/64 dev clear0 nodad
 ip -n "${CLEAR_NS}" -6 addr add 2001:db8:100::2/64 dev clear-peer nodad
-ip -n "${CLEAR_NS}" -6 addr add 2001:db8:ffff::2/128 dev lo nodad
 ip -n "${ROUTER_NS}" link set clear0 up
 ip -n "${CLEAR_NS}" link set clear-peer up
 ip -n "${CLEAR_NS}" route add 10.42.1.0/24 via 192.0.2.1
@@ -103,7 +102,7 @@ if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
     echo "FAIL: baseline clear-egress path is unreachable" >&2
     exit 1
 fi
-if ! ip netns exec "${POD_NS}" ping -6 -c 1 -W 2 2001:db8:ffff::2 >/dev/null; then
+if ! ip netns exec "${POD_NS}" ping -6 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
     echo "FAIL: baseline IPv6 clear-egress path is unreachable" >&2
     exit 1
 fi
@@ -148,7 +147,7 @@ fi
 
 # The same workload has an ordinary IPv6 default route, but Option B must
 # deny it rather than exposing the clear observer to the workload's address.
-if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:ffff::2 >/dev/null 2>&1; then
+if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
     echo "FAIL: IPv6 traffic escaped through the clear observer" >&2
     exit 1
 fi
@@ -186,13 +185,13 @@ fi
 # Even if the dedicated IPv6 policy-table route drifts away, the independent
 # source blackhole rule must prevent fallback to the ordinary IPv6 default.
 ip -n "${ROUTER_NS}" -6 route del blackhole default metric 42760 table 51821
-if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:ffff::2 >/dev/null 2>&1; then
+if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
     echo "FAIL: IPv6 traffic escaped after the policy-table blackhole was removed" >&2
     exit 1
 fi
 ipv6_kill_route="$(
     ip netns exec "${ROUTER_NS}" \
-        ip -6 route get 2001:db8:ffff::2 from 2001:db8:42::7 iif pod-r 2>&1 || true
+        ip -6 route get 2001:db8:100::2 from 2001:db8:42::7 iif pod-r 2>&1 || true
 )"
 if [[ "${ipv6_kill_route}" == *"dev clear0"* ]]; then
     echo "FAIL: IPv6 kill switch fell through to ordinary egress" >&2
