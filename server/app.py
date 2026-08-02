@@ -809,7 +809,7 @@ def audit_node_announcement_config(
         return {"readable": False, "settings": [], "conflicts": []}
     except (IOError, OSError) as exc:
         app.logger.warning(f"Failed to audit {node_type.upper()} announcement config {path}: {exc}")
-        return {"readable": False, "settings": [], "conflicts": [f"{node_type}:config-unreadable"]}
+        return {"readable": False, "settings": [], "conflicts": ["config-unreadable"]}
 
     keys = set(_node_announcement_keys(node_type))
     entries = [entry for entry in _parse_active_config_entries(lines) if entry["key"] in keys]
@@ -2601,11 +2601,15 @@ def local_status():
             "lnd", LND_CONFIG_PATH, str(server_domain), expected_port
         )
         announcement_conflicts.extend(f"lnd:{item}" for item in lnd_audit["conflicts"])
+        if lnd_detected and not lnd_audit["readable"] and not lnd_audit["conflicts"]:
+            announcement_conflicts.append("lnd:config-unavailable")
     if cln_detected or (cln_container_config and os.path.exists(cln_container_config)):
         cln_audit = audit_node_announcement_config(
             "cln", cln_container_config, str(server_domain), expected_port
         )
         announcement_conflicts.extend(f"cln:{item}" for item in cln_audit["conflicts"])
+        if cln_detected and not cln_audit["readable"] and not cln_audit["conflicts"]:
+            announcement_conflicts.append("cln:config-unavailable")
 
     verification_required = bool(lnd_detected and lnd_routing_active)
     verification = meta_data.get("lndAnnouncementVerification")

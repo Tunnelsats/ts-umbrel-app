@@ -2172,6 +2172,30 @@ class TestAnnouncementPrivacy:
             'lnd:nat=true',
         ]
 
+    def test_status_fails_closed_when_detected_lnd_config_is_unavailable(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing_lnd_path = os.path.join(tmp_dir, 'missing-lnd.conf')
+            with open(os.path.join(tmp_dir, app_module.META_FILE), 'w') as f:
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+            dataplane = app_module.read_dataplane_state()
+            dataplane.update({'rules_synced': True, 'last_error': None})
+            containers = [{
+                'Names': ['/lightning_lnd_1'], 'Id': 'lnd1',
+                'NetworkSettings': {'Networks': {'main': {'IPAddress': '10.21.21.9'}}},
+            }]
+            with patch('app.DATA_DIR', tmp_dir), \
+                    patch('app.LND_CONFIG_PATH', missing_lnd_path), \
+                    patch('app._get_wireguard_state', return_value=('Connected', '')), \
+                    patch('app.list_containers', return_value=containers), \
+                    patch('app.read_dataplane_state', return_value=dataplane), \
+                    patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+                response = client.get('/api/local/status')
+
+        payload = json.loads(response.data)
+        assert payload['rules_synced'] is False
+        assert payload['last_error'] == app_module.ANNOUNCEMENT_CONFLICT_ERROR
+        assert payload['announcement_conflicts'] == ['lnd:config-unavailable']
+
     def test_status_requires_endpoint_bound_rpc_verification_and_secure_mode_stays_unverified(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             lnd_path = os.path.join(tmp_dir, 'lnd.conf')
