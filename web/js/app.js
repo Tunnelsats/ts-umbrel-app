@@ -725,16 +725,16 @@ async function fetchStatus() {
         const clnDetected = data.cln_detected === true;
         const lndRouting = data.lnd_routing_active === true;
         const clnRouting = data.cln_routing_active === true;
-        const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
-            ? data.last_error.trim()
-            : '';
-
         const hasNode = lndDetected || clnDetected;
         const routingActive = lndRouting || clnRouting;
+        const rulesSynced = data.rules_synced === true;
+        const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
+            ? data.last_error.trim()
+            : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : '');
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (vpnActive && hasNode && routingActive && !dataplaneError) {
+        if (vpnActive && hasNode && routingActive && rulesSynced && !dataplaneError) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
@@ -1942,7 +1942,7 @@ async function pollUntilConnected(options = {}) {
         if (
             status
             && status.vpn_active === true
-            && status.rules_synced !== false
+            && status.rules_synced === true
             && !status.last_error
         ) {
             if (onConnected) onConnected(status);

@@ -1374,6 +1374,11 @@ def read_dataplane_state():
         "forwarding_port": "",
         "k3s_bypass_cidrs": [],
         "rules_synced": False,
+        "ipv4_rules_synced": False,
+        "ipv6_rules_synced": False,
+        "ipv6_policy": "deny",
+        "target_ipv6_addresses": [],
+        "target_ipv6_default_route": False,
         "last_reconcile_at": "",
         "last_error": None,
         "docker_network": {
@@ -2097,6 +2102,11 @@ def local_status():
             "forwarding_port": dataplane["forwarding_port"],
             "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
             "rules_synced": dataplane["rules_synced"],
+            "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
+            "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
+            "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
+            "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
+            "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
             "last_reconcile_at": dataplane["last_reconcile_at"],
             "last_error": dataplane["last_error"],
         }
