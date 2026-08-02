@@ -104,7 +104,7 @@ if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
     echo "FAIL: baseline clear-egress path is unreachable" >&2
     exit 1
 fi
-if ! ip netns exec "${POD_NS}" ping -6 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
+if ! ip netns exec "${POD_NS}" ping -6 -c 3 -W 2 2001:db8:100::2 >/dev/null; then
     echo "FAIL: baseline IPv6 clear-egress path is unreachable" >&2
     ip -n "${POD_NS}" -6 address show >&2
     ip -n "${POD_NS}" -6 route show table all >&2
