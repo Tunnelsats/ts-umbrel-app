@@ -10,10 +10,6 @@ const DISCOUNTS = { 1: 0, 3: 0.05, 6: 0.10, 12: 0.20 };
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
-const MANAGEMENT_CSRF_COOKIE = 'tunnelsats_csrf';
-const MANAGEMENT_CSRF_HEADER = 'X-TunnelSats-CSRF-Token';
-const MANAGEMENT_CSRF_REFRESH_HEADER = 'X-TunnelSats-CSRF-Refresh';
-let csrfBootstrapPromise = null;
 
 // Badge States Constants for Routing Status
 const BADGE_STATES = {
@@ -101,15 +97,6 @@ async function mockFetch(url) {
             }
         };
     }
-    if (url === '/api/local/session') {
-        return {
-            ok: true,
-            body: {
-                authenticated: true,
-                csrf_token: 'mock-management-csrf-token'
-            }
-        };
-    }
     if (url === '/api/servers' || url === '/api/local/servers') {
         return {
             ok: true,
@@ -130,64 +117,6 @@ async function mockFetch(url) {
         };
     }
     return { ok: false, status: 404, body: { error: 'Not Found' } };
-}
-
-function readManagementCsrfCookie() {
-    const prefix = `${MANAGEMENT_CSRF_COOKIE}=`;
-    const entry = document.cookie
-        .split(';')
-        .map((value) => value.trim())
-        .find((value) => value.startsWith(prefix));
-    return entry ? decodeURIComponent(entry.slice(prefix.length)) : '';
-}
-
-async function ensureManagementCsrfToken(forceRefresh = false) {
-    if (!forceRefresh) {
-        const existing = readManagementCsrfCookie();
-        if (existing) return existing;
-    }
-
-    if (!csrfBootstrapPromise) {
-        csrfBootstrapPromise = fetch('/api/local/session', { credentials: 'same-origin' })
-            .then(async (response) => {
-                const payload = await response.json();
-                if (!response.ok || !payload.csrf_token) {
-                    throw new Error('Management authentication is required.');
-                }
-                return payload.csrf_token;
-            })
-            .finally(() => {
-                csrfBootstrapPromise = null;
-            });
-    }
-    return csrfBootstrapPromise;
-}
-
-async function managementFetch(url, options = {}) {
-    const method = String(options.method || 'GET').toUpperCase();
-    const requestOptions = { ...options, credentials: 'same-origin' };
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        const csrfToken = await ensureManagementCsrfToken();
-        requestOptions.headers = {
-            ...(options.headers || {}),
-            [MANAGEMENT_CSRF_HEADER]: csrfToken
-        };
-    }
-    const response = await fetch(url, requestOptions);
-    const csrfRefreshRequired = response.status === 403
-        && response.headers
-        && typeof response.headers.get === 'function'
-        && response.headers.get(MANAGEMENT_CSRF_REFRESH_HEADER) === 'required';
-    if (!csrfRefreshRequired || ['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        return response;
-    }
-
-    const refreshedToken = await ensureManagementCsrfToken(true);
-    requestOptions.headers = {
-        ...(requestOptions.headers || {}),
-        [MANAGEMENT_CSRF_HEADER]: refreshedToken
-    };
-    return fetch(url, requestOptions);
 }
 
 function initGlobe() {
@@ -700,7 +629,7 @@ function switchTab(tabId) {
     }
 
     if (tabId === 'renew') {
-        managementFetch('/api/local/meta').then(r => r.json()).then(data => {
+        fetch('/api/local/meta').then(r => r.json()).then(data => {
             let lookupId = data.serverId;
             // Handle naming mismatch: /api/local/meta (metadata JSON) uses camelCase.
             const sDomain = data.serverDomain || data.server_domain;
@@ -788,7 +717,7 @@ function applySecureModeUI(isSecureMode) {
 // 1. Fetch Local Status
 async function fetchStatus() {
     try {
-        const res = await managementFetch('/api/local/status');
+        const res = await fetch('/api/local/status');
         const data = await res.json();
 
         const vpnActive = data.vpn_active === true;
@@ -1113,10 +1042,7 @@ async function createSub(mode) {
             }
         }
 
-        const requestFunction = endpoint === '/api/subscription/renew'
-            ? managementFetch
-            : (url, options) => fetch(url, options);
-        const res = await requestFunction(endpoint, {
+        const res = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -1255,7 +1181,7 @@ async function claimSubscription(mode) {
     }
 
     try {
-        const res = await managementFetch('/api/subscription/claim', {
+        const res = await fetch('/api/subscription/claim', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paymentHash: activePaymentHash, wgPublicKey: "", wgPresharedKey: "", referralCode: null })
@@ -1789,7 +1715,7 @@ async function configureNode() {
     setActionMessage('configure-node-msg', 'Applying node configuration...', 'info');
 
     try {
-        let res = await managementFetch('/api/local/configure-node', {
+        let res = await fetch('/api/local/configure-node', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nodeType: selectedNodeType })
@@ -1802,7 +1728,7 @@ async function configureNode() {
                 setActionMessage('configure-node-msg', 'Configuration cancelled; existing announcement settings were not changed.', 'info');
                 return;
             }
-            res = await managementFetch('/api/local/configure-node', {
+            res = await fetch('/api/local/configure-node', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1858,7 +1784,7 @@ async function restoreNode() {
     setActionMessage('restore-node-msg', 'Restoring node configuration...', 'info');
 
     try {
-        const res = await managementFetch('/api/local/restore-node', { method: 'POST' });
+        const res = await fetch('/api/local/restore-node', { method: 'POST' });
         const data = await safeFetchJson(res);
 
         if (res.ok && data.success !== false) {
@@ -2095,7 +2021,7 @@ async function importConfig() {
     setImportMessage("Importing...", 'info');
 
     try {
-        let res = await managementFetch('/api/local/upload-config', {
+        let res = await fetch('/api/local/upload-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config })
@@ -2113,7 +2039,7 @@ async function importConfig() {
 
             // Retry with confirm=true
             setImportMessage("Saving expired config...", 'info');
-            res = await managementFetch('/api/local/upload-config', {
+            res = await fetch('/api/local/upload-config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ config, confirm: true })
@@ -2169,7 +2095,7 @@ async function pollUntilConnected(options = {}) {
 
 async function restartTunnel(pollOptions = {}) {
     try {
-        const res = await managementFetch('/api/local/restart', { method: 'POST' });
+        const res = await fetch('/api/local/restart', { method: 'POST' });
         if (res.ok) {
             // The container entrypoint will catch the trigger file, and restart `wg-quick`.
             void pollUntilConnected(pollOptions);

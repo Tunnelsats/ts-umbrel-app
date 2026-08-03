@@ -20,12 +20,8 @@ Yes. The TunnelSats daemon handles dynamic reloading:
 The dashboard uses our internal **Dataplane API**. You can query this directly via SSH to debug your network state:
 
 ```bash
-curl -su tunnelsats http://umbrel.lan:9739/api/local/status | jq
+curl -s http://umbrel.lan:9739/api/local/status | jq
 ```
-
-Enter the per-app password shown in Umbrel's TunnelSats credentials panel.
-State-changing API calls also require the CSRF bootstrap flow documented in the
-repository README; an authenticated GET does not require a CSRF token.
 
 This returns a JSON payload containing the active WireGuard endpoint, internal routing metrics, and any failure logs (`last_error`). To check the live WireGuard handshake:
 
