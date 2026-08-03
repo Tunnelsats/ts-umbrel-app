@@ -1,11 +1,7 @@
 import json
 import os
 import re
-import base64
-import binascii
-import secrets
 import socket
-import stat
 import subprocess
 import uuid
 import threading
@@ -14,11 +10,11 @@ from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
 from typing import Dict, Any, List, Optional, Tuple, Iterable
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import requests
 import yaml
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
@@ -31,7 +27,7 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.3.6"
+APP_VERSION = "v3.3.7"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -123,16 +119,6 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
 SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
-
-MANAGEMENT_USERNAME = os.environ.get("MANAGEMENT_USERNAME", "tunnelsats")
-MANAGEMENT_PASSWORD_FILE = "management-password"
-MANAGEMENT_PASSWORD_MIN_LENGTH = 24
-MANAGEMENT_CSRF_COOKIE = "tunnelsats_csrf"
-MANAGEMENT_CSRF_HEADER = "X-TunnelSats-CSRF-Token"
-MANAGEMENT_CSRF_REFRESH_HEADER = "X-TunnelSats-CSRF-Refresh"
-_management_password_lock = threading.Lock()
-_management_password_file_cache: Tuple[str, Optional[str]] = ("", None)
-_management_csrf_token = secrets.token_urlsafe(32)
 
 def check_tcp_port(ip, port):
     try:
@@ -354,286 +340,6 @@ def is_loopback_ip(remote_addr):
         return ip_address(remote_addr).is_loopback
     except ValueError:
         return False
-
-
-def _parse_networks(raw_networks):
-    parsed = []
-    for item in str(raw_networks or "").split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            parsed.append(ip_network(item, strict=False))
-        except ValueError:
-            app.logger.error("Ignoring invalid management proxy network configuration")
-    return tuple(parsed)
-
-
-def _trusted_proxy_networks():
-    configured = app.config.get("MANAGEMENT_TRUSTED_PROXIES")
-    if configured is None:
-        configured = os.environ.get("MANAGEMENT_TRUSTED_PROXIES", "")
-    return (
-        ip_network("127.0.0.0/8"),
-        ip_network("::1/128"),
-        *_parse_networks(configured),
-    )
-
-
-def _peer_is_trusted_proxy(remote_addr):
-    try:
-        candidate = ip_address(remote_addr)
-        ipv4_mapped = getattr(candidate, "ipv4_mapped", None)
-        if ipv4_mapped:
-            candidate = ipv4_mapped
-    except ValueError:
-        return False
-    return any(candidate in network for network in _trusted_proxy_networks())
-
-
-def _management_request_context():
-    """Return security-relevant values without trusting direct forwarded headers."""
-    proxyfix_orig = request.environ.get("werkzeug.proxy_fix.orig", {}) or {}
-    direct_remote_addr = proxyfix_orig.get("REMOTE_ADDR") or request.remote_addr or ""
-    trusted_proxy = _peer_is_trusted_proxy(direct_remote_addr)
-    if trusted_proxy:
-        effective_remote_addr = request.remote_addr or direct_remote_addr
-        effective_host = request.host
-        effective_scheme = request.scheme
-    else:
-        effective_remote_addr = direct_remote_addr
-        effective_host = proxyfix_orig.get("HTTP_HOST") or request.environ.get("HTTP_HOST", "")
-        effective_scheme = proxyfix_orig.get("wsgi.url_scheme") or request.scheme
-    return effective_remote_addr, effective_host, effective_scheme, trusted_proxy
-
-
-def _parse_host_authority(raw_host):
-    value = str(raw_host or "").strip()
-    if not value or any(char.isspace() for char in value) or any(char in value for char in "/?#@"):
-        return None
-    if value.count(":") >= 2 and not value.startswith("["):
-        try:
-            return ip_address(value).compressed, None
-        except ValueError:
-            return None
-    try:
-        parsed = urlsplit(f"//{value}")
-        hostname = (parsed.hostname or "").rstrip(".").lower()
-        port = parsed.port
-    except ValueError:
-        return None
-    if not hostname or parsed.username is not None or parsed.password is not None:
-        return None
-    try:
-        hostname = ip_address(hostname).compressed
-    except ValueError:
-        pass
-    return hostname, port
-
-
-def _allowed_management_hosts():
-    configured = app.config.get("MANAGEMENT_ALLOWED_HOSTS")
-    if configured is None:
-        configured = os.environ.get("MANAGEMENT_ALLOWED_HOSTS", "")
-    values = ["localhost", "127.0.0.1", "::1"]
-    values.extend(str(configured or "").split(","))
-    for variable in ("DEVICE_HOSTNAME", "DEVICE_DOMAIN_NAME"):
-        values.append(os.environ.get(variable, ""))
-    if K3S_MODE:
-        values.extend(
-            (
-                "tunnelsats",
-                f"tunnelsats.{K8S_NAMESPACE}",
-                f"tunnelsats.{K8S_NAMESPACE}.svc",
-                f"tunnelsats.{K8S_NAMESPACE}.svc.cluster.local",
-            )
-        )
-    allowed = set()
-    for value in values:
-        if "://" in str(value):
-            origin = _canonical_origin(value)
-            if origin:
-                allowed.add(origin[1])
-        else:
-            authority = _parse_host_authority(value)
-            if authority:
-                allowed.add(authority[0])
-    return allowed
-
-
-def _host_is_allowed(raw_host):
-    authority = _parse_host_authority(raw_host)
-    return authority is not None and authority[0] in _allowed_management_hosts()
-
-
-def _canonical_origin(raw_origin):
-    value = str(raw_origin or "").strip()
-    if not value or value == "null":
-        return None
-    try:
-        parsed = urlsplit(value)
-        hostname = (parsed.hostname or "").rstrip(".").lower()
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme not in ("http", "https")
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in ("", "/")
-        or parsed.query
-        or parsed.fragment
-    ):
-        return None
-    try:
-        hostname = ip_address(hostname).compressed
-    except ValueError:
-        pass
-    return parsed.scheme, hostname, port or (443 if parsed.scheme == "https" else 80)
-
-
-def _origin_matches_request(raw_origin, raw_host, scheme):
-    origin = _canonical_origin(raw_origin)
-    authority = _parse_host_authority(raw_host)
-    scheme = str(scheme or "").lower()
-    if origin is None or authority is None or scheme not in ("http", "https"):
-        return False
-    hostname, port = authority
-    request_origin = (scheme, hostname, port or (443 if scheme == "https" else 80))
-    if origin != request_origin:
-        return False
-
-    configured = app.config.get("MANAGEMENT_ALLOWED_ORIGINS")
-    if configured is None:
-        configured = os.environ.get("MANAGEMENT_ALLOWED_ORIGINS", "")
-    configured_items = [item.strip() for item in str(configured or "").split(",") if item.strip()]
-    configured_origins = {
-        parsed
-        for parsed in (_canonical_origin(item) for item in configured_items)
-        if parsed is not None
-    }
-    return not configured_items or origin in configured_origins
-
-
-def _valid_management_password(password):
-    return isinstance(password, str) and len(password) >= MANAGEMENT_PASSWORD_MIN_LENGTH
-
-
-def _read_or_create_management_password():
-    global _management_password_file_cache
-
-    configured = app.config.get("MANAGEMENT_PASSWORD")
-    if configured is None:
-        configured = (os.environ.get("MANAGEMENT_PASSWORD") or "").strip() or (os.environ.get("APP_PASSWORD") or "").strip() or None
-    if configured is not None:
-        if _valid_management_password(configured):
-            return configured
-        app.logger.warning(
-            "Supplied MANAGEMENT_PASSWORD/APP_PASSWORD is too short (minimum %d characters)",
-            MANAGEMENT_PASSWORD_MIN_LENGTH,
-        )
-        return None
-
-    password_path = os.path.join(DATA_DIR, MANAGEMENT_PASSWORD_FILE)
-    with _management_password_lock:
-        cached_path, cached_password = _management_password_file_cache
-        if cached_path == password_path and cached_password is not None:
-            return cached_password
-        try:
-            os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
-            try:
-                file_descriptor = os.open(
-                    password_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-            except FileExistsError:
-                file_descriptor = None
-
-            if file_descriptor is not None:
-                generated = secrets.token_urlsafe(32)
-                with os.fdopen(file_descriptor, "w", encoding="utf-8") as password_fp:
-                    password_fp.write(generated)
-                    password_fp.flush()
-                    os.fsync(password_fp.fileno())
-                password = generated
-                app.logger.warning(
-                    "Generated a management password; retrieve it from /data/management-password"
-                )
-            else:
-                read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                password_fd = os.open(password_path, read_flags)
-                try:
-                    password_stat = os.fstat(password_fd)
-                    if (
-                        not stat.S_ISREG(password_stat.st_mode)
-                        or password_stat.st_nlink != 1
-                        or password_stat.st_size > 4096
-                    ):
-                        raise OSError("unsafe management credential file")
-                    os.fchmod(password_fd, 0o600)
-                    password_bytes = os.read(password_fd, 4097)
-                finally:
-                    os.close(password_fd)
-                password = password_bytes.decode("utf-8").strip()
-        except (IOError, OSError, UnicodeDecodeError):
-            app.logger.error("Management authentication is unavailable: credential storage failed")
-            password = None
-
-        if not _valid_management_password(password):
-            app.logger.error("Management authentication is unavailable: credential is missing or weak")
-            password = None
-        _management_password_file_cache = (password_path, password)
-        return password
-
-
-def _management_credentials_are_valid():
-    password = _read_or_create_management_password()
-    authorization = request.headers.get("Authorization", "")
-    if password is None or len(authorization) > 8192 or not authorization.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(authorization[6:].strip(), validate=True).decode("utf-8")
-        username, supplied_password = decoded.split(":", 1)
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return False
-    return secrets.compare_digest(username, MANAGEMENT_USERNAME) and secrets.compare_digest(
-        supplied_password, password
-    )
-
-
-def _management_request_is_protected():
-    return (
-        request.path in ("/api/subscription/renew", "/api/subscription/claim")
-        or request.path.startswith("/api/local")
-    )
-
-
-def _management_request_changes_state():
-    return request.method not in ("GET", "HEAD", "OPTIONS")
-
-
-def _management_security_error(status, message, challenge=False, csrf_refresh=False):
-    response = jsonify({"success": False, "error": message})
-    response.status_code = status
-    if challenge:
-        response.headers["WWW-Authenticate"] = 'Basic realm="TunnelSats management", charset="UTF-8"'
-    if csrf_refresh:
-        response.headers[MANAGEMENT_CSRF_REFRESH_HEADER] = "required"
-    return response
-
-
-def _audit_management_request(outcome, reason, remote_addr):
-    log_method = app.logger.info if outcome == "accepted" else app.logger.warning
-    log_method(
-        "Management request %s: method=%s endpoint=%s remote=%s reason=%s",
-        outcome,
-        request.method,
-        request.endpoint or "unknown",
-        remote_addr or "unknown",
-        reason,
-    )
 
 
 def normalize_version(raw_version):
@@ -1071,7 +777,22 @@ def _is_expected_tunnelsats_address(address: str, dns: str, port: int) -> bool:
     endpoint = str(address or "").strip()
     if "@" in endpoint:
         endpoint = endpoint.rsplit("@", 1)[1]
-    return endpoint.lower().rstrip(".") == f"{dns}:{port}".lower().rstrip(".")
+    endpoint_lower = endpoint.lower().rstrip(".")
+    expected_domain = f"{dns}:{port}".lower().rstrip(".")
+    if endpoint_lower == expected_domain:
+        return True
+
+    try:
+        if ":" in endpoint:
+            host, host_port_str = endpoint.rsplit(":", 1)
+            if int(host_port_str) == int(port):
+                _, _, ip_list = socket.gethostbyname_ex(dns)
+                if host in ip_list:
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _config_bool(value: str) -> Optional[bool]:
@@ -2294,72 +2015,19 @@ def reconcile_result_success(result):
 
 @app.before_request
 def restrict_local_api():
-    if not _management_request_is_protected():
-        return None
+    if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
+        proxyfix_orig = request.environ.get("werkzeug.proxy_fix.orig", {}) or {}
+        direct_remote_addr = proxyfix_orig.get("REMOTE_ADDR") or request.remote_addr
 
-    effective_remote_addr, effective_host, effective_scheme, trusted_proxy = (
-        _management_request_context()
-    )
-    if not client_is_allowed(effective_remote_addr):
-        _audit_management_request("rejected", "network", effective_remote_addr)
-        return _management_security_error(403, "Forbidden")
-    if not _host_is_allowed(effective_host):
-        _audit_management_request("rejected", "host", effective_remote_addr)
-        return _management_security_error(403, "Forbidden")
+        # Trust X-Forwarded-For only when the immediate peer is loopback (local reverse proxy).
+        # Direct clients can otherwise spoof forwarded headers to bypass local-network checks.
+        if is_loopback_ip(direct_remote_addr):
+            effective_remote_addr = request.remote_addr
+        else:
+            effective_remote_addr = direct_remote_addr
 
-    password_available = _read_or_create_management_password() is not None
-    if not password_available:
-        _audit_management_request("rejected", "authentication-unavailable", effective_remote_addr)
-        return _management_security_error(503, "Management API unavailable")
-    if not _management_credentials_are_valid():
-        _audit_management_request("rejected", "credentials", effective_remote_addr)
-        return _management_security_error(
-            401,
-            "Unauthorized",
-            challenge=True,
-            csrf_refresh=True,
-        )
-
-    if _management_request_changes_state():
-        supplied_csrf = request.headers.get(MANAGEMENT_CSRF_HEADER, "")
-        cookie_csrf = request.cookies.get(MANAGEMENT_CSRF_COOKIE, "")
-        if not (
-            supplied_csrf
-            and cookie_csrf
-            and secrets.compare_digest(supplied_csrf, cookie_csrf)
-            and secrets.compare_digest(supplied_csrf, _management_csrf_token)
-        ):
-            _audit_management_request("rejected", "csrf", effective_remote_addr)
-            return _management_security_error(403, "Forbidden", csrf_refresh=True)
-        if not _origin_matches_request(request.headers.get("Origin"), effective_host, effective_scheme):
-            _audit_management_request("rejected", "origin", effective_remote_addr)
-            return _management_security_error(403, "Forbidden")
-
-        _audit_management_request("accepted", "authorized-mutation", effective_remote_addr)
-
-    g.management_authenticated = True
-    g.management_effective_scheme = effective_scheme
-    g.management_trusted_proxy = trusted_proxy
-    return None
-
-
-@app.after_request
-def protect_management_response(response):
-    if _management_request_is_protected():
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-        response.headers.add("Vary", "Authorization")
-        response.headers.add("Vary", "Cookie")
-    if getattr(g, "management_authenticated", False) and request.method in ("GET", "HEAD"):
-        response.set_cookie(
-            MANAGEMENT_CSRF_COOKIE,
-            _management_csrf_token,
-            secure=getattr(g, "management_effective_scheme", "http") == "https",
-            httponly=False,
-            samesite="Strict",
-            path="/",
-        )
-    return response
+        if not client_is_allowed(effective_remote_addr):
+            abort(403)
 
 
 # Proxy function to forward requests to the core Tunnelsats API
@@ -2812,11 +2480,6 @@ def renew_subscription():
 
 
 # --- LOCAL APP ROUTES ---
-
-@app.route("/api/local/session", methods=["GET"])
-def local_session():
-    return jsonify({"authenticated": True, "csrf_token": _management_csrf_token})
-
 
 @app.route("/api/local/status", methods=["GET"])
 def local_status():

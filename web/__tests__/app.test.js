@@ -29,7 +29,6 @@ function createMockGlobeInstance() {
 
 function setupDOM() {
     document.documentElement.innerHTML = html.toString();
-    document.cookie = 'tunnelsats_csrf=test-management-csrf-token; path=/';
     // Mock QRCode globally (loaded via CDN in real app)
     global.QRCode = jest.fn().mockImplementation(() => ({
         makeCode: jest.fn()
@@ -776,11 +775,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
             '/api/subscription/claim',
             expect.objectContaining({
                 method: 'POST',
-                credentials: 'same-origin',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-management-csrf-token'
-                }),
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ paymentHash: 'buy-hash-123', wgPublicKey: '', wgPresharedKey: '', referralCode: null })
             })
         );
@@ -1192,11 +1187,7 @@ describe('Phase 3a: Import Config', () => {
             '/api/local/upload-config',
             expect.objectContaining({
                 method: 'POST',
-                credentials: 'same-origin',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-management-csrf-token'
-                }),
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ config: expectedConfig })
             })
         );
@@ -1243,11 +1234,7 @@ describe('Phase 3a: Import Config', () => {
             '/api/local/upload-config',
             expect.objectContaining({
                 method: 'POST',
-                credentials: 'same-origin',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-management-csrf-token'
-                }),
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ config: expectedConfig })
             })
         );
@@ -1358,11 +1345,7 @@ describe('Phase 3b: Install Config', () => {
             '/api/local/configure-node',
             expect.objectContaining({
                 method: 'POST',
-                credentials: 'same-origin',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-management-csrf-token'
-                }),
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nodeType: 'lnd' })
             })
         );
@@ -1378,11 +1361,7 @@ describe('Phase 3b: Install Config', () => {
             '/api/local/configure-node',
             expect.objectContaining({
                 method: 'POST',
-                credentials: 'same-origin',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-management-csrf-token'
-                }),
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nodeType: 'cln' })
             })
         );
@@ -1721,100 +1700,5 @@ describe('Subscription Renewal Fixes', () => {
         
         expect(fetchStatusSpy).toHaveBeenCalled();
         expect(invoiceBox.textContent).toContain('Renewal Successful');
-    });
-});
-
-describe('Management request security', () => {
-    beforeEach(() => {
-        setupDOM();
-        global.fetch = jest.fn(() => Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve({ wg_status: 'Disconnected', servers: [] })
-        }));
-        evalScript();
-    });
-
-    afterEach(() => { jest.restoreAllMocks(); });
-
-    test('bootstraps a CSRF token before a mutation when the cookie is absent', async () => {
-        document.cookie = 'tunnelsats_csrf=; Max-Age=0; path=/';
-        global.fetch.mockClear();
-        global.fetch.mockImplementation((url, options) => {
-            if (url === '/api/local/session') {
-                return Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve({ csrf_token: 'bootstrapped-csrf-token' })
-                });
-            }
-            return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true }) });
-        });
-
-        await window.managementFetch('/api/local/restart', { method: 'POST' });
-
-        expect(global.fetch.mock.calls[0]).toEqual([
-            '/api/local/session',
-            { credentials: 'same-origin' }
-        ]);
-        expect(global.fetch.mock.calls[1][0]).toBe('/api/local/restart');
-        expect(global.fetch.mock.calls[1][1]).toEqual(expect.objectContaining({
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: expect.objectContaining({
-                'X-TunnelSats-CSRF-Token': 'bootstrapped-csrf-token'
-            })
-        }));
-    });
-
-    test('authenticated reads use same-origin credentials without a CSRF header', async () => {
-        global.fetch.mockClear();
-        await window.managementFetch('/api/local/status');
-
-        expect(global.fetch).toHaveBeenCalledWith(
-            '/api/local/status',
-            { credentials: 'same-origin' }
-        );
-    });
-
-    test('refreshes a stale CSRF token once after a backend restart', async () => {
-        global.fetch.mockClear();
-        let mutationAttempts = 0;
-        global.fetch.mockImplementation((url, options) => {
-            if (url === '/api/local/session') {
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    headers: { get: () => null },
-                    json: () => Promise.resolve({ csrf_token: 'rotated-csrf-token' })
-                });
-            }
-            mutationAttempts += 1;
-            if (mutationAttempts === 1) {
-                return Promise.resolve({
-                    ok: false,
-                    status: 403,
-                    headers: {
-                        get: (name) => name === 'X-TunnelSats-CSRF-Refresh' ? 'required' : null
-                    },
-                    json: () => Promise.resolve({ error: 'Forbidden' })
-                });
-            }
-            return Promise.resolve({
-                ok: true,
-                status: 200,
-                headers: { get: () => null },
-                json: () => Promise.resolve({ success: true })
-            });
-        });
-
-        const response = await window.managementFetch('/api/local/restart', { method: 'POST' });
-
-        expect(response.ok).toBe(true);
-        expect(global.fetch.mock.calls.map((call) => call[0])).toEqual([
-            '/api/local/restart',
-            '/api/local/session',
-            '/api/local/restart'
-        ]);
-        expect(global.fetch.mock.calls[2][1].headers['X-TunnelSats-CSRF-Token'])
-            .toBe('rotated-csrf-token');
     });
 });

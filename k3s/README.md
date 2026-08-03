@@ -21,40 +21,6 @@ kubectl delete -k k3s/
 > carefully — they cover the errors you are most likely to hit on a first
 > install.
 
-## Management authentication and ingress
-
-The management API authenticates every read and mutation even though the pod
-uses `hostNetwork`. Before deploying, you may create a password Secret (use at
-least 24 characters):
-
-```sh
-kubectl create secret generic tunnelsats-management \
-  --from-literal=password='<replace-with-a-long-random-password>' \
-  -n <ns>
-```
-
-If the Secret is absent, TunnelSats creates a random password in the persistent
-volume at `/data/management-password`. Retrieve it with:
-
-```sh
-kubectl exec -n <ns> deploy/tunnelsats -- cat /data/management-password
-```
-
-The shipped ingress NetworkPolicy denies ordinary pods and permits TCP 9739
-only from same-namespace pods labelled
-`tunnelsats.io/management-client=true`. Label only the intended ingress or
-reverse proxy. For an ingress in another namespace, edit
-`networkpolicy.yaml` to add an exact namespace and pod selector. Because CNI
-handling of `hostNetwork` workloads varies, treat this policy as defense in
-depth: the application credential, Host allowlist, Origin check, and CSRF check
-remain authoritative.
-
-Add every external ingress hostname to `MANAGEMENT_ALLOWED_HOSTS` in
-`deployment.yaml`. If the proxy rewrites host, scheme, or client address, also
-set `MANAGEMENT_TRUSTED_PROXIES` to its narrow pod CIDR or address; never trust
-the whole cluster CIDR. Restrict node port 9739 with the host firewall when the
-cluster networking model exposes it beyond the intended proxy.
-
 ## 1. Namespace & RBAC
 
 TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API.

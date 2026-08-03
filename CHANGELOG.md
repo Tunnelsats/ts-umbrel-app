@@ -4,10 +4,6 @@
 
 - Hardened dataplane policy routing and fallback blackhole rules for target node network isolation. Integrated automated version sync guardrails.
 
-## [3.3.5]
+## [3.3.7]
 
-- Authenticate the local management plane; enforce fail-closed IPv4/IPv6 routing for Docker and k3s; prevent Lightning real-IP announcements; and update CI actions.
-
-## [3.3.6]
-
-- Fix management UI lockout on direct browser access and empty APP_PASSWORD fallback
+- Revert management authentication to restore UI compatibility and fix DNS IP resolution in node announcements

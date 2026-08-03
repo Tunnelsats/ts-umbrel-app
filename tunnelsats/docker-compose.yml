@@ -3,7 +3,7 @@ version: "3.7"
 services:
   tunnelsats:
     # Use the specific version tag for production
-    image: tunnelsats/ts-umbrel-app:3.3.6
+    image: tunnelsats/ts-umbrel-app:3.3.7
     container_name: tunnelsats
     restart: on-failure
     network_mode: "host"
@@ -14,10 +14,6 @@ services:
       - apparmor:unconfined
     environment:
       - SECURE_MODE=${SECURE_MODE:-false}
-      # Umbrel provides a unique high-entropy password for each app. The Flask
-      # management plane independently enforces it, including on direct :9739 access.
-      - MANAGEMENT_PASSWORD=${APP_PASSWORD}
-      - MANAGEMENT_ALLOWED_HOSTS=localhost,127.0.0.1,::1,${DEVICE_HOSTNAME},${DEVICE_DOMAIN_NAME},${APP_HIDDEN_SERVICE}
     volumes:
       # Persistent peer directory (Uninstall-safe)
       - ${APP_DATA_DIR}/../tunnelsats-data:/data

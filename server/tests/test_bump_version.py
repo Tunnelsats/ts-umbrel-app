@@ -1,6 +1,5 @@
 import importlib.util
 import os
-import re
 import shutil
 import subprocess
 
@@ -119,15 +118,14 @@ def test_multiline_release_notes_are_rejected_without_writes(
 def test_preflight_failure_does_not_partially_update_files(
     bump_module, version_workspace
 ):
+    manifest = yaml.safe_load((version_workspace / "tunnelsats/umbrel-app.yml").read_text())
+    current_ver = manifest["version"]
     deployment = version_workspace / "k3s/deployment.yaml"
-    malformed_deployment, replacement_count = re.subn(
-        r"image: tunnelsats/ts-umbrel-app:[^\s]+",
-        "image: example/other:latest",
-        deployment.read_text(),
-        count=1,
+    deployment.write_text(
+        deployment.read_text().replace(
+            f"image: tunnelsats/ts-umbrel-app:{current_ver}", "image: example/other:latest"
+        )
     )
-    assert replacement_count == 1
-    deployment.write_text(malformed_deployment)
     before = snapshot_files(version_workspace)
 
     with pytest.raises(ValueError, match="found 0"):
