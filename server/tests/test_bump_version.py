@@ -1,6 +1,5 @@
 import importlib.util
 import os
-import re
 import shutil
 import subprocess
 
@@ -120,14 +119,11 @@ def test_preflight_failure_does_not_partially_update_files(
     bump_module, version_workspace
 ):
     deployment = version_workspace / "k3s/deployment.yaml"
-    malformed_deployment, replacement_count = re.subn(
-        r"image: tunnelsats/ts-umbrel-app:[^\s]+",
-        "image: example/other:latest",
-        deployment.read_text(),
-        count=1,
+    deployment.write_text(
+        deployment.read_text().replace(
+            "image: tunnelsats/ts-umbrel-app:3.3.4", "image: example/other:latest"
+        )
     )
-    assert replacement_count == 1
-    deployment.write_text(malformed_deployment)
     before = snapshot_files(version_workspace)
 
     with pytest.raises(ValueError, match="found 0"):
