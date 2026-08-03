@@ -1275,7 +1275,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['cln'] is False
             assert payload['port'] == 35825
             assert payload['dns'] == 'de2.tunnelsats.com'
-            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
+            mock_restart.assert_not_called()
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
             assert 'externalhosts=de2.tunnelsats.com:35825' in lnd_content
@@ -1477,7 +1477,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert os.path.exists(lnd_path)
-            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
+            mock_restart.assert_not_called()
 
             with open(lnd_path, 'r') as f:
                 lnd_content = f.read()
@@ -1589,7 +1589,7 @@ class TestDataplaneAndRegressionFixes:
                 assert f.read() == original_content
 
     @patch('app.container_ids_by_match', return_value=['mock'])
-    def test_configure_node_lnd_forces_restart_even_when_config_matches(self, mock_ids, client):
+    def test_configure_node_lnd_does_not_restart_container(self, mock_ids, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
             meta_path = os.path.join(tmp_dir, app_module.META_FILE)
             lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
@@ -1610,60 +1610,7 @@ class TestDataplaneAndRegressionFixes:
             assert payload['success'] is True
             assert payload['lnd'] is True
             assert payload['lnd_changed'] is True
-            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
-
-    @patch('app.container_ids_by_match', return_value=['mock'])
-    def test_configure_node_lnd_returns_500_when_restart_fails(self, mock_ids, client):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
-            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
-
-            with open(meta_path, 'w') as f:
-                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
-
-            with open(lnd_path, 'w') as f:
-                f.write('[Application Options]\nfoo=bar\n')
-
-            with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_CONFIG_PATH', lnd_path):
-                    with patch('app.restart_container_by_pattern', return_value=False):
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
-
-            assert res.status_code == 500
-            payload = json.loads(res.data)
-            assert payload['success'] is False
-            assert payload['error'] == 'Failed to restart LND container.'
-
-            with open(meta_path, 'r') as f:
-                updated_meta = json.load(f)
-            assert updated_meta['lndRestartPending'] is True
-
-    @patch('app.container_ids_by_match', return_value=['mock'])
-    def test_configure_node_lnd_retries_restart_when_pending_flag_set(self, mock_ids, client):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            meta_path = os.path.join(tmp_dir, app_module.META_FILE)
-            lnd_path = os.path.join(tmp_dir, 'tunnelsats.conf')
-
-            with open(meta_path, 'w') as f:
-                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com', 'lndRestartPending': True}, f)
-
-            with open(lnd_path, 'w') as f:
-                f.write('[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n')
-
-            with patch('app.DATA_DIR', tmp_dir):
-                with patch('app.LND_CONFIG_PATH', lnd_path):
-                    with patch('app.restart_container_by_pattern', return_value=True) as mock_restart:
-                        res = client.post('/api/local/configure-node', json={'nodeType': 'lnd'})
-
-            assert res.status_code == 200
-            payload = json.loads(res.data)
-            assert payload['success'] is True
-            assert payload['lnd_changed'] is True
-            mock_restart.assert_called_once_with(app_module.LND_CONTAINER_PATTERN, is_lnd=True)
-
-            with open(meta_path, 'r') as f:
-                updated_meta = json.load(f)
-            assert 'lndRestartPending' not in updated_meta
+            mock_restart.assert_not_called()
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_cln_returns_500_when_restart_fails(self, mock_ids, client):
@@ -2221,9 +2168,10 @@ class TestAnnouncementPrivacy:
                 patch('app.list_containers', return_value=containers),
                 patch('app.read_dataplane_state', return_value=dataplane),
                 patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')),
+                patch('app.clean_and_verify_lnd_announcements', return_value=(False, [], ["missing expected announcement de2.tunnelsats.com:35825"])),
             )
             with common_patches[0], common_patches[1], common_patches[2], \
-                    common_patches[3], common_patches[4], common_patches[5]:
+                    common_patches[3], common_patches[4], common_patches[5], common_patches[6]:
                 unverified = json.loads(client.get('/api/local/status').data)
 
             assert unverified['rules_synced'] is False

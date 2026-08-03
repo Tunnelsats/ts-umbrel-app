@@ -1613,14 +1613,14 @@ def clean_and_verify_lnd_announcements(
     port: int,
     retain_tor: bool,
 ) -> Tuple[bool, List[str], List[str]]:
-    """Withdraw live non-TunnelSats clearnet LND URIs, then verify the live set."""
+    """Withdraw live non-TunnelSats clearnet LND URIs, add missing TunnelSats URI live, then verify."""
     container_id = container_id_by_match(LND_CONTAINER_PATTERN)
     if not container_id:
-        return False, [], []
+        return False, [], ["lnd_not_found"]
 
     addresses = _query_lnd_addresses(container_id)
     if addresses is None:
-        return False, [], []
+        return False, [], ["lnd_initializing"]
 
     conflicts = [
         address for address in addresses
@@ -1637,9 +1637,21 @@ def clean_and_verify_lnd_announcements(
             return False, removed, conflicts
         removed.append(address)
 
+    # If expected TunnelSats endpoint is not yet in live gossip, add it live via RPC
+    has_tunnelsats = any(
+        _is_expected_tunnelsats_address(address, dns, port)
+        for address in addresses
+    )
+    if not has_tunnelsats:
+        docker_exec(
+            container_id,
+            ["lncli", "peers", "updatenodeannouncement", f"--address_add={dns}:{port}"],
+        )
+
     verified_addresses = _query_lnd_addresses(container_id)
     if verified_addresses is None:
-        return False, removed, conflicts
+        return False, removed, ["lnd_initializing"]
+
     remaining = [
         address for address in verified_addresses
         if not _is_expected_tunnelsats_address(address, dns, port)
@@ -2638,6 +2650,18 @@ def local_status():
             and verification.get("verified") is True
             and verification.get("endpoint") == expected_endpoint
         )
+        if not announcement_verified and not SECURE_MODE and not K3S_MODE and server_domain:
+            v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
+            if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
+                new_verification = {
+                    "endpoint": expected_endpoint,
+                    "verified": v_ok,
+                    "checkedAt": datetime.now(timezone.utc).isoformat(),
+                    "removed": v_rem,
+                    "remainingConflicts": v_conf,
+                }
+                _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
+                announcement_verified = v_ok
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
@@ -3007,9 +3031,6 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
-            _set_restart_pending(meta_path, meta, lnd_pending_key, True)
-            return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
 
         verified, removed, remaining = clean_and_verify_lnd_announcements(dns, port, retain_tor)

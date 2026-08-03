@@ -638,8 +638,16 @@
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> Troubleshooting: I uninstalled via the App Store first, and now my node is
                                     offline!</a></li>
+                            <li><a href="#faq-8"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-8"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 8. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?</a></li>
                         </ul>
                     </div>
+
 
                     <div class="space-y-4">
                         <!-- Q1 -->
@@ -868,6 +876,28 @@
                                 </ol>
                             </div>
                         </div>
+
+                        <!-- Q8 -->
+                        <div id="faq-8" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
+                                <svg class="w-5 h-5 text-tsgreen" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg> 8. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?
+                            </h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>TunnelSats updates your Lightning node's public gossip announcements in real time without restarting your LND container, preserving active channels and preventing downtime.</p>
+                                <h4 class="text-white font-semibold mt-4 mb-2">How It Works:</h4>
+                                <ul class="list-disc pl-5 space-y-1 marker:text-tsgreen">
+                                    <li><strong>Live RPC Updates:</strong> Node announcements are updated instantly via LND live RPC commands (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lncli peers updatenodeannouncement</code>).</li>
+                                    <li><strong>Persistence:</strong> Configuration files (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lnd.conf</code>) are updated on disk so settings persist across future system reboots.</li>
+                                    <li><strong>Self-Healing Background Verification:</strong> If your node is booting up or unlocking its wallet, the app non-blockingly waits for LND to finish starting, then automatically verifies and marks the dashboard <strong>ONLINE</strong> within seconds.</li>
+                                </ul>
+                                <h4 class="text-white font-semibold mt-4 mb-2">Troubleshooting Conflicting Clearnet IPs:</h4>
+                                <p>If your dashboard reports <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-red-400 font-mono text-xs">Dataplane Blocked</code> due to a conflicting home IP address, run the following via SSH:</p>
+                                <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto">docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;YOUR_HOME_IP&gt;:9735"</code>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
 
