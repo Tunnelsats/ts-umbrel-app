@@ -712,6 +712,20 @@ function applySecureModeUI(isSecureMode) {
     if (elements.uninstallWarningBox) {
         elements.uninstallWarningBox.classList.toggle('hidden', !isSecureMode);
     }
+
+    const faq8 = document.getElementById('faq-8');
+    const faq8Toc = document.querySelector('[data-scroll-to="faq-8"]');
+    if (faq8) {
+        faq8.classList.toggle('hidden', isSecureMode);
+    }
+    if (faq8Toc) {
+        const parentLi = faq8Toc.closest('li');
+        if (parentLi) {
+            parentLi.classList.toggle('hidden', isSecureMode);
+        } else {
+            faq8Toc.classList.toggle('hidden', isSecureMode);
+        }
+    }
 }
 
 // 1. Fetch Local Status

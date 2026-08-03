@@ -1614,6 +1614,9 @@ def clean_and_verify_lnd_announcements(
     retain_tor: bool,
 ) -> Tuple[bool, List[str], List[str]]:
     """Withdraw live non-TunnelSats clearnet LND URIs, add missing TunnelSats URI live, then verify."""
+    if SECURE_MODE or K3S_MODE:
+        return False, [], ["secure_mode_manual_required"]
+
     container_id = container_id_by_match(LND_CONTAINER_PATTERN)
     if not container_id:
         return False, [], ["lnd_not_found"]

@@ -361,6 +361,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('faq-6')).toBeTruthy();
         expect(document.getElementById('faq-6').textContent).toContain('In Secure Mode, why must I edit my config manually');
         
+        expect(document.getElementById('faq-8').classList.contains('hidden')).toBe(true);
         expect(window.secureModeActive).toBe(true);
     });
 
