@@ -7,3 +7,7 @@
 ## [3.3.7]
 
 - Revert management authentication to restore UI compatibility and fix DNS IP resolution in node announcements
+
+## [3.3.8]
+
+- Secure Mode: Backup WireGuard Config view, native file download, modal UX fixes, and gossip verification via read-only lnd.conf audit

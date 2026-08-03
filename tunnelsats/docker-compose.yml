@@ -3,7 +3,7 @@ version: "3.7"
 services:
   tunnelsats:
     # Use the specific version tag for production
-    image: tunnelsats/ts-umbrel-app:3.3.7
+    image: tunnelsats/ts-umbrel-app:3.3.8
     container_name: tunnelsats
     restart: on-failure
     network_mode: "host"
