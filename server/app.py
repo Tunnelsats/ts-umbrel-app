@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import requests
 import yaml
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
@@ -1613,14 +1613,17 @@ def clean_and_verify_lnd_announcements(
     port: int,
     retain_tor: bool,
 ) -> Tuple[bool, List[str], List[str]]:
-    """Withdraw live non-TunnelSats clearnet LND URIs, then verify the live set."""
+    """Withdraw live non-TunnelSats clearnet LND URIs, add missing TunnelSats URI live, then verify."""
+    if SECURE_MODE or K3S_MODE:
+        return False, [], ["secure_mode_manual_required"]
+
     container_id = container_id_by_match(LND_CONTAINER_PATTERN)
     if not container_id:
-        return False, [], []
+        return False, [], ["lnd_not_found"]
 
     addresses = _query_lnd_addresses(container_id)
     if addresses is None:
-        return False, [], []
+        return False, [], ["lnd_initializing"]
 
     conflicts = [
         address for address in addresses
@@ -1637,9 +1640,21 @@ def clean_and_verify_lnd_announcements(
             return False, removed, conflicts
         removed.append(address)
 
+    # If expected TunnelSats endpoint is not yet in live gossip, add it live via RPC
+    has_tunnelsats = any(
+        _is_expected_tunnelsats_address(address, dns, port)
+        for address in addresses
+    )
+    if not has_tunnelsats:
+        docker_exec(
+            container_id,
+            ["lncli", "peers", "updatenodeannouncement", f"--address_add={dns}:{port}"],
+        )
+
     verified_addresses = _query_lnd_addresses(container_id)
     if verified_addresses is None:
-        return False, removed, conflicts
+        return False, removed, ["lnd_initializing"]
+
     remaining = [
         address for address in verified_addresses
         if not _is_expected_tunnelsats_address(address, dns, port)
@@ -2630,14 +2645,36 @@ def local_status():
     verification = meta_data.get("lndAnnouncementVerification")
     expected_endpoint = f"{server_domain}:{expected_port}"
     announcement_verified: Optional[bool] = None
+    verification_source: Optional[str] = None
     if verification_required:
-        announcement_verified = bool(
-            not SECURE_MODE
-            and not K3S_MODE
-            and isinstance(verification, dict)
-            and verification.get("verified") is True
-            and verification.get("endpoint") == expected_endpoint
-        )
+        if SECURE_MODE or K3S_MODE:
+            # lnd.conf is mounted :ro in secure_mode — we can read it but not run lncli.
+            # Trust the config file: if the audit found no conflicts the user has correctly
+            # set externalhosts= per the manual setup instructions.
+            # NOTE: this is config-state verification, not live-gossip verification.
+            # LND must have been restarted after editing lnd.conf for changes to take effect.
+            lnd_config_conflicts = [c for c in announcement_conflicts if c.startswith("lnd:")]
+            announcement_verified = len(lnd_config_conflicts) == 0
+            verification_source = "config_file"
+        else:
+            announcement_verified = bool(
+                isinstance(verification, dict)
+                and verification.get("verified") is True
+                and verification.get("endpoint") == expected_endpoint
+            )
+            if not announcement_verified and server_domain:
+                v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
+                if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
+                    new_verification = {
+                        "endpoint": expected_endpoint,
+                        "verified": v_ok,
+                        "checkedAt": datetime.now(timezone.utc).isoformat(),
+                        "removed": v_rem,
+                        "remainingConflicts": v_conf,
+                    }
+                    _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
+                    announcement_verified = v_ok
+            verification_source = "live_gossip"
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
@@ -2700,6 +2737,7 @@ def local_status():
             "announcement_conflicts": announcement_conflicts,
             "announcement_verification_required": verification_required,
             "announcement_verified": announcement_verified,
+            "announcement_verification_source": verification_source,
         }
     )
 
@@ -2821,6 +2859,33 @@ def upload_config():
     )
 
 
+@app.route("/api/local/export-config", methods=["GET"])
+def export_config():
+    """Download active WireGuard config file (tunnelsats.conf)."""
+    if not os.path.exists(DATA_DIR):
+        return jsonify({"success": False, "error": "No configuration directory found."}), 404
+    conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
+    if not os.path.exists(conf_path):
+        # Filter to tunnelsats-prefixed profiles only — matching runtime discovery;
+        # non-TunnelSats configs (e.g. mullvad.conf) must never be exported as a backup.
+        confs = [
+            f for f in os.listdir(DATA_DIR)
+            if f.startswith("tunnelsats") and f.endswith(".conf") and not f.endswith(".bak")
+        ]
+        if not confs:
+            return jsonify({"success": False, "error": "No active WireGuard configuration file found."}), 404
+        # Pick the most recently modified profile when tunnelsats.conf is absent
+        # to avoid returning stale credentials from an older subscription.
+        confs.sort(key=lambda f: os.path.getmtime(os.path.join(DATA_DIR, f)), reverse=True)
+        conf_path = os.path.join(DATA_DIR, confs[0])
+
+    return send_file(
+        conf_path,
+        as_attachment=True,
+        download_name="tunnelsats.conf",
+        mimetype="text/plain"
+    )
+
 
 @app.route("/api/local/restart", methods=["POST"])
 def restart_tunnel():
@@ -2941,7 +3006,7 @@ def configure_node():
             ]
             cleanup_lines = ["externalip=", "nat=true", "nat=1"]
             gossip_command = (
-                "docker exec lnd lncli peers updatenodeannouncement "
+                "sudo docker exec lnd lncli peers updatenodeannouncement "
                 "--address_remove=<your-old-ip>:9735"
             )
         else:
@@ -3007,9 +3072,6 @@ def configure_node():
         )
         if not lnd_processed:
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
-        if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
-            _set_restart_pending(meta_path, meta, lnd_pending_key, True)
-            return jsonify({"success": False, "error": "Failed to restart LND container."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
 
         verified, removed, remaining = clean_and_verify_lnd_announcements(dns, port, retain_tor)
