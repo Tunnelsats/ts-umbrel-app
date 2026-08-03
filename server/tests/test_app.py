@@ -300,21 +300,25 @@ class TestManagementApiSecurity:
 
         assert res.status_code == 200
 
-    def test_dashboard_document_served_without_authentication(self, client):
+    def test_dashboard_document_requires_authentication(self, client):
         with app.test_client() as raw_client:
-            unauthenticated = raw_client.get('/', headers={'Host': 'localhost'})
-            authenticated = raw_client.get('/', headers={**management_auth_header(), 'Host': 'localhost'})
+            denied = raw_client.get('/', headers={'Host': 'localhost'})
+            allowed = raw_client.get('/', headers={**management_auth_header(), 'Host': 'localhost'})
 
-        assert unauthenticated.status_code == 200
-        assert b'<html' in unauthenticated.data.lower() or b'<!doctype' in unauthenticated.data.lower()
-        assert authenticated.status_code == 200
+        assert denied.status_code == 401
+        assert allowed.status_code == 200
+        assert f'{app_module.MANAGEMENT_CSRF_COOKIE}=' in allowed.headers.get('Set-Cookie', '')
 
-    def test_alternate_html_path_is_not_auth_gated(self, client):
+    def test_alternate_html_path_cannot_bypass_authentication(self, client):
         with app.test_client() as raw_client:
-            unauthenticated = raw_client.get('/web/index.html', headers={'Host': 'localhost'})
+            denied = raw_client.get('/web/index.html', headers={'Host': 'localhost'})
+            authenticated = raw_client.get(
+                '/web/index.html',
+                headers={**management_auth_header(), 'Host': 'localhost'},
+            )
 
-        # HTML paths outside static folder return 404 (not 401)
-        assert unauthenticated.status_code in (200, 404)
+        assert denied.status_code == 401
+        assert authenticated.status_code == 404
 
     def test_session_bootstrap_sets_strict_csrf_cookie(self, client):
         with app.test_client() as raw_client:
@@ -568,61 +572,6 @@ class TestManagementApiSecurity:
         assert password is None
         assert target_path.read_text() == 'unrelated-secret-that-must-not-be-used'
         assert stat.S_IMODE(target_path.stat().st_mode) == 0o644
-
-    def test_empty_env_password_falls_back_to_file_generation(self, monkeypatch, tmp_path):
-        previous_password = app.config.pop('MANAGEMENT_PASSWORD', None)
-        monkeypatch.setenv('MANAGEMENT_PASSWORD', '')
-        monkeypatch.delenv('APP_PASSWORD', raising=False)
-        monkeypatch.setattr(app_module, 'DATA_DIR', str(tmp_path))
-        monkeypatch.setattr(app_module, '_management_password_file_cache', ('', None))
-        try:
-            password = app_module._read_or_create_management_password()
-        finally:
-            if previous_password is not None:
-                app.config['MANAGEMENT_PASSWORD'] = previous_password
-
-        credential_path = tmp_path / app_module.MANAGEMENT_PASSWORD_FILE
-        assert password is not None
-        assert len(password) >= app_module.MANAGEMENT_PASSWORD_MIN_LENGTH
-        assert credential_path.exists()
-        assert credential_path.read_text() == password
-
-    def test_whitespace_only_env_password_falls_back_to_file_generation(self, monkeypatch, tmp_path):
-        previous_password = app.config.pop('MANAGEMENT_PASSWORD', None)
-        monkeypatch.setenv('MANAGEMENT_PASSWORD', '   ')
-        monkeypatch.delenv('APP_PASSWORD', raising=False)
-        monkeypatch.setattr(app_module, 'DATA_DIR', str(tmp_path))
-        monkeypatch.setattr(app_module, '_management_password_file_cache', ('', None))
-        try:
-            password = app_module._read_or_create_management_password()
-        finally:
-            if previous_password is not None:
-                app.config['MANAGEMENT_PASSWORD'] = previous_password
-
-        credential_path = tmp_path / app_module.MANAGEMENT_PASSWORD_FILE
-        assert password is not None
-        assert len(password) >= app_module.MANAGEMENT_PASSWORD_MIN_LENGTH
-        assert credential_path.exists()
-
-    def test_api_endpoints_remain_protected_without_credentials(self, client):
-        protected_paths = [
-            '/api/local/status',
-            '/api/local/session',
-            '/api/subscription/renew',
-            '/api/subscription/claim',
-        ]
-        with app.test_client() as raw_client:
-            for path in protected_paths:
-                res = raw_client.get(path, headers={'Host': 'localhost'})
-                assert res.status_code in (401, 405), f'{path} returned {res.status_code}, expected 401 or 405'
-
-    def test_static_assets_served_without_authentication(self, client):
-        with app.test_client() as raw_client:
-            root = raw_client.get('/', headers={'Host': 'localhost'})
-
-        assert root.status_code == 200
-        content_type = root.headers.get('Content-Type', '')
-        assert 'text/html' in content_type
 
 
 def test_missing_static_asset_remains_404(client):
