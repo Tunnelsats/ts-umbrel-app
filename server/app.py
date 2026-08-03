@@ -31,7 +31,7 @@ app = Flask(__name__, static_folder="../web", static_url_path="")
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.3.5"
+APP_VERSION = "v3.3.6"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -525,7 +525,7 @@ def _read_or_create_management_password():
 
     configured = app.config.get("MANAGEMENT_PASSWORD")
     if configured is None:
-        configured = os.environ.get("MANAGEMENT_PASSWORD") or os.environ.get("APP_PASSWORD")
+        configured = (os.environ.get("MANAGEMENT_PASSWORD") or "").strip() or (os.environ.get("APP_PASSWORD") or "").strip() or None
     if configured is not None:
         if _valid_management_password(configured):
             return configured
@@ -605,9 +605,7 @@ def _management_credentials_are_valid():
 
 def _management_request_is_protected():
     return (
-        request.path == "/"
-        or request.path.endswith(".html")
-        or request.path in ("/api/subscription/renew", "/api/subscription/claim")
+        request.path in ("/api/subscription/renew", "/api/subscription/claim")
         or request.path.startswith("/api/local")
     )
 

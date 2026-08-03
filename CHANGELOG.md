@@ -7,3 +7,7 @@
 ## [3.3.5]
 
 - Authenticate the local management plane; enforce fail-closed IPv4/IPv6 routing for Docker and k3s; prevent Lightning real-IP announcements; and update CI actions.
+
+## [3.3.6]
+
+- Fix management UI lockout on direct browser access and empty APP_PASSWORD fallback
