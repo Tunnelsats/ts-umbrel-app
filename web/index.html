@@ -499,7 +499,7 @@
                         necessary containers so your Lightning node connects through the secure TunnelSats network.</p>
 
                     <!-- Secure Mode manual config warning -->
-                    <div id="secure-mode-warning-box" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                    <div id="secure-mode-warning-box" data-secure-mode="only" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
                         <strong class="text-base text-tsyellow mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Configuration (Secure Mode)</strong>
                         <p class="mb-2">TunnelSats is running in Secure Mode (without root Docker socket access) to comply with Umbrel's security guidelines. Because of this sandbox isolation, <strong>you must manually edit your Lightning configuration file</strong> to announce your TunnelSats external IP and port.</p>
                         <p class="mb-2 text-tsyellow"><strong>CRITICAL:</strong> Existing <code>externalip</code>, <code>nat=true</code>, <code>announce-addr</code>, or <code>ip-discovery=true</code> settings can keep publishing your real IP even when packet routing is protected. The generated instructions include mandatory cleanup and LND gossip-withdrawal steps.</p>
@@ -535,7 +535,50 @@
 
             </section>
 
-            <!-- 5. Uninstall / Restore View -->
+            <!-- 5. Backup Config View -->
+            <section id="view-backup" class="relative z-10 hidden space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-white mb-2">Backup WireGuard Profile</h2>
+                    <p class="text-gray-400 text-sm mb-6">
+                        Securely download and preserve your active TunnelSats WireGuard subscription profile (<code class="bg-black/50 px-1.5 py-0.5 rounded text-tsgreen font-mono text-xs">tunnelsats.conf</code>).
+                    </p>
+
+                    <div class="bg-gray-900/80 border border-gray-800 rounded-2xl p-6 md:p-8 space-y-6 shadow-[0_4px_20px_rgba(0,0,0,0.5)] relative overflow-hidden">
+                        <div class="absolute top-0 right-0 w-32 h-32 bg-tsgreen/5 rounded-bl-[120px] pointer-events-none"></div>
+
+                        <div class="flex items-start space-x-4">
+                            <div class="p-3 bg-tsgreen/10 border border-tsgreen/20 rounded-xl text-tsgreen shrink-0">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                                </svg>
+                            </div>
+                            <div class="space-y-2">
+                                <h3 class="text-lg font-bold text-white">Why is saving a backup essential?</h3>
+                                <p class="text-sm text-gray-300 leading-relaxed">
+                                    Your WireGuard configuration contains your unique cryptographic private keys, internal VPN address, and server routing details.
+                                </p>
+                                <ul class="list-disc pl-5 space-y-2 text-xs text-gray-300 leading-relaxed">
+                                    <li><strong class="text-white">Secure Mode Sandbox Protection:</strong> In Secure Mode, app uninstalls from the Umbrel App Store will delete container files if data wipe is confirmed. Saving a backup ensures you never lose your subscription.</li>
+                                    <li><strong class="text-white">Reinstall &amp; Recovery:</strong> If you migrate your node or reinstall TunnelSats, you can instantly upload this file on the <strong class="text-tsyellow">Subscribe / Import</strong> tab to restore active status without re-purchasing.</li>
+                                    <li><strong class="text-white">Off-Grid Redundancy:</strong> Store your <code class="text-tsgreen font-mono">tunnelsats.conf</code> in a password manager or encrypted backup drive.</li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div class="pt-4 border-t border-gray-800">
+                            <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer"
+                                class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-4 rounded-xl transition shadow-[0_0_20px_rgba(34,197,94,0.25)] hover:shadow-[0_0_30px_rgba(34,197,94,0.45)] inline-flex items-center justify-center gap-3 text-base cursor-pointer no-underline">
+                                <svg class="w-6 h-6 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                <span>Download WireGuard Profile (tunnelsats.conf)</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 6. Uninstall / Restore View -->
             <section id="view-uninstall" class="relative z-10 hidden space-y-6">
                 <div>
                     <h2 class="text-xl font-bold text-red-500 mb-2">Uninstall TunnelSats Networking</h2>
@@ -546,7 +589,7 @@
                             uninstalling.</p>
 
                         <!-- Secure Mode manual restore warning -->
-                        <div id="secure-mode-uninstall-warning-box" class="hidden bg-red-950/30 border border-red-500/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                        <div id="secure-mode-uninstall-warning-box" data-secure-mode="only" class="hidden bg-red-950/30 border border-red-500/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
                             <strong class="text-base text-red-400 mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Restore (Secure Mode)</strong>
                             <p class="mb-2">Because TunnelSats has read-only access to your configurations, <strong>you must manually revert configuration changes</strong> before uninstalling the TunnelSats app.</p>
                             <p class="mb-2 text-red-400"><strong>CRITICAL:</strong> If you do not remove the TunnelSats external host parameters from your Lightning config file, your node will remain offline trying to route through a non-existent VPN IP address once the app is deleted.</p>
@@ -557,6 +600,15 @@
                                 <li>Open your node config file, delete or comment out the specified lines, and save.</li>
                                 <li>Restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard to apply the defaults.</li>
                             </ol>
+                            <div class="mt-4 pt-3 border-t border-red-500/30">
+                                <p class="text-xs text-red-300 font-bold mb-2 flex items-center gap-1">🚨 Mandatory Step BEFORE Uninstalling:</p>
+                                <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-2.5 rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer text-xs no-underline">
+                                    <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                    </svg>
+                                    <span>Backup WireGuard Profile (tunnelsats.conf)</span>
+                                </a>
+                            </div>
                         </div>
                         <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
@@ -623,13 +675,20 @@
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> 5. How do I safely uninstall the TunnelSats App on Umbrel?</a></li>
-                            <li><a href="#faq-6"
+                            <li data-secure-mode="only"><a href="#faq-6"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-6"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> 6. In Secure Mode, why must I edit my config manually?</a></li>
+                            <li data-secure-mode="exclude"><a href="#faq-8"
+                                    class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
+                                    data-scroll-to="faq-8"><svg class="w-4 h-4 text-gray-500" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 5l7 7-7 7"></path>
+                                    </svg> 6. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?</a></li>
                             <li><a href="#faq-7"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-7"><svg class="w-4 h-4 text-gray-500" fill="none"
@@ -640,6 +699,7 @@
                                     offline!</a></li>
                         </ul>
                     </div>
+
 
                     <div class="space-y-4">
                         <!-- Q1 -->
@@ -707,7 +767,7 @@
                                     To check the live WireGuard handshake:</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    docker exec tunnelsats wg show</div>
+                                    sudo docker exec tunnelsats wg show</div>
                             </div>
                         </div>
 
@@ -780,7 +840,7 @@
                                     </ol>
                                 </div>
 
-                                <div
+                                <div data-secure-mode="exclude"
                                     class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
                                     <strong class="text-gray-300 not-italic mb-1 flex items-center gap-1.5"><svg
                                             class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
@@ -794,10 +854,28 @@
                                     subscription profile). If you reinstall the app in the future, your subscription
                                     will still be there.
                                 </div>
+
+                                <div data-secure-mode="only" class="bg-red-950/40 border border-red-500/50 p-4 rounded-xl text-red-200 mt-4 space-y-2 not-italic shadow-md">
+                                    <strong class="text-white font-bold flex items-center gap-2 text-sm">
+                                        <span class="text-red-400 text-base">🚨</span> HIGH URGENCY: Backup WireGuard Profile BEFORE Uninstalling!
+                                    </strong>
+                                    <p class="text-xs text-red-200 leading-relaxed">
+                                        Because TunnelSats runs in Secure Mode inside an isolated container sandbox, <strong>uninstalling the TunnelSats app via the Umbrel App Store will permanently erase your purchased WireGuard profile (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>) if app data is wiped</strong>.
+                                    </p>
+                                    <p class="text-xs text-red-200 leading-relaxed font-semibold">
+                                        BEFORE clicking Uninstall in the Umbrel App Store, click the button below to download your <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file to your browser. You can re-import this profile anytime if you reinstall.
+                                    </p>
+                                    <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="mt-2 bg-tsgreen hover:bg-green-400 text-gray-900 font-bold px-4 py-2.5 rounded-lg text-xs transition shadow-lg inline-flex items-center gap-2 cursor-pointer no-underline">
+                                        <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                        </svg>
+                                        <span>Download WireGuard Config (tunnelsats.conf)</span>
+                                    </a>
+                                </div>
                             </div>
                         </div>
                         <!-- Q6 (Secure Mode) -->
-                        <div id="faq-6" class="bg-yellow-950/10 border border-tsyellow/30 rounded-lg p-5 scroll-mt-6">
+                        <div id="faq-6" data-secure-mode="only" class="bg-yellow-950/10 border border-tsyellow/30 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
                                 <span class="text-tsyellow">⚠️</span> 6. In Secure Mode, why must I edit my config manually?
                             </h3>
@@ -812,7 +890,7 @@
                                     <li>Open the Umbrel <strong>Files</strong> app, navigate to the config file (e.g. <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code> for LND), paste the lines, and save.</li>
                                     <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
                                     <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> or <strong>Core Lightning</strong> app settings, and click <strong>Restart</strong>.</li>
-                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>docker exec lnd lncli getinfo</code>.</li>
+                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">sudo docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>sudo docker exec lnd lncli getinfo</code>.</li>
                                 </ol>
                                 <p class="text-tsyellow">The withdrawal updates active gossip, but historical explorers and collectors may retain addresses that were published previously.</p>
 
@@ -868,6 +946,45 @@
                                 </ol>
                             </div>
                         </div>
+
+                        <!-- Q8 -->
+                        <div id="faq-8" data-secure-mode="exclude" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                            <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
+                                <svg class="w-5 h-5 text-tsgreen" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg> 6. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?
+                            </h3>
+                            <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
+                                <p>TunnelSats updates your Lightning node's public gossip announcements in real time without restarting your LND container, preserving active channels and preventing downtime.</p>
+                                <h4 class="text-white font-semibold mt-4 mb-2">How It Works:</h4>
+                                <ul class="list-disc pl-5 space-y-1 marker:text-tsgreen">
+                                    <li><strong>Live RPC Updates:</strong> Node announcements are updated instantly via LND live RPC commands (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lncli peers updatenodeannouncement</code>).</li>
+                                    <li><strong>Persistence:</strong> Configuration files (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lnd.conf</code>) are updated on disk so settings persist across future system reboots.</li>
+                                    <li><strong>Self-Healing Background Verification:</strong> If your node is booting up or unlocking its wallet, the app non-blockingly waits for LND to finish starting, then automatically verifies and marks the dashboard <strong>ONLINE</strong> within seconds.</li>
+                                </ul>
+                                <h4 class="text-white font-semibold mt-4 mb-2">Troubleshooting Conflicting Clearnet IPs:</h4>
+                                <p>If your dashboard reports <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-red-400 font-mono text-xs">Dataplane Blocked</code> due to a conflicting clearnet address, follow these three simple steps over SSH:</p>
+                                <ol class="list-decimal pl-5 space-y-3 text-gray-300">
+                                    <li>
+                                        <strong>Step 1: Check what LND is currently announcing:</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">Query LND to list all advertised URIs:</p>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli getinfo | grep uris -A 10</code>
+                                        <p class="text-xs text-gray-400 mt-1">Identify any non-TunnelSats clearnet IP address in the list (e.g. <code class="text-yellow-400">85.214.12.34:9735</code>).</p>
+                                    </li>
+                                    <li>
+                                        <strong>Step 2: Remove the conflicting address:</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">Withdraw the specific conflicting address from your node's live gossip memory:</p>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;CONFLICTING_IP&gt;:&lt;PORT&gt;"</code>
+                                    </li>
+                                    <li>
+                                        <strong>Step 3: Trigger auto-verification & return ONLINE:</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">Once the withdrawal command completes, return to your TunnelSats dashboard and click <strong>Configure Node</strong> (or refresh the page). TunnelSats will automatically re-verify your node's announcements and set your node status to <strong class="text-tsgreen">ONLINE</strong> within seconds.</p>
+                                        <p class="text-xs text-gray-400 mt-1"><em>Optional: Re-run Step 1 over SSH to verify that the conflicting IP address has disappeared from LND's advertised URIs list.</em></p>
+                                    </li>
+                                </ol>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
 
@@ -932,7 +1049,7 @@
                 <div class="flex flex-col">
                     <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
                             class="text-tsyellow">Sats</span></h1>
-                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.3.7</span>
+                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.3.8</span>
                 </div>
             </div>
 
@@ -947,6 +1064,16 @@
                         </path>
                     </svg>
                     <span>Dashboard</span>
+                </button>
+                <button id="nav-backup"
+                    class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
+                    <svg class="w-5 h-5 text-gray-400 group-hover:text-tsgreen group-hover:scale-110 transition-all"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4">
+                        </path>
+                    </svg>
+                    <span>Backup Config</span>
                 </button>
                 <button id="nav-buy"
                     class="flex items-center space-x-3 text-left w-full px-4 py-3 text-sm font-medium rounded-lg transition-all duration-300 border-l-4 border-transparent text-gray-400 hover:text-white hover:bg-gray-800/50 group">
