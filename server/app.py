@@ -527,7 +527,13 @@ def _read_or_create_management_password():
     if configured is None:
         configured = os.environ.get("MANAGEMENT_PASSWORD") or os.environ.get("APP_PASSWORD")
     if configured is not None:
-        return configured if _valid_management_password(configured) else None
+        if _valid_management_password(configured):
+            return configured
+        app.logger.warning(
+            "Supplied MANAGEMENT_PASSWORD/APP_PASSWORD is too short (minimum %d characters)",
+            MANAGEMENT_PASSWORD_MIN_LENGTH,
+        )
+        return None
 
     password_path = os.path.join(DATA_DIR, MANAGEMENT_PASSWORD_FILE)
     with _management_password_lock:
@@ -2309,7 +2315,12 @@ def restrict_local_api():
         return _management_security_error(503, "Management API unavailable")
     if not _management_credentials_are_valid():
         _audit_management_request("rejected", "credentials", effective_remote_addr)
-        return _management_security_error(401, "Unauthorized", challenge=True)
+        return _management_security_error(
+            401,
+            "Unauthorized",
+            challenge=True,
+            csrf_refresh=True,
+        )
 
     if _management_request_changes_state():
         supplied_csrf = request.headers.get(MANAGEMENT_CSRF_HEADER, "")

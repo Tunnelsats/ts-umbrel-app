@@ -262,6 +262,7 @@ class TestManagementApiSecurity:
         assert res.status_code == 401
         assert res.get_json() == {'success': False, 'error': 'Unauthorized'}
         assert res.headers['WWW-Authenticate'].startswith('Basic realm="TunnelSats management"')
+        assert res.headers[app_module.MANAGEMENT_CSRF_REFRESH_HEADER] == 'required'
 
     def test_unauthenticated_tailscale_client_cannot_read_or_mutate(self, client):
         with app.test_client() as raw_client:
@@ -512,20 +513,26 @@ class TestManagementApiSecurity:
         assert read_response.status_code == 401
         assert mutation_response.status_code == 401
 
-    def test_weak_configured_password_fails_closed(self):
-        previous_password = app.config.get('MANAGEMENT_PASSWORD')
-        app.config['MANAGEMENT_PASSWORD'] = 'too-short'
+    def test_weak_environment_password_fails_closed_with_diagnostic(self, monkeypatch):
+        previous_password = app.config.pop('MANAGEMENT_PASSWORD', None)
+        weak_password = 'too-short'
+        monkeypatch.setenv('MANAGEMENT_PASSWORD', weak_password)
         try:
-            with app.test_client() as raw_client:
-                res = raw_client.get('/api/local/session', headers={'Host': 'localhost'})
+            with patch.object(app.logger, 'warning') as warning:
+                with app.test_client() as raw_client:
+                    res = raw_client.get('/api/local/session', headers={'Host': 'localhost'})
         finally:
-            if previous_password is None:
-                app.config.pop('MANAGEMENT_PASSWORD', None)
-            else:
+            if previous_password is not None:
                 app.config['MANAGEMENT_PASSWORD'] = previous_password
 
         assert res.status_code == 503
         assert res.get_json() == {'success': False, 'error': 'Management API unavailable'}
+        diagnostic_call = (
+            'Supplied MANAGEMENT_PASSWORD/APP_PASSWORD is too short (minimum %d characters)',
+            app_module.MANAGEMENT_PASSWORD_MIN_LENGTH,
+        )
+        assert [call.args for call in warning.call_args_list].count(diagnostic_call) == 1
+        assert weak_password not in str(warning.call_args_list)
 
     def test_missing_password_generates_persistent_private_credential(self, monkeypatch, tmp_path):
         previous_password = app.config.pop('MANAGEMENT_PASSWORD', None)
