@@ -118,10 +118,12 @@ def test_multiline_release_notes_are_rejected_without_writes(
 def test_preflight_failure_does_not_partially_update_files(
     bump_module, version_workspace
 ):
+    manifest = yaml.safe_load((version_workspace / "tunnelsats/umbrel-app.yml").read_text())
+    current_ver = manifest["version"]
     deployment = version_workspace / "k3s/deployment.yaml"
     deployment.write_text(
         deployment.read_text().replace(
-            "image: tunnelsats/ts-umbrel-app:3.3.4", "image: example/other:latest"
+            f"image: tunnelsats/ts-umbrel-app:{current_ver}", "image: example/other:latest"
         )
     )
     before = snapshot_files(version_workspace)
