@@ -29,5 +29,5 @@ gallery:
   - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats/gallery/2.png
   - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats/gallery/3.png
 path: ""
-defaultUsername: ""
-defaultPassword: ""
+defaultUsername: "tunnelsats"
+defaultPassword: "$APP_PASSWORD"

@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tunnelsats-management-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: tunnelsats
+  policyTypes:
+    - Ingress
+  ingress:
+    # Label only the intended same-namespace ingress/proxy workload. Ordinary
+    # pods receive no network-level access to the management listener.
+    - from:
+        - podSelector:
+            matchLabels:
+              tunnelsats.io/management-client: "true"
+      ports:
+        - protocol: TCP
+          port: 9739
