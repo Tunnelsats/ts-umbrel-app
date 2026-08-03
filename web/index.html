@@ -893,8 +893,20 @@
                                     <li><strong>Self-Healing Background Verification:</strong> If your node is booting up or unlocking its wallet, the app non-blockingly waits for LND to finish starting, then automatically verifies and marks the dashboard <strong>ONLINE</strong> within seconds.</li>
                                 </ul>
                                 <h4 class="text-white font-semibold mt-4 mb-2">Troubleshooting Conflicting Clearnet IPs:</h4>
-                                <p>If your dashboard reports <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-red-400 font-mono text-xs">Dataplane Blocked</code> due to a conflicting home IP address, run the following via SSH:</p>
-                                <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto">docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;YOUR_HOME_IP&gt;:9735"</code>
+                                <p>If your dashboard reports <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-red-400 font-mono text-xs">Dataplane Blocked</code> due to a conflicting clearnet address, follow these two steps over SSH:</p>
+                                <ol class="list-decimal pl-5 space-y-2 text-gray-300">
+                                    <li>
+                                        <strong>Step 1: Check what LND is currently announcing:</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">Query LND to list all advertised URIs:</p>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">docker exec -it lightning_lnd_1 lncli getinfo | grep uris -A 10</code>
+                                        <p class="text-xs text-gray-400 mt-1">Identify any non-TunnelSats clearnet IP address in the list (e.g. <code class="text-yellow-400">85.214.12.34:9735</code>).</p>
+                                    </li>
+                                    <li>
+                                        <strong>Step 2: Remove the conflicting address:</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">Withdraw the specific conflicting address from your node's live gossip memory:</p>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;CONFLICTING_IP&gt;:&lt;PORT&gt;"</code>
+                                    </li>
+                                </ol>
                             </div>
                         </div>
 
