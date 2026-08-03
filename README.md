@@ -74,6 +74,44 @@ tunnel route is unavailable.
 
 ## 🛠 Architecture & Dataplane
 
+### Management API security
+
+The dashboard document and every local management endpoint require HTTP Basic
+authentication. On Umbrel, use the username `tunnelsats` and the per-app
+password shown in the app's credentials panel. The same credential is enforced
+by TunnelSats itself, so connecting directly to host port `9739` does not bypass
+authentication.
+
+Outside Umbrel, set a password of at least 24 characters with
+`MANAGEMENT_PASSWORD`. If neither `MANAGEMENT_PASSWORD` nor `APP_PASSWORD` is
+set, TunnelSats generates a random persistent password at
+`/data/management-password` with mode `0600`; retrieve it from the container
+console. Set `MANAGEMENT_ALLOWED_HOSTS` to a comma-separated list before using
+a LAN, Tailscale, ingress, or reverse-proxy hostname. Forwarded headers are
+ignored unless the direct proxy address is loopback or is explicitly listed as
+a CIDR in `MANAGEMENT_TRUSTED_PROXIES`. The bundled Umbrel compose already
+allows the device hostname, `.local` domain, and app Tor hidden service.
+
+All browser mutations additionally require a same-origin `Origin` and a CSRF
+token bound to a strict same-site cookie. For a CLI mutation, bootstrap a token
+and cookie first (the commands prompt for the password):
+
+```bash
+api_origin=http://127.0.0.1:9739
+cookie_jar=/tmp/tunnelsats-api-cookies
+csrf_token="$(curl -fsS -u tunnelsats -c "${cookie_jar}" \
+  "${api_origin}/api/local/session" | jq -r .csrf_token)"
+curl -fsS -u tunnelsats -b "${cookie_jar}" \
+  -H "Origin: ${api_origin}" \
+  -H "X-TunnelSats-CSRF-Token: ${csrf_token}" \
+  -X POST "${api_origin}/api/local/reconcile"
+```
+
+Keep port `9739` behind the intended authenticated proxy wherever the
+deployment permits it. A host firewall should limit direct access to trusted
+management sources; application authentication remains mandatory even on
+allowed networks.
+
 Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
 
 ### IPv6 policy: fail-closed denial
@@ -170,14 +208,10 @@ Target: us3.tunnelsats.com (178.156.167.202) : 12345
 [3/3] Testing Inbound Port (via Hostname)...    PASS (Connected to us3.tunnelsats.com:12345)
 ----------------------------------------------------------------
 ```
-- Check `GET /api/local/status` first to view the current `dataplane_mode` and `wg_status`.
+- Check `GET /api/local/status` first to view the current `dataplane_mode` and
+  `wg_status` (for example, `curl -su tunnelsats
+  http://127.0.0.1:9739/api/local/status`).
 - If `rules_synced` is `false`, inspect `ipv4_rules_synced`,
   `ipv6_rules_synced`, and `last_error` in the JSON response.
-- **Trigger immediate Dataplane repair:**
-  ```bash
-  curl -X POST http://127.0.0.1:9739/api/local/reconcile
-  ```
-- **Force full app-level restart:**
-  ```bash
-  curl -X POST http://127.0.0.1:9739/api/local/restart
-  ```
+- To trigger reconcile or restart from a CLI, use the authenticated CSRF flow
+  in **Management API security** above and change the final endpoint as needed.

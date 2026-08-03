@@ -51,6 +51,19 @@ spec:
           env:
             - name: K3S_MODE
               value: "true"
+            # If this optional Secret is absent, TunnelSats creates a random
+            # persistent password at /data/management-password with mode 0600.
+            # See k3s/README.md for creation and retrieval instructions.
+            - name: MANAGEMENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tunnelsats-management
+                  key: password
+                  optional: true
+            # Add the external ingress hostname explicitly when using an ingress.
+            # Internal Service DNS variants are derived from K8S_NAMESPACE.
+            - name: MANAGEMENT_ALLOWED_HOSTS
+              value: "localhost,127.0.0.1,::1,tunnelsats"
             - name: K8S_NAMESPACE
               valueFrom:
                 fieldRef:
