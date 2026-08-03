@@ -499,7 +499,7 @@
                         necessary containers so your Lightning node connects through the secure TunnelSats network.</p>
 
                     <!-- Secure Mode manual config warning -->
-                    <div id="secure-mode-warning-box" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                    <div id="secure-mode-warning-box" data-secure-mode="only" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
                         <strong class="text-base text-tsyellow mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Configuration (Secure Mode)</strong>
                         <p class="mb-2">TunnelSats is running in Secure Mode (without root Docker socket access) to comply with Umbrel's security guidelines. Because of this sandbox isolation, <strong>you must manually edit your Lightning configuration file</strong> to announce your TunnelSats external IP and port.</p>
                         <p class="mb-2 text-tsyellow"><strong>CRITICAL:</strong> Existing <code>externalip</code>, <code>nat=true</code>, <code>announce-addr</code>, or <code>ip-discovery=true</code> settings can keep publishing your real IP even when packet routing is protected. The generated instructions include mandatory cleanup and LND gossip-withdrawal steps.</p>
@@ -546,7 +546,7 @@
                             uninstalling.</p>
 
                         <!-- Secure Mode manual restore warning -->
-                        <div id="secure-mode-uninstall-warning-box" class="hidden bg-red-950/30 border border-red-500/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
+                        <div id="secure-mode-uninstall-warning-box" data-secure-mode="only" class="hidden bg-red-950/30 border border-red-500/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
                             <strong class="text-base text-red-400 mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Restore (Secure Mode)</strong>
                             <p class="mb-2">Because TunnelSats has read-only access to your configurations, <strong>you must manually revert configuration changes</strong> before uninstalling the TunnelSats app.</p>
                             <p class="mb-2 text-red-400"><strong>CRITICAL:</strong> If you do not remove the TunnelSats external host parameters from your Lightning config file, your node will remain offline trying to route through a non-existent VPN IP address once the app is deleted.</p>
@@ -623,7 +623,7 @@
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> 5. How do I safely uninstall the TunnelSats App on Umbrel?</a></li>
-                            <li><a href="#faq-6"
+                            <li data-secure-mode="only"><a href="#faq-6"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-6"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
@@ -638,7 +638,7 @@
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> Troubleshooting: I uninstalled via the App Store first, and now my node is
                                     offline!</a></li>
-                            <li><a href="#faq-8"
+                            <li data-secure-mode="exclude"><a href="#faq-8"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-8"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
@@ -805,7 +805,7 @@
                             </div>
                         </div>
                         <!-- Q6 (Secure Mode) -->
-                        <div id="faq-6" class="bg-yellow-950/10 border border-tsyellow/30 rounded-lg p-5 scroll-mt-6">
+                        <div id="faq-6" data-secure-mode="only" class="bg-yellow-950/10 border border-tsyellow/30 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
                                 <span class="text-tsyellow">⚠️</span> 6. In Secure Mode, why must I edit my config manually?
                             </h3>
@@ -878,7 +878,7 @@
                         </div>
 
                         <!-- Q8 -->
-                        <div id="faq-8" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                        <div id="faq-8" data-secure-mode="exclude" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
                                 <svg class="w-5 h-5 text-tsgreen" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
