@@ -1367,6 +1367,47 @@ describe('Phase 3b: Install Config', () => {
         );
     });
 
+    test('configureNode requires explicit confirmation before disabling conflicting announcements', async () => {
+        global.fetch = jest.fn()
+            .mockResolvedValueOnce({
+                status: 409,
+                ok: false,
+                json: () => Promise.resolve({
+                    success: false,
+                    requires_confirmation: true,
+                    conflicts: ['externalip=198.51.100.10:9735', 'nat=true']
+                })
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                ok: true,
+                json: () => Promise.resolve({
+                    success: true,
+                    lnd: true,
+                    port: 35825,
+                    dns: 'de2.tunnelsats.com'
+                })
+            })
+            .mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+        window.confirmAnnouncementChanges = jest.fn().mockResolvedValue({
+            confirmed: true,
+            retainTorAnnouncements: true
+        });
+
+        await window.configureNode();
+
+        expect(window.confirmAnnouncementChanges).toHaveBeenCalledWith('lnd', [
+            'externalip=198.51.100.10:9735',
+            'nat=true'
+        ]);
+        expect(global.fetch.mock.calls[1][0]).toBe('/api/local/configure-node');
+        expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toEqual({
+            nodeType: 'lnd',
+            confirmAddressChanges: true,
+            retainTorAnnouncements: true
+        });
+    });
+
     test('configureNode handles HTML error pages gracefully without throwing syntax error', async () => {
         global.fetch.mockImplementationOnce((url) => {
             if (url === '/api/local/configure-node') {
@@ -1463,7 +1504,10 @@ describe('Phase 3b: Install Config', () => {
                         manual_mode: true,
                         node_type: 'lnd',
                         config_path: '/path/to/lnd.conf',
-                        config_lines: ['line1', 'line2']
+                        config_lines: ['externalhosts=de2.tunnelsats.com:35825', 'nat=false'],
+                        cleanup_lines: ['externalip=', 'nat=true'],
+                        gossip_command: 'docker exec lnd lncli peers updatenodeannouncement --address_remove=<your-old-ip>:9735',
+                        historical_warning: 'Historical collectors may retain old addresses.'
                     }),
                     ok: true
                 });
@@ -1477,7 +1521,10 @@ describe('Phase 3b: Install Config', () => {
         expect(modal).toBeTruthy();
         expect(modal.textContent).toContain('Manual Setup Required');
         expect(modal.textContent).toContain('/path/to/lnd.conf');
-        expect(modal.textContent).toContain('line1\nline2');
+        expect(modal.textContent).toContain('externalhosts=de2.tunnelsats.com:35825\nnat=false');
+        expect(modal.textContent).toContain('externalip=');
+        expect(modal.textContent).toContain('updatenodeannouncement');
+        expect(modal.textContent).toContain('Historical collectors');
 
         // Close modal
         const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');

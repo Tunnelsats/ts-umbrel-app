@@ -502,13 +502,15 @@
                     <div id="secure-mode-warning-box" class="hidden bg-yellow-950/30 border border-tsyellow/40 rounded-xl p-5 mb-6 text-sm text-gray-300 leading-relaxed shadow-lg">
                         <strong class="text-base text-tsyellow mb-2 flex items-center gap-1.5">⚠️ Action Required: Manual Configuration (Secure Mode)</strong>
                         <p class="mb-2">TunnelSats is running in Secure Mode (without root Docker socket access) to comply with Umbrel's security guidelines. Because of this sandbox isolation, <strong>you must manually edit your Lightning configuration file</strong> to announce your TunnelSats external IP and port.</p>
-                        <p class="mb-2 text-tsyellow"><strong>CRITICAL:</strong> If you skip this, your Lightning node will not broadcast its clearnet IP address to the network. As a result, other nodes will be unable to connect to you or open channels to you (inbound connections will fail).</p>
+                        <p class="mb-2 text-tsyellow"><strong>CRITICAL:</strong> Existing <code>externalip</code>, <code>nat=true</code>, <code>announce-addr</code>, or <code>ip-discovery=true</code> settings can keep publishing your real IP even when packet routing is protected. The generated instructions include mandatory cleanup and LND gossip-withdrawal steps.</p>
+                        <p class="mb-2 text-red-300">Removing a live announcement cannot erase historical IP snapshots retained by third-party explorers or gossip collectors.</p>
                         <p class="font-semibold text-white mb-1">How to apply:</p>
                         <ol class="list-decimal pl-5 space-y-1 text-gray-400">
                             <li>Select LND or CLN below and click <strong>Configure Node</strong> to fetch the exact configuration parameters.</li>
                             <li>Open the Umbrel <strong>Files</strong> app (or connect via SSH).</li>
                             <li>Navigate to the target file path shown in the instructions.</li>
-                            <li>Paste the configuration lines, save the file, and then restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard.</li>
+                            <li>Disable the conflicting announcement/discovery lines shown in the privacy cleanup, add the TunnelSats lines, save, and restart your <strong>Lightning Node or Core Lightning</strong> app.</li>
+                            <li>For LND, withdraw every old clearnet address with the copyable <code>lncli peers updatenodeannouncement</code> command and verify the current <code>uris</code>.</li>
                         </ol>
                     </div>
 
@@ -802,6 +804,7 @@
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p>To comply with Umbrel's official security rules, TunnelSats runs in a hardened sandbox (without root system access or direct access to the Docker socket). Consequently, it cannot write to your node's config files or trigger container restarts automatically.</p>
                                 <p class="text-tsyellow font-semibold">Without these manual config changes, your Lightning node will not broadcast its TunnelSats clearnet IP/port to the gossip network. This means other nodes will not know how to connect to you, and inbound channel opens will fail.</p>
+                                <p class="text-red-300 font-semibold">Before adding TunnelSats, remove/comment LND <code>externalip=</code> values and set <code>nat=false</code>, or remove non-TunnelSats CLN <code>announce-addr=</code> values and set <code>ip-discovery=false</code>. Deliberate Tor <code>.onion</code> announcements may be retained.</p>
                                 <h4 class="text-white font-semibold mt-4 mb-2">How to apply manually:</h4>
                                 <ol class="list-decimal pl-5 space-y-2">
                                     <li>Navigate to the <strong>Install</strong> tab, select your implementation, and click <strong>Configure Node</strong>.</li>
@@ -809,7 +812,9 @@
                                     <li>Open the Umbrel <strong>Files</strong> app, navigate to the config file (e.g. <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code> for LND), paste the lines, and save.</li>
                                     <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
                                     <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> or <strong>Core Lightning</strong> app settings, and click <strong>Restart</strong>.</li>
+                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>docker exec lnd lncli getinfo</code>.</li>
                                 </ol>
+                                <p class="text-tsyellow">The withdrawal updates active gossip, but historical explorers and collectors may retain addresses that were published previously.</p>
 
                                 <h4 class="text-white font-semibold mt-4 mb-2">Running Diagnostic Verification:</h4>
                                 <p>To test inbound/outbound connectivity in Official Store installations (where host scripts are stripped for store compliance), run our verification script over SSH:</p>
