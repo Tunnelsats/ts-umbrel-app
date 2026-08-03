@@ -2697,3 +2697,10 @@ class TestSecureModeToggle:
                 net3 = app.detect_cln_network()
                 assert net3 == "bitcoin"
                 assert mock_mtime.call_count == 8
+
+
+def test_is_expected_tunnelsats_address_resolves_domain_ip():
+    with patch('socket.gethostbyname_ex', return_value=('us3.tunnelsats.com', [], ['178.156.167.202'])):
+        assert app_module._is_expected_tunnelsats_address('178.156.167.202:23217', 'us3.tunnelsats.com', 23217) is True
+        assert app_module._is_expected_tunnelsats_address('us3.tunnelsats.com:23217', 'us3.tunnelsats.com', 23217) is True
+        assert app_module._is_expected_tunnelsats_address('203.0.113.1:23217', 'us3.tunnelsats.com', 23217) is False

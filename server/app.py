@@ -777,7 +777,22 @@ def _is_expected_tunnelsats_address(address: str, dns: str, port: int) -> bool:
     endpoint = str(address or "").strip()
     if "@" in endpoint:
         endpoint = endpoint.rsplit("@", 1)[1]
-    return endpoint.lower().rstrip(".") == f"{dns}:{port}".lower().rstrip(".")
+    endpoint_lower = endpoint.lower().rstrip(".")
+    expected_domain = f"{dns}:{port}".lower().rstrip(".")
+    if endpoint_lower == expected_domain:
+        return True
+
+    try:
+        if ":" in endpoint:
+            host, host_port_str = endpoint.rsplit(":", 1)
+            if int(host_port_str) == int(port):
+                _, _, ip_list = socket.gethostbyname_ex(dns)
+                if host in ip_list:
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _config_bool(value: str) -> Optional[bool]:
