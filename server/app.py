@@ -2968,7 +2968,7 @@ def configure_node():
             ]
             cleanup_lines = ["externalip=", "nat=true", "nat=1"]
             gossip_command = (
-                "docker exec lnd lncli peers updatenodeannouncement "
+                "sudo docker exec lnd lncli peers updatenodeannouncement "
                 "--address_remove=<your-old-ip>:9735"
             )
         else:

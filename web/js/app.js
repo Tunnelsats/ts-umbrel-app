@@ -1556,7 +1556,7 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
             <li>Add or update the TunnelSats lines under the existing <b>[Application Options]</b> section (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
             <li>For every previously announced clearnet address, replace the placeholder in the command above and run it over SSH.</li>
-            <li>Run <code>docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
+            <li>Run <code>sudo docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
         `;
     } else {
         ol.innerHTML = `

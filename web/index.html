@@ -715,7 +715,7 @@
                                     To check the live WireGuard handshake:</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    docker exec tunnelsats wg show</div>
+                                    sudo docker exec tunnelsats wg show</div>
                             </div>
                         </div>
 
@@ -820,7 +820,7 @@
                                     <li>Open the Umbrel <strong>Files</strong> app, navigate to the config file (e.g. <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code> for LND), paste the lines, and save.</li>
                                     <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
                                     <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> or <strong>Core Lightning</strong> app settings, and click <strong>Restart</strong>.</li>
-                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>docker exec lnd lncli getinfo</code>.</li>
+                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">sudo docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>sudo docker exec lnd lncli getinfo</code>.</li>
                                 </ol>
                                 <p class="text-tsyellow">The withdrawal updates active gossip, but historical explorers and collectors may retain addresses that were published previously.</p>
 
@@ -898,13 +898,13 @@
                                     <li>
                                         <strong>Step 1: Check what LND is currently announcing:</strong>
                                         <p class="text-xs text-gray-400 mt-0.5">Query LND to list all advertised URIs:</p>
-                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">docker exec -it lightning_lnd_1 lncli getinfo | grep uris -A 10</code>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli getinfo | grep uris -A 10</code>
                                         <p class="text-xs text-gray-400 mt-1">Identify any non-TunnelSats clearnet IP address in the list (e.g. <code class="text-yellow-400">85.214.12.34:9735</code>).</p>
                                     </li>
                                     <li>
                                         <strong>Step 2: Remove the conflicting address:</strong>
                                         <p class="text-xs text-gray-400 mt-0.5">Withdraw the specific conflicting address from your node's live gossip memory:</p>
-                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;CONFLICTING_IP&gt;:&lt;PORT&gt;"</code>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;CONFLICTING_IP&gt;:&lt;PORT&gt;"</code>
                                     </li>
                                 </ol>
                             </div>
