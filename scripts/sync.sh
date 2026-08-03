@@ -85,8 +85,10 @@ run_node() {
 
     # 3. Recreate → Inject → Restart (the deploy.py pattern)
     log_info "Injecting (rm → up → cp → restart)..."
+    SECURE_MODE_VAL="${SECURE_MODE:-false}"
     (
         echo "SSHPASS=\"${SSHPASS}\""
+        echo "SECURE_MODE=\"${SECURE_MODE_VAL}\""
         cat << 'EOF'
 APP_ID="tunnelsats"
 UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
@@ -101,7 +103,7 @@ run_sudo() {
 }
 
 run_sudo docker rm -f "${APP_ID}" 2>/dev/null || true
-run_sudo env APP_DATA_DIR="${UMBREL_APP_DATA}" docker compose -f "${UMBREL_COMPOSE}" up -d
+run_sudo env SECURE_MODE="${SECURE_MODE}" APP_DATA_DIR="${UMBREL_APP_DATA}" docker compose -f "${UMBREL_COMPOSE}" up -d
 for i in $(seq 1 10); do
     if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${APP_ID}" 2>/dev/null)" = "true" ]; then
         break

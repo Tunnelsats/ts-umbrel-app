@@ -513,8 +513,11 @@ function initApp() {
         if (el) el.addEventListener(event, fn);
     };
 
+    window.switchTab = switchTab;
+
     attachListener('btn-mobile-menu', 'click', () => toggleMobileMenu());
     attachListener('nav-dashboard', 'click', () => switchTab('dashboard'));
+    attachListener('nav-backup', 'click', () => switchTab('backup'));
     attachListener('nav-buy', 'click', () => switchTab('buy'));
     attachListener('nav-renew', 'click', () => switchTab('renew'));
     attachListener('nav-import', 'click', () => switchTab('import'));
@@ -705,13 +708,14 @@ function applySecureModeUI(isSecureMode) {
             `;
     }
 
-    if (elements.warningBox) {
-        elements.warningBox.classList.toggle('hidden', !isSecureMode);
-    }
+    // Declarative UI visibility toggles via data-secure-mode attributes
+    document.querySelectorAll('[data-secure-mode="only"]').forEach(el => {
+        el.classList.toggle('hidden', !isSecureMode);
+    });
 
-    if (elements.uninstallWarningBox) {
-        elements.uninstallWarningBox.classList.toggle('hidden', !isSecureMode);
-    }
+    document.querySelectorAll('[data-secure-mode="exclude"]').forEach(el => {
+        el.classList.toggle('hidden', isSecureMode);
+    });
 }
 
 // 1. Fetch Local Status
@@ -865,14 +869,36 @@ async function fetchStatus() {
         if (btnDashEnable) btnDashEnable.classList.add('hidden');
         if (btnDashDisable) btnDashDisable.classList.add('hidden');
         if (txtRoutingError) {
-            txtRoutingError.textContent = dataplaneError;
-            txtRoutingError.classList.toggle('hidden', !dataplaneError);
+            if (dataplaneError) {
+                if (isSecureMode && (dataplaneError.toLowerCase().includes('gossip') || dataplaneError.toLowerCase().includes('announcements'))) {
+                    txtRoutingError.innerHTML = `
+                        <div class="space-y-2">
+                            <strong class="text-tsyellow font-bold flex items-center gap-1.5">⚠️ Manual Setup Required (Secure Mode)</strong>
+                            <p class="text-xs text-gray-300 leading-relaxed">${dataplaneError}</p>
+                            <button id="btn-goto-instructions" type="button" class="mt-1 bg-tsyellow hover:bg-yellow-400 text-gray-900 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow flex items-center gap-1.5 cursor-pointer">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                                <span>View Setup Instructions (Installation Tab)</span>
+                            </button>
+                        </div>`;
+                } else {
+                    txtRoutingError.textContent = dataplaneError;
+                }
+                txtRoutingError.classList.remove('hidden');
+            } else {
+                txtRoutingError.textContent = '';
+                txtRoutingError.classList.add('hidden');
+            }
         }
 
         let badgeState;
         if (dataplaneError) {
-            badgeState = BADGE_STATES.offline;
-            if (txtRoutingStatus) txtRoutingStatus.textContent = "Dataplane Blocked";
+            if (isSecureMode && (dataplaneError.toLowerCase().includes('gossip') || dataplaneError.toLowerCase().includes('announcements'))) {
+                badgeState = { text: "Manual Setup Needed", className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsyellow text-tsyellow bg-yellow-950/40" };
+                if (txtRoutingStatus) txtRoutingStatus.textContent = "Gossip Verification Needed";
+            } else {
+                badgeState = BADGE_STATES.offline;
+                if (txtRoutingStatus) txtRoutingStatus.textContent = "Dataplane Blocked";
+            }
         } else if (!hasNode) {
             badgeState = BADGE_STATES.notFound;
             if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
@@ -1436,25 +1462,33 @@ function createModalOverlay(id) {
 
     const overlay = document.createElement('div');
     overlay.id = id;
-    overlay.className = 'absolute inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm transition-opacity duration-300';
+    overlay.className = 'fixed inset-0 z-[100] w-screen h-screen flex items-center justify-center bg-black/85 p-4 backdrop-blur-md transition-opacity duration-300';
 
     const panel = document.createElement('div');
     panel.className = 'w-full max-w-lg rounded-2xl border border-gray-700/50 bg-gray-950 p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transform transition-all duration-300 scale-95 opacity-0 text-left';
 
     const OVERLAY_TRANSITION_MS = 300;
     const closeModal = () => {
+        document.removeEventListener('keydown', handleKeyDown);
         panel.classList.add('scale-95', 'opacity-0');
         overlay.classList.add('opacity-0');
         setTimeout(() => overlay.remove(), OVERLAY_TRANSITION_MS);
     };
 
+    const handleKeyDown = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+        }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
     overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) closeModal();
+        if (!panel.contains(e.target)) closeModal();
     });
 
     const mountAndAnimate = () => {
         overlay.appendChild(panel);
-        getAppShell().appendChild(overlay);
+        document.body.appendChild(overlay);
         setTimeout(() => {
             panel.classList.remove('scale-95', 'opacity-0');
             panel.classList.add('scale-100', 'opacity-100');
@@ -1555,7 +1589,7 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
             <li>Add or update the TunnelSats lines under the existing <b>[Application Options]</b> section (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
             <li>For every previously announced clearnet address, replace the placeholder in the command above and run it over SSH.</li>
-            <li>Run <code>docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
+            <li>Run <code>sudo docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
         `;
     } else {
         ol.innerHTML = `
@@ -2191,4 +2225,49 @@ document.addEventListener('click', (e) => {
             closeDropdown(openDropdown);
         }
     }
+
+    const gotoBtn = e.target.closest('#btn-goto-instructions');
+    if (gotoBtn) {
+        e.preventDefault();
+        switchTab('import');
+        setTimeout(() => {
+            configureNode();
+        }, 100);
+    }
 });
+
+async function downloadWireGuardConfig() {
+    try {
+        const downloadUrl = '/api/local/export-config';
+
+        // 1. Verify config availability first
+        const check = await fetch(downloadUrl);
+        if (!check.ok) {
+            const errData = await check.json().catch(() => ({}));
+            alert(errData.error || 'No active WireGuard configuration profile found.');
+            return;
+        }
+
+        // 2. Trigger native download via direct anchor link (bypasses HTTP 'Not secure' Blob restrictions in Chrome)
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = downloadUrl;
+        a.download = 'tunnelsats.conf';
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+
+        setTimeout(() => {
+            if (a.parentNode) {
+                a.parentNode.removeChild(a);
+            }
+        }, 500);
+    } catch (err) {
+        console.error('Export error:', err);
+        // Fallback for restricted webview/browser environments
+        window.location.assign('/api/local/export-config');
+    }
+}
+window.downloadWireGuardConfig = downloadWireGuardConfig;
+

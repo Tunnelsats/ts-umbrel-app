@@ -123,6 +123,10 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('nav-buy').classList.contains('nav-active')).toBe(true);
         expect(document.getElementById('nav-dashboard').classList.contains('nav-active')).toBe(false);
+
+        window.switchTab('backup');
+        expect(document.getElementById('view-backup').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('nav-backup').classList.contains('nav-active')).toBe(true);
     });
 
     test('footer FAQ link switches to FAQ view without requiring a nav button', () => {
@@ -361,6 +365,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('faq-6')).toBeTruthy();
         expect(document.getElementById('faq-6').textContent).toContain('In Secure Mode, why must I edit my config manually');
         
+        expect(document.getElementById('faq-8').classList.contains('hidden')).toBe(true);
         expect(window.secureModeActive).toBe(true);
     });
 
