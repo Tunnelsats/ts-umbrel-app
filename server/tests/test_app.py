@@ -315,6 +315,7 @@ def test_management_audit_log_does_not_record_supplied_token(
     )
 
     assert response.status_code == 403
+    assert response.headers["X-TunnelSats-CSRF-Refresh"] == "required"
     assert "reason=csrf" in caplog.text
     assert supplied_secret not in caplog.text
 

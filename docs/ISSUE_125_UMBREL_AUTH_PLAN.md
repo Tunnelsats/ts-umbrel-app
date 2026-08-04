@@ -25,7 +25,12 @@
   CSRF-protected.
 - Cycle D red: `3` compose contract tests failed before the authenticated
   `app_proxy` and loopback backend wiring were added.
-- Final local green gate: `279` server tests and `62` frontend tests pass. The
+- Review follow-up red: the compose smoke test exposed its missing Umbrel base
+  service injection, and Greptile identified stale in-memory CSRF credentials
+  after a backend restart. The CI harness now supplies a dormant proxy stub,
+  and the frontend refreshes and retries exactly once when the backend marks a
+  CSRF rejection as refreshable.
+- Final local green gate: `280` server tests and `63` frontend tests pass. The
   compose overlay also renders successfully when merged with Umbrel's upstream
   `docker-compose.app_proxy.yml`.
 - The two-mode real-device umbrelOS end-to-end matrix remains required before

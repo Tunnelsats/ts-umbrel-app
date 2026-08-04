@@ -11,6 +11,7 @@ let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
 const MANAGEMENT_CSRF_HEADER = 'X-TunnelSats-CSRF-Token';
+const MANAGEMENT_CSRF_REFRESH_HEADER = 'X-TunnelSats-CSRF-Refresh';
 let managementCsrfToken = null;
 let managementCsrfPromise = null;
 
@@ -40,13 +41,31 @@ async function managementFetch(url, options = {}) {
         ...fetchOptions,
         credentials: 'same-origin'
     };
-    if (requireCsrf || !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        const csrfToken = await ensureManagementCsrfToken();
+    const csrfRequired = requireCsrf || !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    let csrfToken = null;
+    if (csrfRequired) {
+        csrfToken = await ensureManagementCsrfToken();
         requestOptions.headers = {
             ...(fetchOptions.headers || {}),
             [MANAGEMENT_CSRF_HEADER]: csrfToken
         };
     }
+    const response = await fetch(url, requestOptions);
+    const refreshRequired = response.status === 403
+        && response.headers
+        && typeof response.headers.get === 'function'
+        && response.headers.get(MANAGEMENT_CSRF_REFRESH_HEADER) === 'required';
+    if (!csrfRequired || !refreshRequired) return response;
+
+    // A backend restart rotates its process-scoped token while the dashboard
+    // can remain open. Refresh and retry exactly once, and do not discard a
+    // token that another concurrent request may already have refreshed.
+    if (managementCsrfToken === csrfToken) managementCsrfToken = null;
+    const refreshedToken = await ensureManagementCsrfToken();
+    requestOptions.headers = {
+        ...requestOptions.headers,
+        [MANAGEMENT_CSRF_HEADER]: refreshedToken
+    };
     return fetch(url, requestOptions);
 }
 

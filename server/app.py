@@ -121,6 +121,7 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
 SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
 MANAGEMENT_CSRF_HEADER = "X-TunnelSats-CSRF-Token"
+MANAGEMENT_CSRF_REFRESH_HEADER = "X-TunnelSats-CSRF-Refresh"
 MANAGEMENT_CSRF_TOKEN = secrets.token_urlsafe(32)
 MANAGEMENT_JSON_PATHS = frozenset(
     {
@@ -556,6 +557,8 @@ def _management_security_error(reason):
     )
     response = jsonify({"success": False, "error": "Forbidden"})
     response.status_code = 403
+    if reason == "csrf":
+        response.headers[MANAGEMENT_CSRF_REFRESH_HEADER] = "required"
     return response
 
 

@@ -153,6 +153,46 @@ describe('Management request browser security', () => {
         });
     });
 
+    test('stale CSRF rejection refreshes the token and retries once', async () => {
+        let sessionCalls = 0;
+        let mutationCalls = 0;
+        const sentTokens = [];
+        global.fetch = jest.fn((url, options) => {
+            if (url === '/api/local/session') {
+                sessionCalls += 1;
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        authenticated: true,
+                        csrf_token: sessionCalls === 1 ? 'old-csrf-token' : 'new-csrf-token'
+                    })
+                });
+            }
+            if (url === '/api/local/restart') {
+                mutationCalls += 1;
+                sentTokens.push(options.headers['X-TunnelSats-CSRF-Token']);
+                if (mutationCalls === 1) {
+                    return Promise.resolve({
+                        ok: false,
+                        status: 403,
+                        headers: { get: (name) => name === 'X-TunnelSats-CSRF-Refresh' ? 'required' : null }
+                    });
+                }
+                return Promise.resolve({ ok: true, status: 200 });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+        evalScript();
+        global.fetch.mockClear();
+
+        const response = await window.managementFetch('/api/local/restart', { method: 'POST' });
+
+        expect(response.ok).toBe(true);
+        expect(sessionCalls).toBe(2);
+        expect(mutationCalls).toBe(2);
+        expect(sentTokens).toEqual(['old-csrf-token', 'new-csrf-token']);
+    });
+
     test('all unsafe management endpoints use the common request wrapper', () => {
         const requiredCalls = [
             "managementFetch('/api/subscription/claim'",
