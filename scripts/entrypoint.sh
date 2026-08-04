@@ -4263,7 +4263,7 @@ if ! ensure_reconcile_kill_switch; then
 fi
 
 echo "Starting Tunnelsats v3 (mode: $([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "umbrel"))..."
-log INFO "Starting internal dashboard server on port 9739"
+log INFO "Starting internal dashboard backend on ${DASHBOARD_BIND_HOST:-0.0.0.0}:${DASHBOARD_BIND_PORT:-9739}"
 python3 /app/server/app.py &
 API_PID=$!
 
@@ -4289,5 +4289,5 @@ ensure_reconcile_dirs
 
 reconcile_once "startup" || true
 
-echo "Tunnelsats container running. UI available on port 9739."
+echo "Tunnelsats container running. Umbrel UI is available through its configured app port."
 main_loop

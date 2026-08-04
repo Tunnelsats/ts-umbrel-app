@@ -1,0 +1,87 @@
+from pathlib import Path
+
+import yaml
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_PATH = REPO_ROOT / "tunnelsats" / "docker-compose.yml"
+MANIFEST_PATH = REPO_ROOT / "tunnelsats" / "umbrel-app.yml"
+APP_PATH = REPO_ROOT / "server" / "app.py"
+
+
+def load_yaml(path):
+    with path.open(encoding="utf-8") as source:
+        return yaml.safe_load(source)
+
+
+def environment_map(service):
+    environment = service.get("environment", {})
+    if isinstance(environment, dict):
+        return environment
+    result = {}
+    for entry in environment:
+        key, separator, value = entry.partition("=")
+        result[key] = value if separator else None
+    return result
+
+
+def test_umbrel_compose_uses_authenticated_host_network_app_proxy():
+    compose = load_yaml(COMPOSE_PATH)
+    proxy = compose["services"]["app_proxy"]
+    environment = environment_map(proxy)
+
+    assert proxy["network_mode"] == "host"
+    assert environment["APP_HOST"] == "127.0.0.1"
+    assert int(environment["APP_PORT"]) == 9740
+    assert str(environment.get("PROXY_AUTH_ADD", "true")).lower() != "false"
+    assert not environment.get("PROXY_AUTH_WHITELIST")
+
+
+def test_umbrel_backend_is_loopback_only_with_browser_security_enabled():
+    compose = load_yaml(COMPOSE_PATH)
+    service = compose["services"]["tunnelsats"]
+    environment = environment_map(service)
+
+    assert service["network_mode"] == "host"
+    assert environment["DASHBOARD_BIND_HOST"] == "127.0.0.1"
+    assert int(environment["DASHBOARD_BIND_PORT"]) == 9740
+    assert environment["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "true"
+
+
+def test_umbrel_http_security_path_is_independent_of_secure_mode():
+    compose = load_yaml(COMPOSE_PATH)
+    environment = environment_map(compose["services"]["tunnelsats"])
+
+    assert environment["SECURE_MODE"] == "${SECURE_MODE:-false}"
+    for name in (
+        "DASHBOARD_BIND_HOST",
+        "DASHBOARD_BIND_PORT",
+        "MANAGEMENT_BROWSER_SECURITY_ENABLED",
+    ):
+        assert "SECURE_MODE" not in str(environment[name])
+
+
+def test_umbrel_manifest_keeps_proxy_port_and_has_no_second_login():
+    manifest = load_yaml(MANIFEST_PATH)
+
+    assert manifest["port"] == 9739
+    assert manifest["defaultUsername"] == ""
+    assert manifest["defaultPassword"] == ""
+
+
+def test_umbrel_compose_does_not_pass_application_password_credentials():
+    compose = load_yaml(COMPOSE_PATH)
+    environment = environment_map(compose["services"]["tunnelsats"])
+
+    assert "APP_PASSWORD" not in environment
+    assert "MANAGEMENT_PASSWORD" not in environment
+    assert "MANAGEMENT_USERNAME" not in environment
+
+
+def test_server_does_not_reintroduce_basic_auth_or_password_file():
+    source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "WWW-Authenticate" not in source
+    assert "management-password" not in source
+    assert "MANAGEMENT_PASSWORD" not in source
+    assert "Basic realm=" not in source

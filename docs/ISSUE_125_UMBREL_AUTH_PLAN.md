@@ -5,9 +5,31 @@
 - Scope: umbrelOS deployments with both `SECURE_MODE=false` and
   `SECURE_MODE=true`
 - Related issue: <https://github.com/Tunnelsats/ts-umbrel-app/issues/125>
-- Implementation status: planned
+- Implementation status: implemented on `issue-125-umbrel-auth`; real-device
+  umbrelOS validation remains pending
 - Implementation method: test-driven development (red, green, refactor)
 - k3s: explicitly out of scope for this change
+
+## Implementation Record
+
+- Baseline before feature tests: `224` server tests and `59` frontend tests
+  passed.
+- Cycle A red: `7` listener-contract tests failed because configurable binding
+  did not exist; the focused listener suite then passed after implementation.
+- Cycle B red: `32` browser-security tests failed before the centralized Host,
+  Origin, CSRF, content-type, cache, and audit controls were added.
+- Cycle C red: `3` frontend contract tests failed before CSRF bootstrap and the
+  shared `managementFetch` wrapper were implemented.
+- Route-inventory follow-up red: `2` server tests and `1` frontend test exposed
+  the locally mutating subscription-status `GET`; it is now explicitly
+  CSRF-protected.
+- Cycle D red: `3` compose contract tests failed before the authenticated
+  `app_proxy` and loopback backend wiring were added.
+- Final local green gate: `279` server tests and `62` frontend tests pass. The
+  compose overlay also renders successfully when merged with Umbrel's upstream
+  `docker-compose.app_proxy.yml`.
+- The two-mode real-device umbrelOS end-to-end matrix remains required before
+  release, as described below.
 
 ## Objective
 
