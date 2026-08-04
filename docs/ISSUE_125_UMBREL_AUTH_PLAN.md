@@ -2,9 +2,11 @@
 
 ## Status
 
-- Scope: umbrelOS deployments only
+- Scope: umbrelOS deployments with both `SECURE_MODE=false` and
+  `SECURE_MODE=true`
 - Related issue: <https://github.com/Tunnelsats/ts-umbrel-app/issues/125>
 - Implementation status: planned
+- Implementation method: test-driven development (red, green, refactor)
 - k3s: explicitly out of scope for this change
 
 ## Objective
@@ -17,6 +19,12 @@ on `APP_PASSWORD`.
 The implementation must prevent LAN, Tailscale, and ordinary container callers
 from bypassing Umbrel authentication by connecting directly to the Flask
 listener. Browser-based state changes must also be protected against CSRF.
+
+The complete authentication boundary and browser protections must work
+identically when Secure Mode is disabled and enabled. Secure Mode may continue
+to alter which existing TunnelSats operations are available, but it must not
+alter whether the UI or management API is authenticated, how Flask is exposed,
+or whether CSRF and origin validation are enforced.
 
 ## Background
 
@@ -66,6 +74,26 @@ Authenticated browser
 Port `9739` remains the app's public Umbrel port. Port `9740` is an internal
 implementation detail and must never listen on a non-loopback address in an
 Umbrel deployment.
+
+## Secure Mode Compatibility
+
+This architecture applies unconditionally to both supported Umbrel runtime
+modes:
+
+| Concern | `SECURE_MODE=false` | `SECURE_MODE=true` |
+| --- | --- | --- |
+| External HTTP entry point | Authenticated `app_proxy` on `:9739` | Authenticated `app_proxy` on `:9739` |
+| Flask listener | `127.0.0.1:9740` | `127.0.0.1:9740` |
+| Umbrel session required | Yes | Yes |
+| CSRF and Origin checks on mutations | Yes | Yes |
+| Direct access to backend from LAN/Tailscale | Refused | Refused |
+| Existing mode-specific operational restrictions | Preserved | Preserved |
+
+The proxy and backend binding must not be conditional on `SECURE_MODE`. The
+existing `SECURE_MODE` value continues to govern dataplane and node-management
+behavior only. Authentication middleware must run before mode-specific route
+logic so a mode-specific error can never be used to infer state without first
+passing the Umbrel authentication boundary.
 
 ## Security Boundaries
 
@@ -123,6 +151,9 @@ Important requirements:
 - Keep `defaultUsername` and `defaultPassword` empty because TunnelSats no
   longer has a separate application login.
 - Do not pass `APP_PASSWORD` into the TunnelSats container.
+- Apply the proxy and loopback settings regardless of the value of
+  `SECURE_MODE`; there must not be a legacy direct-listener branch for either
+  mode.
 
 Umbrel injects the image, published proxy port, authentication secret, manifest
 mount, and other base configuration for the `app_proxy` service. The TunnelSats
@@ -151,6 +182,10 @@ address and port without logging credentials or tokens.
 Preserve the existing defaults for deployment types not changed by this work so
 that this Umbrel-only change does not silently alter k3s behavior. Do not edit
 the k3s manifests in this implementation.
+
+Parameterize binding tests for `SECURE_MODE=false` and `SECURE_MODE=true` to
+prove that both resolve to the same loopback address and internal port under
+the Umbrel compose configuration.
 
 Update entrypoint log messages so they distinguish the internal backend
 listener from the user-facing Umbrel URL.
@@ -209,6 +244,11 @@ At minimum, apply this protection to:
 
 Inventory every Flask route during implementation rather than relying only on
 the list above. New management mutations should be protected by default.
+Exercise every applicable mutation test in both Secure Mode states. Where
+Secure Mode intentionally rejects an operation, first assert that missing or
+invalid CSRF/origin inputs are rejected by the security layer, then assert the
+existing mode-specific response for an authenticated, valid same-origin
+request.
 
 ### 5. Validate forwarded host and proxy behavior
 
@@ -269,18 +309,101 @@ If programmatic management access is required later, design a separate,
 revocable API-token feature with narrowly scoped permissions. It is not part of
 this change and must not weaken the browser authentication path.
 
-## Delivery Order
+## Test-Driven Delivery Order
 
-The proxy and backend listener changes must be delivered atomically in one app
-release:
+Implement this work test-first using a red-green-refactor cycle. Do not write
+production code for a behavior until a focused test demonstrates that the
+current implementation does not satisfy it.
 
-1. Add configurable Flask binding and CSRF/origin middleware.
-2. Update the frontend to bootstrap and send CSRF tokens.
-3. Add the authenticated host-network `app_proxy` targeting loopback port 9740.
-4. Set the Umbrel backend bind address to `127.0.0.1:9740`.
-5. Update tests and documentation.
-6. Validate the rendered compose configuration and run the umbrelOS end-to-end
-   checks before publishing the image and manifest version together.
+### 1. Establish the baseline
+
+Run and record the existing server, frontend, compose/manifest, and version-sync
+test suites before adding new tests. Existing tests must be green. A pre-existing
+failure must be understood and separated from this change before proceeding.
+
+### 2. Add green characterization guardrails
+
+Before changing behavior, add or confirm tests for properties the reverted code
+already satisfies:
+
+- no HTTP Basic Authentication challenge;
+- no generated management-password file;
+- no `APP_PASSWORD` dependency or non-empty manifest login credentials; and
+- existing mode-specific behavior with `SECURE_MODE=false` and
+  `SECURE_MODE=true`.
+
+These are characterization tests, so they are expected to be green at the
+baseline. They prevent the old authentication design or unintended Secure Mode
+changes from returning. Do not misrepresent them as red tests.
+
+### 3. Run focused red-green cycles
+
+Implement one vertical contract at a time. For every cycle below:
+
+1. Write the focused test first.
+2. Run it and capture the expected failure. A test that passes immediately does
+   not prove the new behavior and must be reviewed for an incorrect assertion
+   or an already-satisfied contract.
+3. Commit or otherwise preserve review evidence of the red test before changing
+   production code.
+4. Add only enough production code to satisfy that contract.
+5. Run the focused test to green, followed by all affected existing tests.
+6. Parameterize the cycle over both Secure Mode states wherever runtime behavior
+   is involved.
+
+Use these cycles in dependency order:
+
+#### Cycle A: backend listener
+
+- Red: server tests require validated configurable bind settings and prove that
+  explicit `127.0.0.1:9740` settings are honored with Secure Mode disabled and
+  enabled.
+- Green: add the bind configuration and update the server/entrypoint startup
+  behavior without changing non-Umbrel deployment defaults.
+
+#### Cycle B: server-side browser security
+
+- Red: tests require CSRF, Origin, Host, cache-control, generic errors, and safe
+  audit logging for the management surface in both Secure Mode states.
+- Green: add centralized management-route classification, security middleware,
+  and the session/CSRF bootstrap endpoint.
+
+#### Cycle C: frontend management requests
+
+- Red: frontend tests require CSRF bootstrap and a common CSRF-aware management
+  request wrapper for every unsafe call.
+- Green: implement the wrapper and migrate the existing calls without changing
+  their mode-specific UI behavior.
+
+#### Cycle D: Umbrel proxy and exclusive network path
+
+- Red: compose and manifest tests require the authenticated host-network
+  `app_proxy`, the loopback target, empty app credentials, no authentication
+  whitelist, and identical proxy configuration for both Secure Mode values.
+- Green: add the proxy override and the explicit Umbrel backend bind settings.
+
+Do not weaken assertions merely to obtain a green result. A discovered design
+change should first be reflected in this plan and in a deliberately failing
+test.
+
+After Cycle D, add or run the integrated regression contract against the
+rendered Compose model. It should be green because the lower-level red-green
+cycles established the behavior. If it reveals a missing contract, preserve
+that failure and run an additional focused red-green cycle before continuing.
+
+### 4. Refactor while green
+
+Once the contract tests pass, remove duplication, centralize management-route
+classification and frontend request handling, and improve names or structure.
+Run the complete affected suite after every refactor. Security middleware must
+fail closed if configuration or token initialization fails.
+
+### 5. Validate the integrated Umbrel release
+
+Render and inspect the final Umbrel Compose model, then run the umbrelOS
+end-to-end matrix with Secure Mode disabled and enabled. Publish the proxy,
+backend listener, frontend, tests, image, and manifest version atomically in one
+app release.
 
 Do not publish an intermediate state. If Flask and the proxy both bind port
 9739, startup will fail. If Flask moves to 9740 before the proxy is present, the
@@ -290,6 +413,9 @@ UI will be unavailable.
 
 ### Unit and application tests
 
+- Parameterize security and bind tests over `SECURE_MODE=false` and
+  `SECURE_MODE=true` unless a test is specifically about mode-dependent
+  operational behavior.
 - Safe methods do not require a CSRF token.
 - Every management mutation rejects a missing token.
 - Every management mutation rejects an invalid token.
@@ -303,6 +429,8 @@ UI will be unavailable.
 - Audit logs contain reason codes but no secrets.
 - The CSRF bootstrap response is not cached.
 - Existing UI workflows use the common management fetch wrapper.
+- Authenticated requests continue to receive the pre-existing mode-appropriate
+  result after the shared security layer accepts them.
 
 ### Compose and manifest tests
 
@@ -314,11 +442,14 @@ UI will be unavailable.
 - The manifest still exposes port `9739`.
 - Manifest default username and password remain empty.
 - No password environment variable is passed to TunnelSats.
+- Proxy and loopback configuration do not vary with `SECURE_MODE`.
 - Version-sync and promotion tests include the updated compose structure.
 
 ### umbrelOS end-to-end tests
 
-Run these checks on a supported umbrelOS 1.x installation:
+Run the complete set of checks below twice on a supported umbrelOS 1.x
+installation: once with `SECURE_MODE=false` and once with `SECURE_MODE=true`.
+Do not treat success in one mode as evidence for the other.
 
 1. Opening TunnelSats from an authenticated Umbrel dashboard loads without a
    second login prompt.
@@ -338,6 +469,10 @@ Run these checks on a supported umbrelOS 1.x installation:
 11. Access through supported `.local`, IP-literal, Tailscale, and Tor entry
     points is either functional after Umbrel login or fails closed with a clear,
     documented configuration path.
+12. Switching between Secure Mode states and restarting the app preserves the
+    authenticated proxy path and never exposes the backend listener.
+13. Existing mode-specific UI controls and permitted/forbidden operations retain
+    their prior semantics after valid authentication and CSRF validation.
 
 ## Acceptance Criteria
 
@@ -349,10 +484,16 @@ Run these checks on a supported umbrelOS 1.x installation:
   Umbrel authentication.
 - All management mutations require a valid same-origin request and CSRF token.
 - The complete dashboard remains functional after a normal Umbrel login.
+- Every authentication, direct-port isolation, CSRF, and origin requirement
+  passes with both `SECURE_MODE=false` and `SECURE_MODE=true`.
+- Existing mode-specific application behavior remains unchanged after a request
+  passes the shared security layer.
 - No generated management credential or Basic Authentication code remains.
 - Tests cover authentication routing, direct-port isolation, CSRF, Origin, Host,
   proxy forwarding, and existing UI workflows.
 - No k3s manifest or behavior is intentionally changed by this work.
+- The implementation history or review evidence demonstrates the expected red
+  failures before the corresponding production changes turn them green.
 
 ## Out of Scope
 
