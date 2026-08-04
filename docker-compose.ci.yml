@@ -1,0 +1,8 @@
+services:
+  app_proxy:
+    # umbrelOS injects the real image and base configuration for this service.
+    # The repository smoke test only starts `tunnelsats`, but Compose still
+    # validates every service, so provide a dormant CI-only image definition.
+    image: alpine:3.21
+    profiles:
+      - umbrel-injected-app-proxy

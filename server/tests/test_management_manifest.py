@@ -5,8 +5,10 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "tunnelsats" / "docker-compose.yml"
+CI_COMPOSE_PATH = REPO_ROOT / "docker-compose.ci.yml"
 MANIFEST_PATH = REPO_ROOT / "tunnelsats" / "umbrel-app.yml"
 APP_PATH = REPO_ROOT / "server" / "app.py"
+TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "test.yml"
 
 
 def load_yaml(path):
@@ -85,3 +87,14 @@ def test_server_does_not_reintroduce_basic_auth_or_password_file():
     assert "management-password" not in source
     assert "MANAGEMENT_PASSWORD" not in source
     assert "Basic realm=" not in source
+
+
+def test_ci_compose_supplies_only_a_dormant_injected_proxy_stub():
+    ci_compose = load_yaml(CI_COMPOSE_PATH)
+    proxy = ci_compose["services"]["app_proxy"]
+    workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert proxy["image"]
+    assert proxy["profiles"] == ["umbrel-injected-app-proxy"]
+    assert "COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml" in workflow
+    assert "COMPOSE_PROFILES" not in workflow
