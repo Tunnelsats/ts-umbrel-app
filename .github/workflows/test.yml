@@ -13,6 +13,8 @@ on:
 jobs:
   test-compose:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     steps:
       - uses: actions/checkout@v7.0.1
 

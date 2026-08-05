@@ -17,13 +17,19 @@ Yes. The TunnelSats daemon handles dynamic reloading:
 > Note that applying a new configuration via the **Install** tab or using the **Restore Node Networking** function will force a restart of your Lightning node container. This is required to ensure your node's networking information is correctly broadcast to the Lightning Network.
 
 ### 3. How can I verify my connection from the command line?
-The dashboard uses our internal **Dataplane API**. You can query this directly via SSH to debug your network state:
+The dashboard uses an Umbrel-authenticated **Dataplane API**. From an SSH
+session on the Umbrel host, you can query its loopback-only backend to debug
+your network state:
 
 ```bash
-curl -s http://umbrel.lan:9739/api/local/status | jq
+curl -s http://127.0.0.1:9740/api/local/status | jq
 ```
 
-This returns a JSON payload containing the active WireGuard endpoint, internal routing metrics, and any failure logs (`last_error`). To check the live WireGuard handshake:
+Port `9739` is the user-facing authenticated Umbrel proxy and is not a public
+LAN API. State-changing operations must be performed through the authenticated
+dashboard. The loopback status request returns a JSON payload containing the
+active WireGuard endpoint, internal routing metrics, and any failure logs
+(`last_error`). To check the live WireGuard handshake:
 
 ```bash
 docker exec tunnelsats wg show

@@ -19,6 +19,8 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
+from security import ManagementSecurity
+
 # Ensure verbose logging for container restarts is visible and unbuffered
 import logging
 import sys
@@ -119,6 +121,32 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
 SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
+MANAGEMENT_SECURITY = ManagementSecurity()
+MANAGEMENT_CSRF_HEADER = MANAGEMENT_SECURITY.csrf_header
+MANAGEMENT_CSRF_REFRESH_HEADER = MANAGEMENT_SECURITY.csrf_refresh_header
+MANAGEMENT_CSRF_TOKEN = MANAGEMENT_SECURITY.csrf_token
+MANAGEMENT_JSON_PATHS = frozenset(
+    {
+        "/api/local/upload-config",
+        "/api/local/configure-node",
+        "/api/subscription/renew",
+        "/api/subscription/claim",
+    }
+)
+def dashboard_bind_config():
+    default_host = "0.0.0.0" if K3S_MODE else "127.0.0.1"
+    default_port = "9739" if K3S_MODE else "9740"
+    host = os.environ.get("DASHBOARD_BIND_HOST", default_host).strip()
+    raw_port = os.environ.get("DASHBOARD_BIND_PORT", default_port).strip()
+    if not host:
+        raise ValueError("DASHBOARD_BIND_HOST must not be empty")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError("DASHBOARD_BIND_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("DASHBOARD_BIND_PORT must be between 1 and 65535")
+    return host, port
 
 def check_tcp_port(ip, port):
     try:
@@ -334,12 +362,63 @@ def client_is_allowed(remote_addr):
 
 
 def is_loopback_ip(remote_addr):
-    if not remote_addr:
-        return False
-    try:
-        return ip_address(remote_addr).is_loopback
-    except ValueError:
-        return False
+    return ManagementSecurity.is_loopback_ip(remote_addr)
+
+
+def _get_direct_remote_addr():
+    return MANAGEMENT_SECURITY.direct_remote_addr(request.environ)
+
+
+def _management_host_is_allowed(raw_host, direct_remote_addr=None):
+    direct_remote_addr = direct_remote_addr or _get_direct_remote_addr()
+    return MANAGEMENT_SECURITY.host_is_allowed(raw_host, direct_remote_addr)
+
+
+def _origin_matches_request(raw_origin):
+    return MANAGEMENT_SECURITY.origin_matches(raw_origin, request.scheme, request.host)
+
+
+def _management_browser_security_enabled():
+    configured = app.config.get("MANAGEMENT_BROWSER_SECURITY_ENABLED")
+    if configured is not None:
+        if isinstance(configured, str):
+            return configured.strip().lower() in ("true", "1", "yes", "on")
+        return bool(configured)
+    return os.environ.get("MANAGEMENT_BROWSER_SECURITY_ENABLED", "false").lower() == "true"
+
+
+def _management_request_is_sensitive():
+    return (
+        request.path.startswith("/api/local")
+        or request.path in ("/api/subscription/renew", "/api/subscription/claim")
+        or request.endpoint == "check_subscription"
+    )
+
+
+def _management_request_changes_state():
+    return request.method not in ("GET", "HEAD", "OPTIONS")
+
+
+def _management_request_requires_csrf():
+    # The subscription status route is a legacy GET that synchronizes paid
+    # subscription data into local metadata. Treat it as a mutation without
+    # changing its public method in this Umbrel-only security change.
+    return _management_request_changes_state() or request.endpoint == "check_subscription"
+
+
+def _management_security_error(reason):
+    app.logger.warning(
+        "Management request rejected: method=%s endpoint=%s remote=%s reason=%s",
+        request.method,
+        request.endpoint or "unknown",
+        request.remote_addr or "unknown",
+        reason,
+    )
+    response = jsonify({"success": False, "error": "Forbidden"})
+    response.status_code = 403
+    if reason == "csrf":
+        response.headers[MANAGEMENT_CSRF_REFRESH_HEADER] = "required"
+    return response
 
 
 def normalize_version(raw_version):
@@ -2030,9 +2109,35 @@ def reconcile_result_success(result):
 
 @app.before_request
 def restrict_local_api():
+    if _management_browser_security_enabled() and _management_request_is_sensitive():
+        direct_remote_addr = _get_direct_remote_addr()
+        if not is_loopback_ip(direct_remote_addr):
+            return _management_security_error("direct-peer")
+        if not _management_host_is_allowed(request.host, direct_remote_addr):
+            return _management_security_error("host")
+        changes_state = _management_request_changes_state()
+        requires_csrf = _management_request_requires_csrf()
+        if changes_state:
+            if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+                return _management_security_error("fetch-site")
+            if not _origin_matches_request(request.headers.get("Origin")):
+                return _management_security_error("origin")
+        if requires_csrf:
+            supplied_token = request.headers.get(MANAGEMENT_CSRF_HEADER, "")
+            if not MANAGEMENT_SECURITY.csrf_matches(supplied_token):
+                return _management_security_error("csrf")
+            if changes_state and request.path in MANAGEMENT_JSON_PATHS and not request.is_json:
+                return _management_security_error("content-type")
+            app.logger.info(
+                "Management mutation accepted: method=%s endpoint=%s remote=%s reason=authorized",
+                request.method,
+                request.endpoint or "unknown",
+                request.remote_addr or "unknown",
+            )
+        return None
+
     if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
-        proxyfix_orig = request.environ.get("werkzeug.proxy_fix.orig", {}) or {}
-        direct_remote_addr = proxyfix_orig.get("REMOTE_ADDR") or request.remote_addr
+        direct_remote_addr = _get_direct_remote_addr()
 
         # Trust X-Forwarded-For only when the immediate peer is loopback (local reverse proxy).
         # Direct clients can otherwise spoof forwarded headers to bypass local-network checks.
@@ -2043,6 +2148,14 @@ def restrict_local_api():
 
         if not client_is_allowed(effective_remote_addr):
             abort(403)
+
+
+@app.after_request
+def protect_management_response(response):
+    if _management_browser_security_enabled() and _management_request_is_sensitive():
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 # Proxy function to forward requests to the core Tunnelsats API
@@ -2387,11 +2500,7 @@ def claim_subscription():
         payload = {}
     
     # Hide sensitive logs
-    safe_payload = dict(payload)
-    if "wgPresharedKey" in safe_payload:
-        safe_payload["wgPresharedKey"] = "***"
-    
-    app.logger.info(f"Initiating claim upstream with payload: {safe_payload}")
+    app.logger.info("Initiating subscription claim upstream")
     
     try:
         resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
@@ -2401,7 +2510,7 @@ def claim_subscription():
             try:
                 data = resp.json()
             except ValueError as exc:
-                app.logger.error(f"Upstream claim failed JSON decode: {exc}, raw content: {resp.content[:100]}")
+                app.logger.error("Upstream claim returned invalid JSON")
                 return jsonify({"success": False, "error": "Invalid upstream payload (not JSON)"}), 400
 
             if not isinstance(data, dict):
@@ -2495,6 +2604,16 @@ def renew_subscription():
 
 
 # --- LOCAL APP ROUTES ---
+
+@app.route("/api/local/session", methods=["GET"])
+def local_session():
+    return jsonify(
+        {
+            "authenticated": True,
+            "csrf_token": MANAGEMENT_CSRF_TOKEN,
+        }
+    )
+
 
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
@@ -3272,4 +3391,10 @@ def restore_node():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9739)
+    dashboard_host, dashboard_port = dashboard_bind_config()
+    app.logger.info(
+        "Starting internal dashboard backend on %s:%d",
+        dashboard_host,
+        dashboard_port,
+    )
+    app.run(host=dashboard_host, port=dashboard_port)

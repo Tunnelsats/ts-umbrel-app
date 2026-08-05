@@ -33,6 +33,16 @@ WG_HANDSHAKE_MAX_AGE=180
 # always sees them, even if a future caller passes them as plain shell vars instead of env.
 export K3S_MODE="${K3S_MODE:-false}"
 export SECURE_MODE="${SECURE_MODE:-false}"
+if [[ "${K3S_MODE}" == "true" ]]; then
+    export DASHBOARD_BIND_HOST="${DASHBOARD_BIND_HOST:-0.0.0.0}"
+    export DASHBOARD_BIND_PORT="${DASHBOARD_BIND_PORT:-9739}"
+else
+    # Umbrel app_proxy owns the public port. Keep the privileged backend on
+    # loopback even when a hot-patch or manual container start omits Compose
+    # environment values.
+    export DASHBOARD_BIND_HOST="${DASHBOARD_BIND_HOST:-127.0.0.1}"
+    export DASHBOARD_BIND_PORT="${DASHBOARD_BIND_PORT:-9740}"
+fi
 export LND_K8S_SERVICE="${LND_K8S_SERVICE:-}"
 export CLN_K8S_SERVICE="${CLN_K8S_SERVICE:-}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
@@ -4263,7 +4273,7 @@ if ! ensure_reconcile_kill_switch; then
 fi
 
 echo "Starting Tunnelsats v3 (mode: $([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "umbrel"))..."
-log INFO "Starting internal dashboard server on port 9739"
+log INFO "Starting internal dashboard backend on ${DASHBOARD_BIND_HOST}:${DASHBOARD_BIND_PORT}"
 python3 /app/server/app.py &
 API_PID=$!
 
@@ -4289,5 +4299,5 @@ ensure_reconcile_dirs
 
 reconcile_once "startup" || true
 
-echo "Tunnelsats container running. UI available on port 9739."
+echo "Tunnelsats container running. Umbrel UI is available through its configured app port."
 main_loop

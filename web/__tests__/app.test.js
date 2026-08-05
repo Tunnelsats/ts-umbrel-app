@@ -40,6 +40,24 @@ function setupDOM() {
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
 }
 
+function csrfFetchMock(implementation = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({})
+})) {
+    return jest.fn((url, ...args) => {
+        if (url === '/api/local/session') {
+            return Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    authenticated: true,
+                    csrf_token: 'test-csrf-token'
+                })
+            });
+        }
+        return implementation(url, ...args);
+    });
+}
+
 function evalScript() {
     // In jsdom, document.readyState is already "complete", so app.js eagerly runs initApp().
     window.eval(script);
@@ -55,7 +73,7 @@ describe('Globe initialization resilience', () => {
         jest.useFakeTimers();
         setupDOM();
 
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({ servers: [], wg_status: 'Disconnected' }),
                 ok: true
@@ -79,12 +97,133 @@ describe('Globe initialization resilience', () => {
     });
 });
 
+describe('Management request browser security', () => {
+    beforeEach(() => {
+        setupDOM();
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    test('unsafe management requests bootstrap and send a CSRF token', async () => {
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/session') {
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({ csrf_token: 'test-csrf-token' })
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true }) });
+        });
+        evalScript();
+        global.fetch.mockClear();
+
+        await window.managementFetch('/api/local/restart', { method: 'POST' });
+
+        expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/local/session', {
+            credentials: 'same-origin'
+        });
+        expect(global.fetch).toHaveBeenNthCalledWith(
+            2,
+            '/api/local/restart',
+            expect.objectContaining({
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: expect.objectContaining({
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                })
+            })
+        );
+    });
+
+    test('management session state is encapsulated behind a session manager', () => {
+        expect(script).toContain('class ManagementSession');
+        expect(script).toContain('const managementSession = new ManagementSession()');
+        expect(script).not.toContain('let managementCsrfToken');
+        expect(script).not.toContain('let managementCsrfPromise');
+    });
+
+    test('safe management requests do not bootstrap a CSRF token', async () => {
+        global.fetch = csrfFetchMock(() => Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ success: true })
+        }));
+        evalScript();
+        global.fetch.mockClear();
+
+        await window.managementFetch('/api/local/status');
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch).toHaveBeenCalledWith('/api/local/status', {
+            credentials: 'same-origin'
+        });
+    });
+
+    test('stale CSRF rejection refreshes the token and retries once', async () => {
+        let sessionCalls = 0;
+        let mutationCalls = 0;
+        const sentTokens = [];
+        global.fetch = jest.fn((url, options) => {
+            if (url === '/api/local/session') {
+                sessionCalls += 1;
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        authenticated: true,
+                        csrf_token: sessionCalls === 1 ? 'old-csrf-token' : 'new-csrf-token'
+                    })
+                });
+            }
+            if (url === '/api/local/restart') {
+                mutationCalls += 1;
+                sentTokens.push(options.headers['X-TunnelSats-CSRF-Token']);
+                if (mutationCalls === 1) {
+                    return Promise.resolve({
+                        ok: false,
+                        status: 403,
+                        headers: { get: (name) => name === 'X-TunnelSats-CSRF-Refresh' ? 'required' : null }
+                    });
+                }
+                return Promise.resolve({ ok: true, status: 200 });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+        evalScript();
+        global.fetch.mockClear();
+
+        const response = await window.managementFetch('/api/local/restart', { method: 'POST' });
+
+        expect(response.ok).toBe(true);
+        expect(sessionCalls).toBe(2);
+        expect(mutationCalls).toBe(2);
+        expect(sentTokens).toEqual(['old-csrf-token', 'new-csrf-token']);
+    });
+
+    test('all unsafe management endpoints use the common request wrapper', () => {
+        const requiredCalls = [
+            "managementFetch('/api/subscription/claim'",
+            "managementFetch('/api/local/configure-node'",
+            "managementFetch('/api/local/restore-node'",
+            "managementFetch('/api/local/upload-config'",
+            "managementFetch('/api/local/restart'"
+        ];
+
+        requiredCalls.forEach((call) => expect(script).toContain(call));
+        expect(script).toContain("endpoint === '/api/subscription/renew'");
+        expect(script).toContain("managementFetch(`/api/subscription/${activePaymentHash}`");
+        expect(script).not.toMatch(/fetch\(['"]\/api\/local\/(?:configure-node|restore-node|upload-config|restart)['"]/);
+        expect(script).not.toMatch(/fetch\(['"]\/api\/subscription\/claim['"]/);
+        expect(script).not.toContain("fetch(`/api/subscription/${activePaymentHash}`");
+    });
+});
+
 // --- Test Suites ---
 
 describe('UI Routing and Initialization', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -244,7 +383,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('fetchStatus does not show Protected when no node is detected', async () => {
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -273,7 +412,7 @@ describe('UI Routing and Initialization', () => {
 
     test('fetchStatus reports a fail-closed dataplane error instead of Protected', async () => {
         const error = 'k3s: Pod co-location required; TunnelSats node=worker-a, LND pod=lightning/lnd-0 node=worker-b';
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -302,7 +441,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('fetchStatus never reports Protected when rules are unsynced without a detailed error', async () => {
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -327,7 +466,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('fetchStatus adjusts UI for secure_mode: true', async () => {
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -370,7 +509,7 @@ describe('UI Routing and Initialization', () => {
     });
 
     test('fetchStatus adjusts UI for secure_mode: false', async () => {
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     vpn_active: true,
@@ -407,7 +546,7 @@ describe('UI Routing and Initialization', () => {
     test('configureNode bypasses confirmRestartModal in secure mode', async () => {
         window.secureModeActive = true;
         window.confirmRestartModal = jest.fn().mockResolvedValue(true);
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     success: true,
@@ -431,7 +570,7 @@ describe('UI Routing and Initialization', () => {
     test('restoreNode bypasses confirmRestartModal in secure mode', async () => {
         window.secureModeActive = true;
         window.confirmRestartModal = jest.fn().mockResolvedValue(true);
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     success: true,
@@ -535,7 +674,7 @@ describe('UI Routing and Initialization', () => {
 
     test('manual configuration modal closes on clicking the overlay outside the panel but not inside', async () => {
         window.secureModeActive = true;
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     success: true,
@@ -567,7 +706,7 @@ describe('UI Routing and Initialization', () => {
 
     test('manual restore modal closes on clicking the overlay outside the panel but not inside', async () => {
         window.secureModeActive = true;
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     success: true,
@@ -628,7 +767,7 @@ describe('Phase 1: fetchServers', () => {
     beforeEach(() => {
         setupDOM();
         // Default fetch mock: status endpoint returns disconnected
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/status') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -684,7 +823,7 @@ describe('Phase 1: fetchServers', () => {
 describe('Phase 1: pollPayment detects lowercase paid', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/status') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -722,7 +861,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
         invoiceBox.innerHTML = '<p>Waiting...</p>';
 
         // Mock the status check to return paid (lowercase)
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({ status: 'paid' }),
                 ok: true
@@ -747,7 +886,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
         invoiceBox.classList.remove('hidden');
         invoiceBox.innerHTML = '<p>Waiting...</p>';
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/subscription/buy-hash-123') {
                 return Promise.resolve({
                     json: () => Promise.resolve({ status: 'paid' }),
@@ -780,7 +919,10 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
             '/api/subscription/claim',
             expect.objectContaining({
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
                 body: JSON.stringify({ paymentHash: 'buy-hash-123', wgPublicKey: '', wgPresharedKey: '', referralCode: null })
             })
         );
@@ -789,7 +931,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
     test('claimSubscription treats success payload with informational error field as success', async () => {
         window.activePaymentHash = 'buy-hash-123';
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/subscription/claim') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -813,7 +955,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
         window.activePaymentHash = 'buy-hash-123';
         document.getElementById('pending-install-section').classList.remove('hidden');
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/subscription/claim') {
                 return Promise.resolve({
                     json: () => Promise.resolve({ success: true }),
@@ -848,7 +990,7 @@ describe('Phase 1: pollPayment detects lowercase paid', () => {
 describe('Phase 1: createSub generates invoice', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn((url, opts) => {
+        global.fetch = csrfFetchMock((url, opts) => {
             if (url === '/api/local/status') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -915,7 +1057,7 @@ describe('Phase 1: createSub generates invoice', () => {
     });
 
     test('surfaces backend errors for createSub', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/status') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1025,7 +1167,7 @@ describe('Phase 1: createSub generates invoice', () => {
 describe('Phase 2: Renew Flow', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn((url, options) => {
+        global.fetch = csrfFetchMock((url, options) => {
             if (url === '/api/local/meta') {
                 return Promise.resolve({
                     json: () => Promise.resolve({ serverId: 'ch-zrh', wgPublicKey: 'pubkey789' }),
@@ -1087,7 +1229,7 @@ describe('Phase 2: Renew Flow', () => {
         await new Promise(process.nextTick);
 
         // Force renew API failure response.
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/meta') {
                 return Promise.resolve({
                     json: () => Promise.resolve({ serverId: 'ch-zrh', wgPublicKey: 'pubkey789' }),
@@ -1123,7 +1265,7 @@ describe('Phase 2: Renew Flow', () => {
 describe('Phase 3a: Import Config', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/status') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1192,7 +1334,10 @@ describe('Phase 3a: Import Config', () => {
             '/api/local/upload-config',
             expect.objectContaining({
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
                 body: JSON.stringify({ config: expectedConfig })
             })
         );
@@ -1239,14 +1384,17 @@ describe('Phase 3a: Import Config', () => {
             '/api/local/upload-config',
             expect.objectContaining({
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
                 body: JSON.stringify({ config: expectedConfig })
             })
         );
     });
 
     test('import renders backend error message', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/upload-config') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1278,7 +1426,7 @@ describe('Phase 3a: Import Config', () => {
 describe('Phase 3b: Install Config', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn((url, opts) => {
+        global.fetch = csrfFetchMock((url, opts) => {
             if (url === '/api/local/configure-node') {
                 const payload = opts && opts.body ? JSON.parse(opts.body) : {};
                 if (payload.nodeType === 'cln') {
@@ -1350,7 +1498,10 @@ describe('Phase 3b: Install Config', () => {
             '/api/local/configure-node',
             expect.objectContaining({
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
                 body: JSON.stringify({ nodeType: 'lnd' })
             })
         );
@@ -1366,14 +1517,17 @@ describe('Phase 3b: Install Config', () => {
             '/api/local/configure-node',
             expect.objectContaining({
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
                 body: JSON.stringify({ nodeType: 'cln' })
             })
         );
     });
 
     test('configureNode requires explicit confirmation before disabling conflicting announcements', async () => {
-        global.fetch = jest.fn()
+        const endpointFetch = jest.fn()
             .mockResolvedValueOnce({
                 status: 409,
                 ok: false,
@@ -1394,6 +1548,7 @@ describe('Phase 3b: Install Config', () => {
                 })
             })
             .mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+        global.fetch = csrfFetchMock((...args) => endpointFetch(...args));
         window.confirmAnnouncementChanges = jest.fn().mockResolvedValue({
             confirmed: true,
             retainTorAnnouncements: true
@@ -1405,8 +1560,8 @@ describe('Phase 3b: Install Config', () => {
             'externalip=198.51.100.10:9735',
             'nat=true'
         ]);
-        expect(global.fetch.mock.calls[1][0]).toBe('/api/local/configure-node');
-        expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toEqual({
+        expect(endpointFetch.mock.calls[1][0]).toBe('/api/local/configure-node');
+        expect(JSON.parse(endpointFetch.mock.calls[1][1].body)).toEqual({
             nodeType: 'lnd',
             confirmAddressChanges: true,
             retainTorAnnouncements: true
@@ -1414,7 +1569,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('configureNode handles HTML error pages gracefully without throwing syntax error', async () => {
-        global.fetch.mockImplementationOnce((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/configure-node') {
                 return Promise.resolve({
                     ok: false,
@@ -1448,7 +1603,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('restoreNode rejects an HTML response even when its HTTP status is 200', async () => {
-        global.fetch.mockImplementationOnce((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/restore-node') {
                 return Promise.resolve({
                     ok: true,
@@ -1468,7 +1623,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('restoreNode reports missing configs clearly', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/restore-node') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1501,7 +1656,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('configureNode handles manual_mode and renders instructions modal', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/configure-node') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1539,7 +1694,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('restoreNode handles manual_mode and renders manual restore modal', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/restore-node') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1576,7 +1731,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('restoreNode handles manual_mode with empty targets gracefully', async () => {
-        global.fetch = jest.fn((url) => {
+        global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/restore-node') {
                 return Promise.resolve({
                     json: () => Promise.resolve({
@@ -1618,7 +1773,7 @@ describe('NWC Auto-Renew Features', () => {
     afterEach(() => { jest.restoreAllMocks(); });
 
     test('fetchStatus updates NWC IP suffix element', async () => {
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
                     wg_status: 'Connected',
@@ -1658,7 +1813,7 @@ describe('NWC Auto-Renew Features', () => {
 describe('Subscription Renewal Fixes', () => {
     beforeEach(() => {
         setupDOM();
-        global.fetch = jest.fn(() =>
+        global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({ 
                     status: 'paid', 

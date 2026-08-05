@@ -45,6 +45,19 @@ def data_dir(tmp_path):
     with patch('app.DATA_DIR', str(tmp_path)):
         yield tmp_path
 
+
+@pytest.fixture
+def management_browser_security():
+    previous = app.config.get("MANAGEMENT_BROWSER_SECURITY_ENABLED")
+    app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = True
+    try:
+        yield
+    finally:
+        if previous is None:
+            app.config.pop("MANAGEMENT_BROWSER_SECURITY_ENABLED", None)
+        else:
+            app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = previous
+
 # --- Existing Tests ---
 
 def test_status_endpoint(client):
@@ -52,6 +65,374 @@ def test_status_endpoint(client):
     assert res.status_code == 200
     data = json.loads(res.data)
     assert 'wg_status' in data
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+def test_dashboard_bind_config_honors_explicit_loopback_in_both_modes(secure_mode):
+    with patch.dict(
+        os.environ,
+        {
+            "DASHBOARD_BIND_HOST": "127.0.0.1",
+            "DASHBOARD_BIND_PORT": "9740",
+        },
+        clear=False,
+    ), patch.object(app_module, "SECURE_MODE", secure_mode):
+        assert app_module.dashboard_bind_config() == ("127.0.0.1", 9740)
+
+
+@pytest.mark.parametrize(
+    ("k3s_mode", "expected"),
+    [
+        (False, ("127.0.0.1", 9740)),
+        (True, ("0.0.0.0", 9739)),
+    ],
+)
+def test_dashboard_bind_config_defaults_fail_closed_without_changing_k3s(
+    k3s_mode, expected
+):
+    with patch.dict(os.environ, {}, clear=True), patch.object(
+        app_module, "K3S_MODE", k3s_mode
+    ):
+        assert app_module.dashboard_bind_config() == expected
+
+
+@pytest.mark.parametrize("invalid_port", ["", "not-a-port", "0", "65536"])
+def test_dashboard_bind_config_rejects_invalid_ports(invalid_port):
+    with patch.dict(
+        os.environ,
+        {
+            "DASHBOARD_BIND_HOST": "127.0.0.1",
+            "DASHBOARD_BIND_PORT": invalid_port,
+        },
+        clear=False,
+    ):
+        with pytest.raises(ValueError, match="DASHBOARD_BIND_PORT"):
+            app_module.dashboard_bind_config()
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+def test_management_session_bootstraps_uncached_csrf_in_both_modes(
+    client, management_browser_security, secure_mode
+):
+    with patch.object(app_module, "SECURE_MODE", secure_mode):
+        response = client.get("/api/local/session")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["authenticated"] is True
+    assert isinstance(payload["csrf_token"], str)
+    assert len(payload["csrf_token"]) >= 32
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    assert "WWW-Authenticate" not in response.headers
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+@pytest.mark.parametrize(
+    ("path", "request_kwargs"),
+    [
+        ("/api/local/upload-config", {"json": {"config": "test"}}),
+        ("/api/local/restart", {}),
+        ("/api/local/reconcile", {}),
+        ("/api/local/configure-node", {"json": {"nodeType": "lnd"}}),
+        ("/api/local/restore-node", {}),
+        ("/api/subscription/renew", {"json": {"duration": 1}}),
+        ("/api/subscription/claim", {"json": {"paymentHash": "hash"}}),
+    ],
+)
+def test_management_mutations_require_browser_security_in_both_modes(
+    client,
+    management_browser_security,
+    secure_mode,
+    path,
+    request_kwargs,
+):
+    with patch.object(app_module, "SECURE_MODE", secure_mode):
+        response = client.post(path, **request_kwargs)
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+    assert "WWW-Authenticate" not in response.headers
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+@pytest.mark.parametrize(
+    "origin",
+    [None, "null", "not-an-origin", "https://evil.example"],
+)
+def test_management_mutations_reject_invalid_origins_in_both_modes(
+    client, management_browser_security, secure_mode, origin
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    headers = {"X-TunnelSats-CSRF-Token": csrf_token}
+    if origin is not None:
+        headers["Origin"] = origin
+
+    with patch.object(app_module, "SECURE_MODE", secure_mode):
+        response = client.post("/api/local/restart", headers=headers)
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+def test_management_mutation_accepts_valid_same_origin_csrf_in_both_modes(
+    client, management_browser_security, secure_mode
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    headers = {
+        "Origin": "http://localhost",
+        "X-TunnelSats-CSRF-Token": csrf_token,
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    with patch.object(app_module, "SECURE_MODE", secure_mode), patch(
+        "builtins.open", MagicMock()
+    ):
+        response = client.post("/api/local/restart", headers=headers)
+
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_management_security_rejects_non_loopback_direct_peer(
+    client, management_browser_security
+):
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "192.168.1.20"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+
+
+@pytest.mark.parametrize(
+    ("proxyfix_orig", "expected"),
+    [
+        ({"REMOTE_ADDR": "127.0.0.2"}, "127.0.0.2"),
+        (("127.0.0.3", "http", "umbrel.local", "9739"), "127.0.0.3"),
+        (None, "127.0.0.4"),
+    ],
+)
+def test_direct_peer_extraction_supports_proxyfix_versions(proxyfix_orig, expected):
+    with app.test_request_context(environ_base={"REMOTE_ADDR": "127.0.0.4"}):
+        if proxyfix_orig is not None:
+            app_module.request.environ["werkzeug.proxy_fix.orig"] = proxyfix_orig
+
+        assert app_module._get_direct_remote_addr() == expected
+
+
+@pytest.mark.parametrize(
+    "forwarded_host",
+    [
+        "umbrel.local:9739",
+        "examplehiddenservice.onion:9739",
+        "tunnelsats.example:9739",
+    ],
+)
+def test_management_security_accepts_known_forwarded_umbrel_hosts(
+    client, management_browser_security, forwarded_host
+):
+    response = client.get(
+        "/api/local/session",
+        headers={
+            "X-Forwarded-For": "192.168.1.20",
+            "X-Forwarded-Host": forwarded_host,
+            "X-Forwarded-Proto": "http",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "forwarded_host",
+    ["umbrel.lan:9739", "node.tailnet.ts.net:9739", "custom.home:9739"],
+)
+def test_management_security_accepts_any_valid_host_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
+):
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-Host": forwarded_host},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("forwarded_host", ["bad host", "bad.example/path", "[broken"])
+def test_management_security_rejects_malformed_host_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
+):
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-Host": forwarded_host},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+
+
+@pytest.mark.parametrize(
+    "forwarded_host",
+    [
+        "192.168.1.10:9739",
+        "100.100.10.20:9739",
+        "[fd00::10]:9739",
+    ],
+)
+def test_management_security_accepts_ip_hosts_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
+):
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-Host": forwarded_host},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_management_security_accepts_exact_forwarded_origin(
+    client, management_browser_security
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    with patch.dict(
+        os.environ, {"DEVICE_DOMAIN_NAME": "umbrel.local"}, clear=False
+    ), patch("builtins.open", MagicMock()):
+        response = client.post(
+            "/api/local/restart",
+            headers={
+                "Origin": "https://umbrel.local:9739",
+                "X-Forwarded-Host": "umbrel.local:9739",
+                "X-Forwarded-Proto": "https",
+                "X-TunnelSats-CSRF-Token": csrf_token,
+            },
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 200
+
+
+def test_json_management_route_rejects_form_compatible_body(
+    client, management_browser_security
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    response = client.post(
+        "/api/local/upload-config",
+        data={"config_text": "test"},
+        headers={
+            "Origin": "http://localhost",
+            "X-TunnelSats-CSRF-Token": csrf_token,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+
+
+def test_management_audit_log_does_not_record_supplied_token(
+    client, management_browser_security, caplog
+):
+    supplied_secret = "secret-token-must-not-be-logged"
+    response = client.post(
+        "/api/local/restart",
+        headers={
+            "Origin": "http://localhost",
+            "X-TunnelSats-CSRF-Token": supplied_secret,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.headers["X-TunnelSats-CSRF-Refresh"] == "required"
+    assert "reason=csrf" in caplog.text
+    assert supplied_secret not in caplog.text
+
+
+def test_authenticated_claim_logs_do_not_record_subscription_secrets(
+    client, management_browser_security, caplog
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    payment_secret = "payment-hash-must-not-be-logged"
+    upstream_secret = "upstream-body-must-not-be-logged"
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.content = upstream_secret.encode()
+    upstream_response.json.side_effect = json.JSONDecodeError(
+        "invalid",
+        upstream_secret,
+        0,
+    )
+
+    with patch("app.requests.post", return_value=upstream_response):
+        response = client.post(
+            "/api/subscription/claim",
+            json={
+                "paymentHash": payment_secret,
+                "wgPresharedKey": "preshared-key-must-not-be-logged",
+            },
+            headers={
+                "Origin": "http://localhost",
+                "X-TunnelSats-CSRF-Token": csrf_token,
+            },
+        )
+
+    assert response.status_code == 400
+    assert payment_secret not in caplog.text
+    assert upstream_secret not in caplog.text
+    assert "preshared-key-must-not-be-logged" not in caplog.text
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+def test_subscription_status_with_local_side_effect_requires_csrf_in_both_modes(
+    client, management_browser_security, secure_mode
+):
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.content = b'{"status":"pending"}'
+    upstream_response.headers = {"Content-Type": "application/json"}
+
+    with patch.object(app_module, "SECURE_MODE", secure_mode), patch(
+        "app.requests.get", return_value=upstream_response
+    ) as mock_get:
+        response = client.get("/api/subscription/payment-hash")
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+    mock_get.assert_not_called()
+
+
+@pytest.mark.parametrize("secure_mode", [False, True])
+def test_subscription_status_accepts_csrf_protected_poll_in_both_modes(
+    client, management_browser_security, secure_mode
+):
+    session = client.get("/api/local/session")
+    csrf_token = session.get_json()["csrf_token"]
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.content = b'{"status":"pending"}'
+    upstream_response.headers = {"Content-Type": "application/json"}
+
+    with patch.object(app_module, "SECURE_MODE", secure_mode), patch(
+        "app.requests.get", return_value=upstream_response
+    ):
+        response = client.get(
+            "/api/subscription/payment-hash",
+            headers={"X-TunnelSats-CSRF-Token": csrf_token},
+        )
+
+    assert response.status_code == 200
 
 
 @patch('app.time.time', return_value=1_000_000)

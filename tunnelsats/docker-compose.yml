@@ -1,6 +1,17 @@
 version: "3.7"
 
 services:
+  app_proxy:
+    # TunnelSats requires host networking for its dataplane. Running Umbrel's
+    # authenticated proxy in the same namespace lets it reach the private
+    # loopback-only Flask backend without exposing that backend to the LAN.
+    network_mode: "host"
+    environment:
+      APP_HOST: 127.0.0.1
+      APP_PORT: "9740"
+      PROXY_AUTH_ADD: "true"
+      PROXY_AUTH_WHITELIST: ""
+
   tunnelsats:
     # Use the specific version tag for production
     image: tunnelsats/ts-umbrel-app:3.3.8
@@ -14,6 +25,11 @@ services:
       - apparmor:unconfined
     environment:
       - SECURE_MODE=${SECURE_MODE:-false}
+      # Port 9739 belongs to Umbrel's authenticated app_proxy. The privileged
+      # backend is reachable only through loopback in both Secure Mode states.
+      - DASHBOARD_BIND_HOST=127.0.0.1
+      - DASHBOARD_BIND_PORT=9740
+      - MANAGEMENT_BROWSER_SECURITY_ENABLED=true
     volumes:
       # Persistent peer directory (Uninstall-safe)
       - ${APP_DATA_DIR}/../tunnelsats-data:/data

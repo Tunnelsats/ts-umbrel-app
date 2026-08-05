@@ -170,14 +170,17 @@ Target: us3.tunnelsats.com (178.156.167.202) : 12345
 [3/3] Testing Inbound Port (via Hostname)...    PASS (Connected to us3.tunnelsats.com:12345)
 ----------------------------------------------------------------
 ```
-- Check `GET /api/local/status` first to view the current `dataplane_mode` and `wg_status`.
+- Check the authenticated dashboard first to view the current
+  `dataplane_mode`, `wg_status`, and any reconciliation error.
+- For SSH-only diagnostics, the private Flask backend is available from the
+  Umbrel host itself at `http://127.0.0.1:9740`; it is not reachable from the
+  LAN. For example:
+  ```bash
+  curl -s http://127.0.0.1:9740/api/local/status | jq
+  ```
 - If `rules_synced` is `false`, inspect `ipv4_rules_synced`,
   `ipv6_rules_synced`, and `last_error` in the JSON response.
-- **Trigger immediate Dataplane repair:**
-  ```bash
-  curl -X POST http://127.0.0.1:9739/api/local/reconcile
-  ```
-- **Force full app-level restart:**
-  ```bash
-  curl -X POST http://127.0.0.1:9739/api/local/restart
-  ```
+- Trigger reconciliation and restart actions from the authenticated dashboard.
+  Browser mutations require Umbrel authentication plus same-origin CSRF
+  validation and are intentionally not exposed as unauthenticated LAN `curl`
+  commands.

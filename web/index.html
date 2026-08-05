@@ -756,12 +756,15 @@
                             <h3 class="text-white font-bold mb-2 text-base">3. How can I verify my connection from the
                                 command line?</h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
-                                <p>The dashboard uses our internal <strong>Dataplane API</strong>. You can query this
-                                    directly via SSH to debug your network state:</p>
+                                <p>The dashboard uses an Umbrel-authenticated <strong>Dataplane API</strong>. From an
+                                    SSH session on the Umbrel host, query its loopback-only backend to debug your
+                                    network state:</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    curl -s http://umbrel.lan:9739/api/local/status | jq</div>
-                                <p>This returns a JSON payload containing the active WireGuard endpoint, internal
+                                    curl -s http://127.0.0.1:9740/api/local/status | jq</div>
+                                <p>Port 9739 is the authenticated Umbrel proxy, not a public LAN API. Perform
+                                    state-changing actions through the dashboard. The loopback status request returns
+                                    a JSON payload containing the active WireGuard endpoint, internal
                                     routing metrics, and any failure logs (<code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">last_error</code>).
                                     To check the live WireGuard handshake:</p>

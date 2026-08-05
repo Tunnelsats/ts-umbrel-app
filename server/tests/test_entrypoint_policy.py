@@ -26,6 +26,29 @@ def run_bash(script):
         )
 
 
+@pytest.mark.parametrize(
+    ("k3s_mode", "expected_host", "expected_port"),
+    [
+        ("false", "127.0.0.1", "9740"),
+        ("true", "0.0.0.0", "9739"),
+    ],
+)
+def test_dashboard_listener_defaults_are_safe_for_umbrel_and_compatible_with_k3s(
+    k3s_mode, expected_host, expected_port
+):
+    result = run_bash(
+        f'''
+K3S_MODE="{k3s_mode}"
+unset DASHBOARD_BIND_HOST DASHBOARD_BIND_PORT
+source "$1"
+[[ "${{DASHBOARD_BIND_HOST}}" == "{expected_host}" ]]
+[[ "${{DASHBOARD_BIND_PORT}}" == "{expected_port}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_fallback_blackhole_rule_removes_conflicts_and_is_idempotent():
     result = run_bash(
         r'''

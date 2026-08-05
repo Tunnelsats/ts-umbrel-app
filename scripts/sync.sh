@@ -90,6 +90,7 @@ run_node() {
         echo "SSHPASS=\"${SSHPASS}\""
         echo "SECURE_MODE=\"${SECURE_MODE_VAL}\""
         cat << 'EOF'
+set -euo pipefail
 APP_ID="tunnelsats"
 UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
 UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
@@ -102,20 +103,29 @@ run_sudo() {
     fi
 }
 
-run_sudo docker rm -f "${APP_ID}" 2>/dev/null || true
-run_sudo env SECURE_MODE="${SECURE_MODE}" APP_DATA_DIR="${UMBREL_APP_DATA}" docker compose -f "${UMBREL_COMPOSE}" up -d
+# Keep the installed app definition aligned with the code being hot-patched.
+# Only umbreld may restart this Compose model because it injects the complete
+# authenticated app_proxy service (image, auth secret, and public port).
+run_sudo cp /home/umbrel/dev-patch/tunnelsats/docker-compose.yml "${UMBREL_COMPOSE}"
+run_sudo cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+run_sudo sed -i "s|SECURE_MODE=\${SECURE_MODE:-false}|SECURE_MODE=${SECURE_MODE}|" "${UMBREL_COMPOSE}"
+umbreld client apps.restart.mutate --appId "${APP_ID}"
 for i in $(seq 1 10); do
     if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${APP_ID}" 2>/dev/null)" = "true" ]; then
         break
     fi
     sleep 1
 done
+if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${APP_ID}" 2>/dev/null)" != "true" ]; then
+    echo "TunnelSats failed to restart through umbreld" >&2
+    exit 1
+fi
 run_sudo docker cp /home/umbrel/dev-patch/server/. "${APP_ID}":/app/server/
 run_sudo docker cp /home/umbrel/dev-patch/web/. "${APP_ID}":/app/web/
 run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${APP_ID}":/app/scripts/
 run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${APP_ID}":/app/umbrel-app.yml
 run_sudo docker exec "${APP_ID}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null
-run_sudo docker restart "${APP_ID}"
+run_sudo docker restart "${APP_ID}" >/dev/null
 EOF
     ) | ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new -T umbrel@${UMBREL_HOST} bash
 
