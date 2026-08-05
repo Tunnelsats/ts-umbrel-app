@@ -5,8 +5,9 @@
 - Scope: umbrelOS deployments with both `SECURE_MODE=false` and
   `SECURE_MODE=true`
 - Related issue: <https://github.com/Tunnelsats/ts-umbrel-app/issues/125>
-- Implementation status: implemented on `issue-125-umbrel-auth`; real-device
-  umbrelOS validation remains pending
+- Implementation status: implemented on `issue-125-umbrel-auth`; the core
+  proxy and listener boundary has been verified on a real umbrelOS device,
+  while the complete two-mode release matrix remains pending
 - Implementation method: test-driven development (red, green, refactor)
 - k3s: explicitly out of scope for this change
 
@@ -30,11 +31,17 @@
   after a backend restart. The CI harness now supplies a dormant proxy stub,
   and the frontend refreshes and retries exactly once when the backend marks a
   CSRF rejection as refreshable.
-- Final local green gate: `280` server tests and `63` frontend tests pass. The
+- In-depth review follow-up red: focused tests reproduced incompatible
+  `ProxyFix` metadata, hostname lockouts, implicit proxy-auth defaults, unsafe
+  non-k3s listener defaults, raw-Compose hot-patching, and unencapsulated CSRF
+  session state before their respective fixes.
+- Final local green gate: `309` server tests and `64` frontend tests pass. The
   compose overlay also renders successfully when merged with Umbrel's upstream
   `docker-compose.app_proxy.yml`.
-- The two-mode real-device umbrelOS end-to-end matrix remains required before
-  release, as described below.
+- Real-device review confirmed that unauthenticated requests to the public
+  proxy are redirected to Umbrel login and that the backend port refuses LAN
+  connections. The complete two-mode real-device matrix remains required
+  before release, as described below.
 
 ## Objective
 
@@ -158,6 +165,8 @@ services:
     environment:
       APP_HOST: 127.0.0.1
       APP_PORT: 9740
+      PROXY_AUTH_ADD: "true"
+      PROXY_AUTH_WHITELIST: ""
 
   tunnelsats:
     network_mode: "host"
@@ -169,8 +178,10 @@ services:
 
 Important requirements:
 
-- Do not set `PROXY_AUTH_ADD=false`.
-- Do not whitelist `/api/local`, static UI paths, or the root path.
+- Set `PROXY_AUTH_ADD=true` explicitly so authentication cannot change with an
+  upstream default.
+- Set `PROXY_AUTH_WHITELIST` explicitly to an empty value; do not whitelist
+  `/api/local`, static UI paths, or the root path.
 - Protect the complete TunnelSats origin so the UI and its API share the same
   Umbrel-authenticated boundary.
 - Keep `umbrel-app.yml` `port: 9739`; this is the port on which the injected
@@ -206,9 +217,10 @@ For the Umbrel compose deployment, set these explicitly to `127.0.0.1` and
 `9740`. Reject invalid port values at startup with a clear error. Log the bind
 address and port without logging credentials or tokens.
 
-Preserve the existing defaults for deployment types not changed by this work so
-that this Umbrel-only change does not silently alter k3s behavior. Do not edit
-the k3s manifests in this implementation.
+Default non-k3s starts to `127.0.0.1:9740` so a missing Compose environment
+cannot silently expose the management API. Preserve the existing
+`0.0.0.0:9739` defaults for k3s, and do not edit k3s manifests in this
+implementation.
 
 Parameterize binding tests for `SECURE_MODE=false` and `SECURE_MODE=true` to
 prove that both resolve to the same loopback address and internal port under
@@ -288,17 +300,15 @@ For Umbrel requests:
 - The forwarded host must be syntactically valid.
 - The request `Origin` must exactly match the effective proxied origin for
   mutations.
-- Known device names from `DEVICE_HOSTNAME`, `DEVICE_DOMAIN_NAME`, and
-  `APP_HIDDEN_SERVICE` should be accepted.
-- IP-literal hosts should be accepted only when they belong to a local host
-  interface, allowing normal access through the Umbrel device's LAN or
-  Tailscale address without a static installation-specific list.
-- Provide an explicit extra-host configuration for installations using an
-  additional reverse proxy or custom DNS name.
+- Once the actual socket peer has been verified as loopback, accept any
+  syntactically valid forwarded host. The proxy-authenticated origin is the
+  authority here; a hostname allowlist adds lockout risk without proving that
+  a request traversed the proxy.
 
-Host validation must be tested with `.local`, direct IPv4, direct IPv6, Tor, and
-any supported Tailscale access pattern. It must not reintroduce the UI lockout
-by assuming every installation uses `umbrel.local`.
+Host validation must be tested with `.local`, `.lan`, direct IPv4, direct IPv6,
+Tor, Tailscale names, and custom DNS names. Malformed authorities remain
+rejected, and mutation Origins must match the accepted authority exactly. This
+must not reintroduce the UI lockout by assuming a particular Umbrel hostname.
 
 The existing private-source network allowlist may remain temporarily as a
 defense-in-depth restriction and for compatibility, but it must no longer be
@@ -335,6 +345,11 @@ instruct users to retrieve a generated password or configure Basic Auth.
 If programmatic management access is required later, design a separate,
 revocable API-token feature with narrowly scoped permissions. It is not part of
 this change and must not weaken the browser authentication path.
+
+The development hot-patch workflow must also install the updated Compose and
+manifest definitions, then ask `umbreld` to restart the app. Calling raw
+`docker compose` is unsupported because only `umbreld` injects the complete
+authenticated `app_proxy` base service.
 
 ## Test-Driven Delivery Order
 
@@ -463,8 +478,8 @@ UI will be unavailable.
 
 - `app_proxy` is present.
 - `APP_HOST` is `127.0.0.1` and `APP_PORT` is `9740`.
-- Proxy authentication is not disabled.
-- No management path is whitelisted.
+- Proxy authentication is explicitly enabled and its whitelist is explicitly
+  empty.
 - The TunnelSats backend binds to `127.0.0.1:9740` in the Umbrel compose file.
 - The manifest still exposes port `9739`.
 - Manifest default username and password remain empty.

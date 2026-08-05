@@ -12,61 +12,71 @@ const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
 const MANAGEMENT_CSRF_HEADER = 'X-TunnelSats-CSRF-Token';
 const MANAGEMENT_CSRF_REFRESH_HEADER = 'X-TunnelSats-CSRF-Refresh';
-let managementCsrfToken = null;
-let managementCsrfPromise = null;
-
-async function ensureManagementCsrfToken() {
-    if (managementCsrfToken) return managementCsrfToken;
-    if (!managementCsrfPromise) {
-        managementCsrfPromise = fetch('/api/local/session', {
-            credentials: 'same-origin'
-        }).then(async (response) => {
-            const payload = await response.json();
-            if (!response.ok || typeof payload.csrf_token !== 'string' || !payload.csrf_token) {
-                throw new Error('Unable to initialize the management session.');
-            }
-            managementCsrfToken = payload.csrf_token;
-            return managementCsrfToken;
-        }).finally(() => {
-            managementCsrfPromise = null;
-        });
+class ManagementSession {
+    constructor() {
+        this.csrfToken = null;
+        this.csrfPromise = null;
     }
-    return managementCsrfPromise;
+
+    async ensureCsrfToken() {
+        if (this.csrfToken) return this.csrfToken;
+        if (!this.csrfPromise) {
+            this.csrfPromise = fetch('/api/local/session', {
+                credentials: 'same-origin'
+            }).then(async (response) => {
+                const payload = await response.json();
+                if (!response.ok || typeof payload.csrf_token !== 'string' || !payload.csrf_token) {
+                    throw new Error('Unable to initialize the management session.');
+                }
+                this.csrfToken = payload.csrf_token;
+                return this.csrfToken;
+            }).finally(() => {
+                this.csrfPromise = null;
+            });
+        }
+        return this.csrfPromise;
+    }
+
+    async fetch(url, options = {}) {
+        const { requireCsrf = false, ...fetchOptions } = options;
+        const method = String(fetchOptions.method || 'GET').toUpperCase();
+        const requestOptions = {
+            ...fetchOptions,
+            credentials: 'same-origin'
+        };
+        const csrfRequired = requireCsrf || !['GET', 'HEAD', 'OPTIONS'].includes(method);
+        let csrfToken = null;
+        if (csrfRequired) {
+            csrfToken = await this.ensureCsrfToken();
+            requestOptions.headers = {
+                ...(fetchOptions.headers || {}),
+                [MANAGEMENT_CSRF_HEADER]: csrfToken
+            };
+        }
+        const response = await fetch(url, requestOptions);
+        const refreshRequired = response.status === 403
+            && response.headers
+            && typeof response.headers.get === 'function'
+            && response.headers.get(MANAGEMENT_CSRF_REFRESH_HEADER) === 'required';
+        if (!csrfRequired || !refreshRequired) return response;
+
+        // A backend restart rotates its process-scoped token while the dashboard
+        // can remain open. Refresh and retry exactly once, and do not discard a
+        // token that another concurrent request may already have refreshed.
+        if (this.csrfToken === csrfToken) this.csrfToken = null;
+        const refreshedToken = await this.ensureCsrfToken();
+        requestOptions.headers = {
+            ...requestOptions.headers,
+            [MANAGEMENT_CSRF_HEADER]: refreshedToken
+        };
+        return fetch(url, requestOptions);
+    }
 }
 
-async function managementFetch(url, options = {}) {
-    const { requireCsrf = false, ...fetchOptions } = options;
-    const method = String(fetchOptions.method || 'GET').toUpperCase();
-    const requestOptions = {
-        ...fetchOptions,
-        credentials: 'same-origin'
-    };
-    const csrfRequired = requireCsrf || !['GET', 'HEAD', 'OPTIONS'].includes(method);
-    let csrfToken = null;
-    if (csrfRequired) {
-        csrfToken = await ensureManagementCsrfToken();
-        requestOptions.headers = {
-            ...(fetchOptions.headers || {}),
-            [MANAGEMENT_CSRF_HEADER]: csrfToken
-        };
-    }
-    const response = await fetch(url, requestOptions);
-    const refreshRequired = response.status === 403
-        && response.headers
-        && typeof response.headers.get === 'function'
-        && response.headers.get(MANAGEMENT_CSRF_REFRESH_HEADER) === 'required';
-    if (!csrfRequired || !refreshRequired) return response;
+const managementSession = new ManagementSession();
 
-    // A backend restart rotates its process-scoped token while the dashboard
-    // can remain open. Refresh and retry exactly once, and do not discard a
-    // token that another concurrent request may already have refreshed.
-    if (managementCsrfToken === csrfToken) managementCsrfToken = null;
-    const refreshedToken = await ensureManagementCsrfToken();
-    requestOptions.headers = {
-        ...requestOptions.headers,
-        [MANAGEMENT_CSRF_HEADER]: refreshedToken
-    };
-    return fetch(url, requestOptions);
+async function managementFetch(url, options = {}) {
+    return managementSession.fetch(url, options);
 }
 
 window.managementFetch = managementFetch;

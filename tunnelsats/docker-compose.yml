@@ -9,6 +9,8 @@ services:
     environment:
       APP_HOST: 127.0.0.1
       APP_PORT: "9740"
+      PROXY_AUTH_ADD: "true"
+      PROXY_AUTH_WHITELIST: ""
 
   tunnelsats:
     # Use the specific version tag for production
@@ -28,10 +30,6 @@ services:
       - DASHBOARD_BIND_HOST=127.0.0.1
       - DASHBOARD_BIND_PORT=9740
       - MANAGEMENT_BROWSER_SECURITY_ENABLED=true
-      - DEVICE_HOSTNAME=${DEVICE_HOSTNAME:-}
-      - DEVICE_DOMAIN_NAME=${DEVICE_DOMAIN_NAME:-}
-      - APP_HIDDEN_SERVICE=${APP_HIDDEN_SERVICE:-}
-      - MANAGEMENT_ALLOWED_HOSTS=${MANAGEMENT_ALLOWED_HOSTS:-}
     volumes:
       # Persistent peer directory (Uninstall-safe)
       - ${APP_DATA_DIR}/../tunnelsats-data:/data

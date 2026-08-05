@@ -80,9 +80,20 @@ def test_dashboard_bind_config_honors_explicit_loopback_in_both_modes(secure_mod
         assert app_module.dashboard_bind_config() == ("127.0.0.1", 9740)
 
 
-def test_dashboard_bind_config_preserves_legacy_defaults():
-    with patch.dict(os.environ, {}, clear=True):
-        assert app_module.dashboard_bind_config() == ("0.0.0.0", 9739)
+@pytest.mark.parametrize(
+    ("k3s_mode", "expected"),
+    [
+        (False, ("127.0.0.1", 9740)),
+        (True, ("0.0.0.0", 9739)),
+    ],
+)
+def test_dashboard_bind_config_defaults_fail_closed_without_changing_k3s(
+    k3s_mode, expected
+):
+    with patch.dict(os.environ, {}, clear=True), patch.object(
+        app_module, "K3S_MODE", k3s_mode
+    ):
+        assert app_module.dashboard_bind_config() == expected
 
 
 @pytest.mark.parametrize("invalid_port", ["", "not-a-port", "0", "65536"])
@@ -201,36 +212,68 @@ def test_management_security_rejects_non_loopback_direct_peer(
 
 
 @pytest.mark.parametrize(
-    ("environment", "forwarded_host"),
+    ("proxyfix_orig", "expected"),
     [
-        ({"DEVICE_DOMAIN_NAME": "umbrel.local"}, "umbrel.local:9739"),
-        ({"APP_HIDDEN_SERVICE": "examplehiddenservice.onion"}, "examplehiddenservice.onion:9739"),
-        ({"MANAGEMENT_ALLOWED_HOSTS": "tunnelsats.example"}, "tunnelsats.example:9739"),
+        ({"REMOTE_ADDR": "127.0.0.2"}, "127.0.0.2"),
+        (("127.0.0.3", "http", "umbrel.local", "9739"), "127.0.0.3"),
+        (None, "127.0.0.4"),
+    ],
+)
+def test_direct_peer_extraction_supports_proxyfix_versions(proxyfix_orig, expected):
+    with app.test_request_context(environ_base={"REMOTE_ADDR": "127.0.0.4"}):
+        if proxyfix_orig is not None:
+            app_module.request.environ["werkzeug.proxy_fix.orig"] = proxyfix_orig
+
+        assert app_module._get_direct_remote_addr() == expected
+
+
+@pytest.mark.parametrize(
+    "forwarded_host",
+    [
+        "umbrel.local:9739",
+        "examplehiddenservice.onion:9739",
+        "tunnelsats.example:9739",
     ],
 )
 def test_management_security_accepts_known_forwarded_umbrel_hosts(
-    client, management_browser_security, environment, forwarded_host
+    client, management_browser_security, forwarded_host
 ):
-    with patch.dict(os.environ, environment, clear=False):
-        response = client.get(
-            "/api/local/session",
-            headers={
-                "X-Forwarded-For": "192.168.1.20",
-                "X-Forwarded-Host": forwarded_host,
-                "X-Forwarded-Proto": "http",
-            },
-            environ_base={"REMOTE_ADDR": "127.0.0.1"},
-        )
+    response = client.get(
+        "/api/local/session",
+        headers={
+            "X-Forwarded-For": "192.168.1.20",
+            "X-Forwarded-Host": forwarded_host,
+            "X-Forwarded-Proto": "http",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
 
     assert response.status_code == 200
 
 
-def test_management_security_rejects_unknown_forwarded_host(
-    client, management_browser_security
+@pytest.mark.parametrize(
+    "forwarded_host",
+    ["umbrel.lan:9739", "node.tailnet.ts.net:9739", "custom.home:9739"],
+)
+def test_management_security_accepts_any_valid_host_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
 ):
     response = client.get(
         "/api/local/session",
-        headers={"X-Forwarded-Host": "evil.example"},
+        headers={"X-Forwarded-Host": forwarded_host},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("forwarded_host", ["bad host", "bad.example/path", "[broken"])
+def test_management_security_rejects_malformed_host_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
+):
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-Host": forwarded_host},
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
@@ -239,25 +282,21 @@ def test_management_security_rejects_unknown_forwarded_host(
 
 
 @pytest.mark.parametrize(
-    ("forwarded_host", "local_address"),
+    "forwarded_host",
     [
-        ("192.168.1.10:9739", "192.168.1.10"),
-        ("100.100.10.20:9739", "100.100.10.20"),
-        ("[fd00::10]:9739", "fd00::10"),
+        "192.168.1.10:9739",
+        "100.100.10.20:9739",
+        "[fd00::10]:9739",
     ],
 )
-def test_management_security_accepts_local_interface_ip_hosts(
-    client, management_browser_security, forwarded_host, local_address
+def test_management_security_accepts_ip_hosts_from_loopback_proxy(
+    client, management_browser_security, forwarded_host
 ):
-    with patch(
-        "app._local_interface_addresses",
-        return_value={"127.0.0.1", local_address},
-    ):
-        response = client.get(
-            "/api/local/session",
-            headers={"X-Forwarded-Host": forwarded_host},
-            environ_base={"REMOTE_ADDR": "127.0.0.1"},
-        )
+    response = client.get(
+        "/api/local/session",
+        headers={"X-Forwarded-Host": forwarded_host},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
 
     assert response.status_code == 200
 

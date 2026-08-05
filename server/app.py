@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import secrets
 import socket
 import subprocess
 import uuid
@@ -11,7 +10,7 @@ from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
 from typing import Dict, Any, List, Optional, Tuple, Iterable
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import requests
 import yaml
@@ -19,6 +18,8 @@ from flask import Flask, abort, jsonify, request, send_from_directory, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
+
+from security import ManagementSecurity
 
 # Ensure verbose logging for container restarts is visible and unbuffered
 import logging
@@ -120,9 +121,10 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
 SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
-MANAGEMENT_CSRF_HEADER = "X-TunnelSats-CSRF-Token"
-MANAGEMENT_CSRF_REFRESH_HEADER = "X-TunnelSats-CSRF-Refresh"
-MANAGEMENT_CSRF_TOKEN = secrets.token_urlsafe(32)
+MANAGEMENT_SECURITY = ManagementSecurity()
+MANAGEMENT_CSRF_HEADER = MANAGEMENT_SECURITY.csrf_header
+MANAGEMENT_CSRF_REFRESH_HEADER = MANAGEMENT_SECURITY.csrf_refresh_header
+MANAGEMENT_CSRF_TOKEN = MANAGEMENT_SECURITY.csrf_token
 MANAGEMENT_JSON_PATHS = frozenset(
     {
         "/api/local/upload-config",
@@ -131,14 +133,11 @@ MANAGEMENT_JSON_PATHS = frozenset(
         "/api/subscription/claim",
     }
 )
-_local_interface_cache_lock = threading.Lock()
-_local_interface_cache: Tuple[float, frozenset] = (0.0, frozenset())
-LOCAL_INTERFACE_CACHE_TTL_SECONDS = 30
-
-
 def dashboard_bind_config():
-    host = os.environ.get("DASHBOARD_BIND_HOST", "0.0.0.0").strip()
-    raw_port = os.environ.get("DASHBOARD_BIND_PORT", "9739").strip()
+    default_host = "0.0.0.0" if K3S_MODE else "127.0.0.1"
+    default_port = "9739" if K3S_MODE else "9740"
+    host = os.environ.get("DASHBOARD_BIND_HOST", default_host).strip()
+    raw_port = os.environ.get("DASHBOARD_BIND_PORT", default_port).strip()
     if not host:
         raise ValueError("DASHBOARD_BIND_HOST must not be empty")
     try:
@@ -363,160 +362,20 @@ def client_is_allowed(remote_addr):
 
 
 def is_loopback_ip(remote_addr):
-    if not remote_addr:
-        return False
-    try:
-        return ip_address(remote_addr).is_loopback
-    except ValueError:
-        return False
+    return ManagementSecurity.is_loopback_ip(remote_addr)
 
 
-def _normalize_ip(value):
-    candidate = ip_address(value)
-    ipv4_mapped = getattr(candidate, "ipv4_mapped", None)
-    return str(ipv4_mapped or candidate)
+def _get_direct_remote_addr():
+    return MANAGEMENT_SECURITY.direct_remote_addr(request.environ)
 
 
-def _local_interface_addresses():
-    global _local_interface_cache
-    now = time.monotonic()
-    cached_at, cached_addresses = _local_interface_cache
-    if cached_addresses and now - cached_at < LOCAL_INTERFACE_CACHE_TTL_SECONDS:
-        return set(cached_addresses)
-
-    with _local_interface_cache_lock:
-        cached_at, cached_addresses = _local_interface_cache
-        if cached_addresses and now - cached_at < LOCAL_INTERFACE_CACHE_TTL_SECONDS:
-            return set(cached_addresses)
-
-        addresses = {"127.0.0.1", "::1"}
-        try:
-            result = subprocess.run(
-                ["ip", "-j", "address", "show"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if result.returncode == 0:
-                for interface in json.loads(result.stdout or "[]"):
-                    for address_info in interface.get("addr_info", []):
-                        local_address = address_info.get("local")
-                        if local_address:
-                            addresses.add(_normalize_ip(local_address))
-        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
-            app.logger.warning("Unable to enumerate local interface addresses for Host validation")
-
-        try:
-            for address_info in socket.getaddrinfo(socket.gethostname(), None):
-                addresses.add(_normalize_ip(address_info[4][0]))
-        except (OSError, ValueError):
-            pass
-
-        _local_interface_cache = (now, frozenset(addresses))
-        return addresses
-
-
-def _parse_host_authority(raw_host):
-    value = str(raw_host or "").strip()
-    if not value or any(char.isspace() for char in value) or any(char in value for char in "/?#@"):
-        return None
-    if value.count(":") >= 2 and not value.startswith("["):
-        try:
-            return _normalize_ip(value), None
-        except ValueError:
-            return None
-    try:
-        parsed = urlsplit(f"//{value}")
-        hostname = (parsed.hostname or "").rstrip(".").lower()
-        port = parsed.port
-    except ValueError:
-        return None
-    if not hostname or parsed.username is not None or parsed.password is not None:
-        return None
-    try:
-        hostname = _normalize_ip(hostname)
-    except ValueError:
-        pass
-    return hostname, port
-
-
-def _canonical_origin(raw_origin):
-    value = str(raw_origin or "").strip()
-    if not value or value == "null":
-        return None
-    try:
-        parsed = urlsplit(value)
-        hostname = (parsed.hostname or "").rstrip(".").lower()
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme not in ("http", "https")
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in ("", "/")
-        or parsed.query
-        or parsed.fragment
-    ):
-        return None
-    try:
-        hostname = _normalize_ip(hostname)
-    except ValueError:
-        pass
-    return parsed.scheme, hostname, port or (443 if parsed.scheme == "https" else 80)
-
-
-def _configured_management_hosts():
-    values = ["localhost", "127.0.0.1", "::1", socket.gethostname()]
-    for variable in (
-        "DEVICE_HOSTNAME",
-        "DEVICE_DOMAIN_NAME",
-        "APP_HIDDEN_SERVICE",
-        "MANAGEMENT_ALLOWED_HOSTS",
-    ):
-        values.extend(str(os.environ.get(variable, "")).split(","))
-
-    hosts = set()
-    for value in values:
-        value = value.strip()
-        if not value:
-            continue
-        if "://" in value:
-            origin = _canonical_origin(value)
-            if origin:
-                hosts.add(origin[1])
-            continue
-        authority = _parse_host_authority(value)
-        if authority:
-            hosts.add(authority[0])
-    return hosts
-
-
-def _management_host_is_allowed(raw_host):
-    authority = _parse_host_authority(raw_host)
-    if authority is None:
-        return False
-    hostname, _port = authority
-    if hostname in _configured_management_hosts():
-        return True
-    try:
-        normalized_ip = _normalize_ip(hostname)
-    except ValueError:
-        return False
-    return normalized_ip in _local_interface_addresses()
+def _management_host_is_allowed(raw_host, direct_remote_addr=None):
+    direct_remote_addr = direct_remote_addr or _get_direct_remote_addr()
+    return MANAGEMENT_SECURITY.host_is_allowed(raw_host, direct_remote_addr)
 
 
 def _origin_matches_request(raw_origin):
-    origin = _canonical_origin(raw_origin)
-    authority = _parse_host_authority(request.host)
-    scheme = str(request.scheme or "").lower()
-    if origin is None or authority is None or scheme not in ("http", "https"):
-        return False
-    hostname, port = authority
-    expected = (scheme, hostname, port or (443 if scheme == "https" else 80))
-    return origin == expected
+    return MANAGEMENT_SECURITY.origin_matches(raw_origin, request.scheme, request.host)
 
 
 def _management_browser_security_enabled():
@@ -2251,13 +2110,10 @@ def reconcile_result_success(result):
 @app.before_request
 def restrict_local_api():
     if _management_browser_security_enabled() and _management_request_is_sensitive():
-        proxyfix_orig = request.environ.get("werkzeug.proxy_fix.orig", {}) or {}
-        direct_remote_addr = proxyfix_orig.get("REMOTE_ADDR") or request.environ.get(
-            "REMOTE_ADDR", ""
-        )
+        direct_remote_addr = _get_direct_remote_addr()
         if not is_loopback_ip(direct_remote_addr):
             return _management_security_error("direct-peer")
-        if not _management_host_is_allowed(request.host):
+        if not _management_host_is_allowed(request.host, direct_remote_addr):
             return _management_security_error("host")
         changes_state = _management_request_changes_state()
         requires_csrf = _management_request_requires_csrf()
@@ -2268,9 +2124,7 @@ def restrict_local_api():
                 return _management_security_error("origin")
         if requires_csrf:
             supplied_token = request.headers.get(MANAGEMENT_CSRF_HEADER, "")
-            if not supplied_token or not secrets.compare_digest(
-                supplied_token, MANAGEMENT_CSRF_TOKEN
-            ):
+            if not MANAGEMENT_SECURITY.csrf_matches(supplied_token):
                 return _management_security_error("csrf")
             if changes_state and request.path in MANAGEMENT_JSON_PATHS and not request.is_json:
                 return _management_security_error("content-type")
@@ -2283,8 +2137,7 @@ def restrict_local_api():
         return None
 
     if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
-        proxyfix_orig = request.environ.get("werkzeug.proxy_fix.orig", {}) or {}
-        direct_remote_addr = proxyfix_orig.get("REMOTE_ADDR") or request.remote_addr
+        direct_remote_addr = _get_direct_remote_addr()
 
         # Trust X-Forwarded-For only when the immediate peer is loopback (local reverse proxy).
         # Direct clients can otherwise spoof forwarded headers to bypass local-network checks.

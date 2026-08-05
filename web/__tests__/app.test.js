@@ -137,6 +137,13 @@ describe('Management request browser security', () => {
         );
     });
 
+    test('management session state is encapsulated behind a session manager', () => {
+        expect(script).toContain('class ManagementSession');
+        expect(script).toContain('const managementSession = new ManagementSession()');
+        expect(script).not.toContain('let managementCsrfToken');
+        expect(script).not.toContain('let managementCsrfPromise');
+    });
+
     test('safe management requests do not bootstrap a CSRF token', async () => {
         global.fetch = csrfFetchMock(() => Promise.resolve({
             ok: true,

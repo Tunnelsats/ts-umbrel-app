@@ -8,6 +8,7 @@ COMPOSE_PATH = REPO_ROOT / "tunnelsats" / "docker-compose.yml"
 CI_COMPOSE_PATH = REPO_ROOT / "docker-compose.ci.yml"
 MANIFEST_PATH = REPO_ROOT / "tunnelsats" / "umbrel-app.yml"
 APP_PATH = REPO_ROOT / "server" / "app.py"
+SECURITY_PATH = REPO_ROOT / "server" / "security.py"
 TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "test.yml"
 
 
@@ -35,8 +36,8 @@ def test_umbrel_compose_uses_authenticated_host_network_app_proxy():
     assert proxy["network_mode"] == "host"
     assert environment["APP_HOST"] == "127.0.0.1"
     assert int(environment["APP_PORT"]) == 9740
-    assert str(environment.get("PROXY_AUTH_ADD", "true")).lower() != "false"
-    assert not environment.get("PROXY_AUTH_WHITELIST")
+    assert environment["PROXY_AUTH_ADD"] == "true"
+    assert environment["PROXY_AUTH_WHITELIST"] == ""
 
 
 def test_umbrel_backend_is_loopback_only_with_browser_security_enabled():
@@ -87,6 +88,15 @@ def test_server_does_not_reintroduce_basic_auth_or_password_file():
     assert "management-password" not in source
     assert "MANAGEMENT_PASSWORD" not in source
     assert "Basic realm=" not in source
+
+
+def test_management_security_rules_are_extracted_for_standalone_testing():
+    assert SECURITY_PATH.exists()
+    security_source = SECURITY_PATH.read_text(encoding="utf-8")
+    app_source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "class ManagementSecurity" in security_source
+    assert "from security import ManagementSecurity" in app_source
 
 
 def test_ci_compose_supplies_only_a_dormant_injected_proxy_stub():
