@@ -4,6 +4,16 @@ const path = require('path');
 const html = fs.readFileSync(path.resolve(__dirname, '../index.html'), 'utf8');
 const script = fs.readFileSync(path.resolve(__dirname, '../js/app.js'), 'utf8');
 
+describe('Favicon Optimization Contracts', () => {
+    test('index.html includes SVG favicon link and cropped SVG asset', () => {
+        expect(html).toContain('<link rel="icon" type="image/svg+xml" href="img/brand/favicon.svg">');
+        const svgPath = path.resolve(__dirname, '../img/brand/favicon.svg');
+        expect(fs.existsSync(svgPath)).toBe(true);
+        const svgContent = fs.readFileSync(svgPath, 'utf8');
+        expect(svgContent).toContain('viewBox="109 119 806 806"');
+    });
+});
+
 // --- Helpers ---
 
 function createMockGlobeInstance() {
