@@ -7,10 +7,9 @@ services:
     # loopback-only Flask backend without exposing that backend to the LAN.
     network_mode: "host"
     environment:
-      APP_HOST: 127.0.0.1
+      APP_HOST: tunnelsats
       APP_PORT: "9740"
       PROXY_AUTH_ADD: "true"
-      PROXY_AUTH_WHITELIST: ""
 
   tunnelsats:
     # Use the specific version tag for production

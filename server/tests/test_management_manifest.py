@@ -34,10 +34,10 @@ def test_umbrel_compose_uses_authenticated_host_network_app_proxy():
     environment = environment_map(proxy)
 
     assert proxy["network_mode"] == "host"
-    assert environment["APP_HOST"] == "127.0.0.1"
+    assert environment["APP_HOST"] == "tunnelsats"
     assert int(environment["APP_PORT"]) == 9740
     assert environment["PROXY_AUTH_ADD"] == "true"
-    assert environment["PROXY_AUTH_WHITELIST"] == ""
+    assert "PROXY_AUTH_WHITELIST" not in environment
 
 
 def test_umbrel_backend_is_loopback_only_with_browser_security_enabled():
