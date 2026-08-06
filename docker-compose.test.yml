@@ -14,22 +14,47 @@ services:
     ports:
       - "9736:9736"
 
-  tunnelsats:
+  tunnelsats-daemon:
     build: .
     image: tunnelsats/ts-umbrel-app:v3.1.0
-    container_name: tunnelsats
+    container_name: tunnelsats-daemon
     restart: on-failure
     network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    security_opt:
-      - apparmor:unconfined
+    security_opt: [apparmor:unconfined]
+    environment:
+      - TUNNELSATS_ROLE=daemon
+      - TUNNELSATS_DAEMON_SOCKET=/run/tunnelsats/daemon.sock
     volumes:
       - ./data:/data
+      - ./data:/migration_source:ro
       - ./data/mock-lnd:/lightning-data/lnd
       - ./data/mock-cln:/lightning-data/cln
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/runtime:/run/tunnelsats
     depends_on:
       - mock-lnd
       - mock-cln
+
+  tunnelsats-web:
+    image: tunnelsats/ts-umbrel-app:v3.1.0
+    container_name: tunnelsats-web
+    restart: on-failure
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt: [no-new-privileges:true]
+    environment:
+      - TUNNELSATS_ROLE=web
+      - TUNNELSATS_DAEMON_SOCKET=/run/tunnelsats/daemon.sock
+      - DASHBOARD_BIND_HOST=0.0.0.0
+      - DASHBOARD_BIND_PORT=9740
+    ports:
+      - "9740:9740"
+    volumes:
+      - ./data:/data
+      - ./data/runtime:/run/tunnelsats
+    depends_on:
+      - tunnelsats-daemon

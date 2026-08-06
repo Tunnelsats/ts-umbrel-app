@@ -6,3 +6,9 @@ services:
     image: alpine:3.21
     profiles:
       - umbrel-injected-app-proxy
+
+  tunnelsats-web:
+    environment:
+      - MANAGEMENT_BROWSER_SECURITY_ENABLED=false
+    ports:
+      - "9740:9740"

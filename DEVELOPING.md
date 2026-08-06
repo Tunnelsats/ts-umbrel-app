@@ -20,6 +20,11 @@ This document explains the repository structure and workflow for the TunnelSats 
   4. `web/index.html` (`id="app-version">vX.Y.Z</span>`)
   5. `k3s/deployment.yaml` (`image: tunnelsats/ts-umbrel-app:X.Y.Z`)
 - **Docker Compose**: The canonical `docker-compose.yml` is located in `tunnelsats/docker-compose.yml`. The root `docker-compose.yml` is a symlink to `tunnelsats/docker-compose.yml` for local tooling compatibility.
+- **Umbrel Runtime Split**: `tunnelsats-web` is the non-root bridge-networked
+  Flask service targeted by `app_proxy`; `tunnelsats-daemon` is the only
+  host-networked/capability-bearing service. They communicate through
+  `${APP_DATA_DIR}/runtime/daemon.sock`. The k3s manifest continues to use the
+  backward-compatible `combined` role.
 - **Changelog & Release Notes**: `CHANGELOG.md` tracks human-readable version history. Manifest `releaseNotes:` in `umbrel-app.yml` is populated dynamically during version bumps.
 
 ---
@@ -36,6 +41,10 @@ pytest server/tests/
 
 # Frontend Web UI Tests
 cd web && npm test
+
+# Exact official-store manifest rules (from a sibling umbrel-apps checkout)
+node ../umbrel-apps/.tools/lint-apps.mjs tunnelsats \
+  --root ../umbrel-apps
 ```
 
 ### 2. Atomic Version Bump & Release Notes Population
@@ -98,6 +107,9 @@ npm run promote -- --dry-run
 - **Monorepo Synchronization**: Recursively forces synchronization (rsync) of the local `tunnelsats/` folder into the target `umbrel-apps` structure.
 - **Metadata Injection**: Independently checks for and injects the `submitter: Tunnelsats` and `submission: <SUBMISSION_URL>` metadata fields into `umbrel-app.yml`.
 - **Hybrid Stripping**: Surgically strips our development absolute GitHub URLs (icons, gallery) from the target `umbrel-app.yml` to maintain Umbrel CDN-first submission protocol compliance.
+- **Two-Service Hardening**: Keeps `app_proxy` pointed at
+  `tunnelsats-web`, pins both image references, and strips development-only
+  privileges only from `tunnelsats-daemon`.
 
 > [!TIP]
 > **Pre-Push Hook**: A Git pre-push hook intercepts pushes to `master` and prompts the developer to execute this promotion layer automatically before changes are pushed upstream. Since promotion requires `SUBMISSION_URL`, ensure it is set in your environment if you choose to trigger promotion during `git push` (e.g., `SUBMISSION_URL="https://github.com/..." git push`).

@@ -43,8 +43,8 @@ While we await review for the official Umbrel App Store - Appreciate the upvote 
 To comply with Umbrel's strict security guidelines, the bundled Umbrel compose runs in **Secure Mode** by default (with `SECURE_MODE=true` set in the environment).
 
 ### What changes in Secure Mode?
-1. **No Docker Socket Access**: The container does not mount `/var/run/docker.sock`, preventing it from inspecting or mutating other containers on the host.
-2. **Reduced Container Privileges**: The compose file keeps `NET_ADMIN` for WireGuard and routing, but no longer adds `NET_RAW` or `apparmor:unconfined`.
+1. **No Docker Socket Access**: The privileged daemon does not mount `/var/run/docker.sock`, preventing it from inspecting or mutating other containers on the host.
+2. **Reduced Container Privileges**: The daemon keeps `NET_ADMIN` for WireGuard and routing, but no longer adds `NET_RAW` or `apparmor:unconfined`.
 3. **Dynamic Probing**: Instead of using the Docker API, the app detects LND or Core-Lightning nodes by dynamically probing their default TCP ports (`10.21.21.9:9735` and `10.21.21.96:9736`) and checking read-only configuration file paths.
 4. **Manual Node Configuration**: The app cannot automatically edit your node's configuration files or restart the containers. Instead, the UI provides copy-to-clipboard blocks and step-by-step instructions so you can easily copy and paste the parameters yourself.
 
@@ -74,7 +74,18 @@ tunnel route is unavailable.
 
 ## 🛠 Architecture & Dataplane
 
-Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. This app keeps the full dataplane inside the app container and reconciles drift continuously.
+Because Umbrel is immutable, host-level WireGuard services and persistent host networking rules are not reliable across upgrades/reboots. The Umbrel app therefore uses two isolated services:
+
+- `app_proxy` routes authenticated browser traffic to the non-root,
+  bridge-networked `tunnelsats-web` service.
+- `tunnelsats-web` sends allowlisted management requests over the private
+  `/run/tunnelsats/daemon.sock` Unix socket.
+- Only the host-networked `tunnelsats-daemon` owns WireGuard, routing,
+  firewall, Docker, and Lightning-node privileges.
+
+The daemon reconciles dataplane drift continuously. It has no bridge-network
+attachment or published management port; daemon failures make the web API
+return `503` instead of reporting protection optimistically.
 
 ### IPv6 policy: fail-closed denial
 
@@ -93,7 +104,7 @@ reports aggregate protection when IPv6 is present but containment cannot be
 installed and verified.
 
 ### Secure Mode dataplane
-1. The container runs with `network_mode: "host"` and `NET_ADMIN` to manage WireGuard, routing, and firewall state.
+1. Only `tunnelsats-daemon` runs with `network_mode: "host"` and `NET_ADMIN` to manage WireGuard, routing, and firewall state.
 2. Runtime detects active Lightning nodes through TCP probes on Umbrel's default service IPs and read-only config path checks.
 3. The UI returns manual LND/CLN configuration and restore instructions instead of modifying Lightning config files directly.
 4. Runtime enforces dataplane parity:
@@ -172,12 +183,17 @@ Target: us3.tunnelsats.com (178.156.167.202) : 12345
 ```
 - Check the authenticated dashboard first to view the current
   `dataplane_mode`, `wg_status`, and any reconciliation error.
-- For SSH-only diagnostics, the private Flask backend is available from the
-  Umbrel host itself at `http://127.0.0.1:9740`; it is not reachable from the
-  LAN. For example:
+- For SSH-only diagnostics, query the bridge-networked web service from inside
+  its container. The privileged daemon has no TCP listener. For example:
   ```bash
-  curl -s http://127.0.0.1:9740/api/local/status | jq
+  sudo docker compose -f \
+    /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml \
+    exec -T tunnelsats-web \
+    curl -s http://127.0.0.1:9740/api/local/status | jq
   ```
+- Inspect role-specific logs with `sudo docker compose -f
+  /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs
+  tunnelsats-web tunnelsats-daemon`.
 - If `rules_synced` is `false`, inspect `ipv4_rules_synced`,
   `ipv6_rules_synced`, and `last_error` in the JSON response.
 - Trigger reconciliation and restart actions from the authenticated dashboard.

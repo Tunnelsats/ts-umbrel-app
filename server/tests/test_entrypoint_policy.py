@@ -49,6 +49,23 @@ source "$1"
     assert result.returncode == 0, result.stderr
 
 
+def test_web_role_dispatches_before_any_privileged_dataplane_startup():
+    source = open(ENTRYPOINT_PATH, encoding="utf-8").read()
+
+    web_dispatch = source.index('if [[ "${TUNNELSATS_ROLE}" == "web" ]]')
+    kill_switch_start = source.index("if ! ensure_reconcile_kill_switch;", web_dispatch)
+    assert web_dispatch < kill_switch_start
+    assert 'exec python3 /app/server/app.py' in source[web_dispatch:kill_switch_start]
+
+
+def test_daemon_role_owns_private_socket_directory_and_api_lifecycle():
+    source = open(ENTRYPOINT_PATH, encoding="utf-8").read()
+
+    assert 'install -d -m 0770 -o 0 -g "${TUNNELSATS_WEB_GID:-1000}" /run/tunnelsats' in source
+    assert 'Starting private daemon API' in source
+    assert 'chown -R "${TUNNELSATS_WEB_UID:-1000}:${TUNNELSATS_WEB_GID:-1000}" /data' in source
+
+
 def test_fallback_blackhole_rule_removes_conflicts_and_is_idempotent():
     result = run_bash(
         r'''

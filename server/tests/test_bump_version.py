@@ -218,10 +218,9 @@ def test_valid_version_and_release_notes_are_written_safely(
     )
     assert manifest["version"] == "4.0.0-rc.1"
     assert manifest["releaseNotes"] == notes
-    assert (
+    assert (version_workspace / "tunnelsats/docker-compose.yml").read_text().count(
         "tunnelsats/ts-umbrel-app:4.0.0-rc.1"
-        in (version_workspace / "tunnelsats/docker-compose.yml").read_text()
-    )
+    ) == 2
 
 
 def test_existing_version_updates_its_changelog_section(
@@ -261,10 +260,9 @@ def test_sync_version_command_delegates_to_canonical_bump_tool(version_workspace
         'version: "4.1.0"'
         in (version_workspace / "tunnelsats/umbrel-app.yml").read_text()
     )
-    assert (
+    assert (version_workspace / "tunnelsats/docker-compose.yml").read_text().count(
         "tunnelsats/ts-umbrel-app:4.1.0"
-        in (version_workspace / "tunnelsats/docker-compose.yml").read_text()
-    )
+    ) == 2
     assert (
         'APP_VERSION = "v4.1.0"'
         in (version_workspace / "server/app.py").read_text()

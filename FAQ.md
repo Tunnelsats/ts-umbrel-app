@@ -18,21 +18,23 @@ Yes. The TunnelSats daemon handles dynamic reloading:
 
 ### 3. How can I verify my connection from the command line?
 The dashboard uses an Umbrel-authenticated **Dataplane API**. From an SSH
-session on the Umbrel host, you can query its loopback-only backend to debug
-your network state:
+session on the Umbrel host, query the non-root web service inside its container
+to debug your network state. The privileged daemon has no TCP listener:
 
 ```bash
-curl -s http://127.0.0.1:9740/api/local/status | jq
+sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml \
+  exec -T tunnelsats-web curl -s http://127.0.0.1:9740/api/local/status | jq
 ```
 
 Port `9739` is the user-facing authenticated Umbrel proxy and is not a public
 LAN API. State-changing operations must be performed through the authenticated
-dashboard. The loopback status request returns a JSON payload containing the
+dashboard. The container-local status request returns a JSON payload containing the
 active WireGuard endpoint, internal routing metrics, and any failure logs
 (`last_error`). To check the live WireGuard handshake:
 
 ```bash
-docker exec tunnelsats wg show
+sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml \
+  exec -T tunnelsats-daemon wg show
 ```
 
 ### 4. Can I tunnel both LND and Core-Lightning (CLN) simultaneously?
