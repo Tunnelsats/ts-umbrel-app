@@ -41,7 +41,7 @@ spec:
       containers:
         - name: tunnelsats
           # Pin to an immutable tag before production use:
-          image: tunnelsats/ts-umbrel-app:3.3.8
+          image: tunnelsats/ts-umbrel-app:3.4.0
           imagePullPolicy: IfNotPresent
           securityContext:
             capabilities:

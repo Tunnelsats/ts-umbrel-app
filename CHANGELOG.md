@@ -11,3 +11,7 @@
 ## [3.3.8]
 
 - Secure Mode: Backup WireGuard Config view, native file download, modal UX fixes, and gossip verification via read-only lnd.conf audit
+
+## [3.4.0]
+
+- Secure management API with native Umbrel authentication and optimize browser favicon for high-resolution display
