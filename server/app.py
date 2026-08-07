@@ -37,7 +37,7 @@ app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.4.0"
+APP_VERSION = "v3.4.1"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -133,8 +133,8 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 )
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
-K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
-SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
+K3S_MODE = os.environ.get("K3S_MODE", "false").strip().lower() == "true"
+SECURE_MODE = os.environ.get("SECURE_MODE", "false").strip().lower() == "true"
 MANAGEMENT_SECURITY = ManagementSecurity()
 MANAGEMENT_CSRF_HEADER = MANAGEMENT_SECURITY.csrf_header
 MANAGEMENT_CSRF_REFRESH_HEADER = MANAGEMENT_SECURITY.csrf_refresh_header
@@ -2874,20 +2874,23 @@ def local_status():
         if cln_detected and not cln_audit["readable"] and not cln_audit["conflicts"]:
             announcement_conflicts.append("cln:config-unavailable")
 
-    verification_required = bool(lnd_detected and lnd_routing_active)
-    verification = meta_data.get("lndAnnouncementVerification")
+    active_target_impl = str(meta_data.get("nodeType", "")).strip().lower()
+    if not active_target_impl:
+        active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else str(dataplane.get("target_impl", "lnd")).strip().lower())
+
+    active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
+    active_detected = cln_detected if active_target_impl == "cln" else lnd_detected
+
+    verification_required = bool(active_detected and active_routing_active)
+    verification = meta_data.get(f"{active_target_impl}AnnouncementVerification")
     expected_endpoint = f"{server_domain}:{expected_port}"
     announcement_verified: Optional[bool] = None
     verification_source: Optional[str] = None
     if verification_required:
         if SECURE_MODE or K3S_MODE:
-            # lnd.conf is mounted :ro in secure_mode — we can read it but not run lncli.
-            # Trust the config file: if the audit found no conflicts the user has correctly
-            # set externalhosts= per the manual setup instructions.
-            # NOTE: this is config-state verification, not live-gossip verification.
-            # LND must have been restarted after editing lnd.conf for changes to take effect.
-            lnd_config_conflicts = [c for c in announcement_conflicts if c.startswith("lnd:")]
-            announcement_verified = len(lnd_config_conflicts) == 0
+            prefix = f"{active_target_impl}:"
+            active_config_conflicts = [c for c in announcement_conflicts if c.startswith(prefix)]
+            announcement_verified = len(active_config_conflicts) == 0
             verification_source = "config_file"
         else:
             announcement_verified = bool(
@@ -2955,7 +2958,9 @@ def local_status():
             "secure_mode": SECURE_MODE,
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
-            "target_impl": dataplane["target_impl"],
+            "target_impl": active_target_impl,
+            "announcement_verified": announcement_verified,
+            "announcement_verification_source": verification_source,
             "docker_network": dataplane["docker_network"],
             "forwarding_port": dataplane["forwarding_port"],
             "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),

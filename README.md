@@ -145,6 +145,21 @@ egress fallback if WireGuard routing disappears.
 
 If you are a developer looking to contribute or run tests locally, follow these steps.
 
+### Local Node Hot-Syncing (`sync.sh node`)
+Configure your node connection in `.env.local` (**gitignored, never commit passwords or secrets**):
+```env
+UMBREL_HOST=umbrel.local
+UMBREL_PASSWORD=your_umbrel_password
+```
+Then stage local source code directly onto your dev node without building full Docker images:
+```bash
+# Hot-sync in Standard mode
+./scripts/sync.sh node
+
+# Hot-sync in Secure Mode (Official Umbrel App Store mode)
+SECURE_MODE=true ./scripts/sync.sh node
+```
+
 ### Unified Test Suite
 The workspace uses a single **Source of Truth (SOT)** for backend tests, E2E dataplane scenarios, and entrypoint verification.
 ```bash

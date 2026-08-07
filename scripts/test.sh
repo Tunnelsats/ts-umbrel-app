@@ -35,6 +35,9 @@ run_unit() {
     # Ensure dependencies are available (Support both venv and .venv conventions)
     if [ -f "venv/bin/activate" ]; then source venv/bin/activate; elif [ -f ".venv/bin/activate" ]; then source .venv/bin/activate; fi
     python3 -m pytest server/tests/
+
+    log_info "Running Web UI Jest Tests..."
+    (cd "$REPO_ROOT/web" && npm test)
 }
 
 run_e2e() {
