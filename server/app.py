@@ -2874,8 +2874,12 @@ def local_status():
         if cln_detected and not cln_audit["readable"] and not cln_audit["conflicts"]:
             announcement_conflicts.append("cln:config-unavailable")
 
-    active_target_impl = str(meta_data.get("nodeType", "")).strip().lower()
-    if not active_target_impl:
+    requested_node_type = str(meta_data.get("nodeType", "")).strip().lower()
+    if requested_node_type == "cln" and cln_detected:
+        active_target_impl = "cln"
+    elif requested_node_type == "lnd" and lnd_detected:
+        active_target_impl = "lnd"
+    else:
         active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else str(dataplane.get("target_impl", "lnd")).strip().lower())
 
     active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
@@ -2893,23 +2897,27 @@ def local_status():
             announcement_verified = len(active_config_conflicts) == 0
             verification_source = "config_file"
         else:
-            announcement_verified = bool(
-                isinstance(verification, dict)
-                and verification.get("verified") is True
-                and verification.get("endpoint") == expected_endpoint
-            )
-            if not announcement_verified and server_domain:
-                v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
-                if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
-                    new_verification = {
-                        "endpoint": expected_endpoint,
-                        "verified": v_ok,
-                        "checkedAt": datetime.now(timezone.utc).isoformat(),
-                        "removed": v_rem,
-                        "remainingConflicts": v_conf,
-                    }
-                    _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
-                    announcement_verified = v_ok
+            if active_target_impl == "cln":
+                cln_config_conflicts = [c for c in announcement_conflicts if c.startswith("cln:")]
+                announcement_verified = len(cln_config_conflicts) == 0
+            else:
+                announcement_verified = bool(
+                    isinstance(verification, dict)
+                    and verification.get("verified") is True
+                    and verification.get("endpoint") == expected_endpoint
+                )
+                if not announcement_verified and server_domain:
+                    v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
+                    if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
+                        new_verification = {
+                            "endpoint": expected_endpoint,
+                            "verified": v_ok,
+                            "checkedAt": datetime.now(timezone.utc).isoformat(),
+                            "removed": v_rem,
+                            "remainingConflicts": v_conf,
+                        }
+                        _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
+                        announcement_verified = v_ok
             verification_source = "live_gossip"
 
     effective_rules_synced = bool(dataplane["rules_synced"])

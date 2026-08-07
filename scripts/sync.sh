@@ -110,6 +110,11 @@ run_sudo() {
 # authenticated app_proxy service (image, auth secret, and public port).
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/docker-compose.yml "${UMBREL_COMPOSE}"
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+TARGET_IMAGE=$(run_sudo grep "image: tunnelsats/ts-umbrel-app:" "${UMBREL_COMPOSE}" | head -n 1 | awk '{print $2}')
+EXISTING_IMAGE=$(run_sudo docker images --format "{{.Repository}}:{{.Tag}}" | grep "^tunnelsats/ts-umbrel-app:" | head -n 1)
+if [ -n "${EXISTING_IMAGE}" ] && [ -n "${TARGET_IMAGE}" ]; then
+    run_sudo docker tag "${EXISTING_IMAGE}" "${TARGET_IMAGE}" || true
+fi
 if ! run_sudo grep -A 3 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "image:"; then
     run_sudo sed -i '/app_proxy:/a \    image: getumbrel/app-proxy:1.7.0' "${UMBREL_COMPOSE}"
 fi
