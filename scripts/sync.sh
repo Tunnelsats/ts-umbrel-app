@@ -92,6 +92,8 @@ run_node() {
         cat << 'EOF'
 set -euo pipefail
 APP_ID="tunnelsats"
+WEB_CONTAINER=""
+DAEMON_CONTAINER=""
 UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
 UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
 
@@ -108,24 +110,54 @@ run_sudo() {
 # authenticated app_proxy service (image, auth secret, and public port).
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/docker-compose.yml "${UMBREL_COMPOSE}"
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+if ! run_sudo grep -A 3 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "image:"; then
+    run_sudo sed -i '/app_proxy:/a \    image: getumbrel/app-proxy:1.7.0' "${UMBREL_COMPOSE}"
+fi
+if ! run_sudo grep -A 15 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "ports:"; then
+    run_sudo sed -i '/app_proxy:/a \    ports:\n      - "9739:9739"\n    volumes:\n      - '"${UMBREL_APP_DATA}"'/umbrel-app.yml:/extra/umbrel-app.yml:ro' "${UMBREL_COMPOSE}"
+fi
+if ! run_sudo grep -A 10 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "UMBREL_AUTH_SECRET"; then
+    run_sudo sed -i '/app_proxy:/,/environment:/ { /environment:/a \      - AUTH_SERVICE_PORT=2000\n      - PROXY_PORT=9739\n      - UMBREL_AUTH_SECRET=DEADBEEF\n      - JWT_SECRET=10e3158d95b3fc002b2b8873f741488887c72e439bd248835cbb1f5fed63f31e\n      - MANAGER_IP=tunnelsats-web\n      - MANAGER_PORT=9740
+}' "${UMBREL_COMPOSE}"
+fi
 run_sudo sed -i "s|SECURE_MODE=\${SECURE_MODE:-false}|SECURE_MODE=${SECURE_MODE}|" "${UMBREL_COMPOSE}"
+if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
+    run_sudo sed -i '/tunnelsats-web:/,/volumes:/ { /volumes:/a \      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro
+}' "${UMBREL_COMPOSE}"
+    run_sudo sed -i '/tunnelsats-daemon:/,/volumes:/ { /volumes:/a \      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro
+}' "${UMBREL_COMPOSE}"
+fi
 umbreld client apps.restart.mutate --appId "${APP_ID}"
 for i in $(seq 1 10); do
-    if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${APP_ID}" 2>/dev/null)" = "true" ]; then
+    WEB_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-web | head -n 1)"
+    DAEMON_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-daemon | head -n 1)"
+    if [ -z "${WEB_CONTAINER}" ] || [ -z "${DAEMON_CONTAINER}" ]; then
+        sleep 1
+        continue
+    fi
+    if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${WEB_CONTAINER}" 2>/dev/null)" = "true" ] && \
+       [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${DAEMON_CONTAINER}" 2>/dev/null)" = "true" ]; then
         break
     fi
     sleep 1
 done
-if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${APP_ID}" 2>/dev/null)" != "true" ]; then
-    echo "TunnelSats failed to restart through umbreld" >&2
+if [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${WEB_CONTAINER}" 2>/dev/null)" != "true" ] || \
+   [ "$(run_sudo docker inspect -f '{{.State.Running}}' "${DAEMON_CONTAINER}" 2>/dev/null)" != "true" ]; then
+    echo "TunnelSats split services failed to restart through umbreld" >&2
     exit 1
 fi
-run_sudo docker cp /home/umbrel/dev-patch/server/. "${APP_ID}":/app/server/
-run_sudo docker cp /home/umbrel/dev-patch/web/. "${APP_ID}":/app/web/
-run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${APP_ID}":/app/scripts/
-run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${APP_ID}":/app/umbrel-app.yml
-run_sudo docker exec "${APP_ID}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null
-run_sudo docker restart "${APP_ID}" >/dev/null
+if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
+    run_sudo docker cp /home/umbrel/dev-patch/server/. "${WEB_CONTAINER}":/app/server/
+    run_sudo docker cp /home/umbrel/dev-patch/server/. "${DAEMON_CONTAINER}":/app/server/
+    run_sudo docker cp /home/umbrel/dev-patch/web/. "${WEB_CONTAINER}":/app/web/
+    run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${WEB_CONTAINER}":/app/scripts/
+    run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${DAEMON_CONTAINER}":/app/scripts/
+    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${WEB_CONTAINER}":/app/umbrel-app.yml
+    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${DAEMON_CONTAINER}":/app/umbrel-app.yml
+    run_sudo docker exec --user 0 "${WEB_CONTAINER}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null || true
+    run_sudo docker exec --user 0 "${DAEMON_CONTAINER}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null || true
+fi
+run_sudo docker restart "${WEB_CONTAINER}" "${DAEMON_CONTAINER}" >/dev/null
 EOF
     ) | ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new -T umbrel@${UMBREL_HOST} bash
 
@@ -309,8 +341,7 @@ run_promote() {
            -e "s#\.\./tunnelsats-data#data#" \
            -e "/container_name: tunnelsats/d" \
            -e "/NET_RAW/d" \
-           -e "/security_opt:/d" \
-           -e "/apparmor:unconfined/d" \
+           -e "/security_opt: \[apparmor:unconfined\]/d" \
            -e 's#(:/lightning-data/lnd)$#\1:ro#' \
            -e 's#(:/lightning-data/cln)$#\1:ro#' \
            -e "/# Host socket/d" \

@@ -33,6 +33,14 @@ WG_HANDSHAKE_MAX_AGE=180
 # always sees them, even if a future caller passes them as plain shell vars instead of env.
 export K3S_MODE="${K3S_MODE:-false}"
 export SECURE_MODE="${SECURE_MODE:-false}"
+export TUNNELSATS_ROLE="${TUNNELSATS_ROLE:-combined}"
+case "${TUNNELSATS_ROLE}" in
+    combined|web|daemon) ;;
+    *)
+        printf 'Invalid TUNNELSATS_ROLE: %s\n' "${TUNNELSATS_ROLE}" >&2
+        exit 1
+        ;;
+esac
 if [[ "${K3S_MODE}" == "true" ]]; then
     export DASHBOARD_BIND_HOST="${DASHBOARD_BIND_HOST:-0.0.0.0}"
     export DASHBOARD_BIND_PORT="${DASHBOARD_BIND_PORT:-9739}"
@@ -4210,6 +4218,13 @@ cleanup() {
 
 main_loop() {
     while true; do
+        if [ -n "${API_PID}" ] && ! kill -0 "${API_PID}" >/dev/null 2>&1; then
+            LAST_ERROR="Internal management process exited unexpectedly"
+            log ERROR "${LAST_ERROR}"
+            fail_reconcile_closed || true
+            exit 1
+        fi
+
         ensure_reconcile_dirs
 
         if [ -f "${RESTART_TRIGGER}" ]; then
@@ -4265,6 +4280,11 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
 fi
 
+if [[ "${TUNNELSATS_ROLE}" == "web" ]]; then
+    log INFO "Starting unprivileged dashboard on ${DASHBOARD_BIND_HOST}:${DASHBOARD_BIND_PORT}"
+    exec python3 /app/server/app.py
+fi
+
 trap cleanup SIGTERM SIGINT
 
 if ! ensure_reconcile_kill_switch; then
@@ -4273,9 +4293,9 @@ if ! ensure_reconcile_kill_switch; then
 fi
 
 echo "Starting Tunnelsats v3 (mode: $([[ "${K3S_MODE}" == "true" ]] && echo "k3s" || echo "umbrel"))..."
-log INFO "Starting internal dashboard backend on ${DASHBOARD_BIND_HOST}:${DASHBOARD_BIND_PORT}"
-python3 /app/server/app.py &
-API_PID=$!
+if [[ "${TUNNELSATS_ROLE}" == "daemon" ]]; then
+    install -d -m 0770 -o 0 -g "${TUNNELSATS_WEB_GID:-1000}" /run/tunnelsats
+fi
 
 # Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
 if ! ls /data/tunnelsats*.conf >/dev/null 2>&1 && ls /migration_source/tunnelsats*.conf >/dev/null 2>&1; then
@@ -4295,9 +4315,23 @@ if ! ls /data/tunnelsats*.conf >/dev/null 2>&1 && ls /migration_source/tunnelsat
     log INFO "Migration complete. Promoted ${migrated_configs} config file(s) to persistent storage."
 fi
 
+if [[ "${TUNNELSATS_ROLE}" == "daemon" ]]; then
+    # The web role is numeric/non-root. It may manage authenticated subscription
+    # metadata and configs, while all host and node privileges remain here.
+    chown -R "${TUNNELSATS_WEB_UID:-1000}:${TUNNELSATS_WEB_GID:-1000}" /data
+fi
+
+if [[ "${TUNNELSATS_ROLE}" == "daemon" ]]; then
+    log INFO "Starting private daemon API on ${TUNNELSATS_DAEMON_SOCKET:-/run/tunnelsats/daemon.sock}"
+else
+    log INFO "Starting internal dashboard backend on ${DASHBOARD_BIND_HOST}:${DASHBOARD_BIND_PORT}"
+fi
+python3 /app/server/app.py &
+API_PID=$!
+
 ensure_reconcile_dirs
 
 reconcile_once "startup" || true
 
-echo "Tunnelsats container running. Umbrel UI is available through its configured app port."
+echo "Tunnelsats ${TUNNELSATS_ROLE} container running."
 main_loop

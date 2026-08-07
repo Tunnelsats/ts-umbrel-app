@@ -19,6 +19,10 @@ if [[ "$*" == *"--allow-skip"* ]]; then ALLOW_SKIP=true; fi
 log_info() { if [ "$LEAN" = false ]; then echo -e "${GREEN}[INFO]${NC} $1"; fi; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+container_id_by_service() {
+    docker ps -q --filter "label=com.docker.compose.service=$1" | head -n 1
+}
+
 usage() {
     echo "Usage: $0 [node|dataplane] [--lean] [--allow-skip]"
     exit 1
@@ -41,15 +45,16 @@ run_node_check() {
         return 1
     fi
 
-    CONTAINER_ID=$(docker ps -aqf "name=tunnelsats" | head -n 1)
-    if [ -z "$CONTAINER_ID" ]; then
-        log_error "TunnelSats container not found."
-        return 1
-    fi
-    
-    STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_ID")
-    log_info "Container State: $STATE"
-    if [ "$STATE" != "running" ]; then return 1; fi
+    for container_name in tunnelsats-web tunnelsats-daemon; do
+        CONTAINER_ID=$(container_id_by_service "${container_name}")
+        if [ -z "$CONTAINER_ID" ]; then
+            log_error "TunnelSats service not found: ${container_name}."
+            return 1
+        fi
+        STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_ID")
+        log_info "${container_name} state: ${STATE}"
+        if [ "$STATE" != "running" ]; then return 1; fi
+    done
 }
 
 run_dataplane() {
@@ -119,9 +124,10 @@ run_dataplane() {
 
     # 3. Outbound Tunnel Verification
     echo -ne "${YELLOW}[1/3] Testing Outbound Tunnel Alignment...     ${NC} "
-    EXEC_ERR=$(docker exec tunnelsats true 2>&1 || true)
+    DAEMON_CONTAINER_ID=$(container_id_by_service tunnelsats-daemon)
+    EXEC_ERR=$(docker exec "${DAEMON_CONTAINER_ID:-missing}" true 2>&1 || true)
     if [ -z "$EXEC_ERR" ]; then
-        OUTBOUND=$(docker exec tunnelsats curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
+        OUTBOUND=$(docker exec "${DAEMON_CONTAINER_ID}" curl -sL --interface tunnelsatsv2 --max-time 10 ifconfig.me 2>/dev/null || echo "TIMEOUT")
         if [[ "$OUTBOUND" == "$VPN_IP" ]]; then
             check_result 0 "Verified via $VPN_IP"
         else

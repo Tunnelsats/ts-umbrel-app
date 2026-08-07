@@ -759,20 +759,20 @@
                                 command line?</h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p>The dashboard uses an Umbrel-authenticated <strong>Dataplane API</strong>. From an
-                                    SSH session on the Umbrel host, query its loopback-only backend to debug your
-                                    network state:</p>
+                                    SSH session on the Umbrel host, query the non-root web service inside its container.
+                                    The privileged daemon has no TCP listener:</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    curl -s http://127.0.0.1:9740/api/local/status | jq</div>
+                                    sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml exec -T tunnelsats-web curl -s http://127.0.0.1:9740/api/local/status | jq</div>
                                 <p>Port 9739 is the authenticated Umbrel proxy, not a public LAN API. Perform
-                                    state-changing actions through the dashboard. The loopback status request returns
+                                    state-changing actions through the dashboard. The container-local status request returns
                                     a JSON payload containing the active WireGuard endpoint, internal
                                     routing metrics, and any failure logs (<code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">last_error</code>).
                                     To check the live WireGuard handshake:</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    sudo docker exec tunnelsats wg show</div>
+                                    sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml exec -T tunnelsats-daemon wg show</div>
                             </div>
                         </div>
 

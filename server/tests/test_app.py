@@ -12,6 +12,7 @@ from unittest.mock import patch, MagicMock
 import requests
 from app import app
 import app as app_module
+from daemon_transport import DaemonUnavailable, UnixHTTPResponse
 
 # --- Fixtures ---
 
@@ -65,6 +66,155 @@ def test_status_endpoint(client):
     assert res.status_code == 200
     data = json.loads(res.data)
     assert 'wg_status' in data
+
+
+def test_web_role_proxies_privileged_local_routes(client):
+    daemon_response = UnixHTTPResponse(
+        status=200,
+        reason="OK",
+        headers=(("Content-Type", "application/json"),),
+        body=b'{"rules_synced":true}',
+    )
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket", return_value=daemon_response
+    ) as request_daemon:
+        response = client.get("/api/local/status")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"rules_synced": True}
+    assert request_daemon.call_args.args[:3] == (
+        app_module.DAEMON_SOCKET_PATH,
+        "GET",
+        "/api/local/status",
+    )
+
+
+def test_web_role_fails_closed_when_daemon_is_unavailable(client):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket", side_effect=DaemonUnavailable("offline")
+    ):
+        response = client.get("/api/local/status")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "success": False,
+        "error": "TunnelSats daemon is unavailable.",
+    }
+
+
+def test_web_role_forwards_only_bounded_management_request_data(client):
+    daemon_response = UnixHTTPResponse(
+        status=202,
+        reason="Accepted",
+        headers=(
+            ("Content-Type", "application/json"),
+            ("Content-Disposition", 'attachment; filename="result.json"'),
+            ("Connection", "keep-alive"),
+        ),
+        body=b'{"accepted":true}',
+    )
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket", return_value=daemon_response
+    ) as request_daemon:
+        response = client.post(
+            "/api/local/reconcile?source=ui",
+            data=b'{"requested":true}',
+            content_type="application/json",
+        )
+
+    assert response.status_code == 202
+    assert response.headers["Content-Disposition"] == 'attachment; filename="result.json"'
+    assert "Connection" not in response.headers
+    assert request_daemon.call_args.args[:3] == (
+        app_module.DAEMON_SOCKET_PATH,
+        "POST",
+        "/api/local/reconcile?source=ui",
+    )
+    assert request_daemon.call_args.kwargs["body"] == b'{"requested":true}'
+    assert request_daemon.call_args.kwargs["headers"] == {
+        "Content-Type": "application/json"
+    }
+
+
+def test_untrusted_web_peer_is_rejected_before_daemon_forwarding(
+    client, management_browser_security
+):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch.dict(
+        os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": ""}, clear=False
+    ), patch("app.request_over_unix_socket") as request_daemon:
+        response = client.get(
+            "/api/local/status",
+            environ_base={"REMOTE_ADDR": "172.30.0.3"},
+            headers={"Host": "umbrel.local:9739"},
+        )
+
+    assert response.status_code == 403
+    request_daemon.assert_not_called()
+
+
+def test_web_role_preserves_method_not_allowed_without_contacting_daemon(client):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket"
+    ) as request_daemon:
+        response = client.delete("/api/local/status")
+
+    assert response.status_code == 405
+    assert response.get_json()["error"] == "Method not allowed."
+    request_daemon.assert_not_called()
+
+
+def test_web_role_rejects_oversized_management_body_before_daemon(client):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket"
+    ) as request_daemon:
+        response = client.post(
+            "/api/local/upload-config",
+            data=b"x" * (app_module.DEFAULT_MAX_REQUEST_BYTES + 1),
+            content_type="application/json",
+        )
+
+    assert response.status_code == 413
+    request_daemon.assert_not_called()
+
+
+def test_web_role_keeps_csrf_session_at_browser_boundary(client):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch(
+        "app.request_over_unix_socket"
+    ) as request_daemon:
+        response = client.get("/api/local/session")
+
+    assert response.status_code == 200
+    assert response.get_json()["csrf_token"] == app_module.MANAGEMENT_CSRF_TOKEN
+    request_daemon.assert_not_called()
+
+
+def test_daemon_role_rejects_non_management_routes(client):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "daemon"):
+        response = client.get("/api/servers")
+
+    assert response.status_code == 404
+
+
+def test_management_security_trusts_only_resolved_app_proxy_peer(
+    client, management_browser_security
+):
+    resolved_proxy = [(None, None, None, None, ("172.30.0.2", 0))]
+    with patch.dict(
+        os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": "app_proxy"}, clear=False
+    ), patch("app.socket.getaddrinfo", return_value=resolved_proxy):
+        trusted = client.get(
+            "/api/local/session",
+            environ_base={"REMOTE_ADDR": "172.30.0.2"},
+            headers={"Host": "umbrel.local:9739"},
+        )
+        untrusted = client.get(
+            "/api/local/session",
+            environ_base={"REMOTE_ADDR": "172.30.0.3"},
+            headers={"Host": "umbrel.local:9739"},
+        )
+
+    assert trusted.status_code == 200
+    assert untrusted.status_code == 403
 
 
 @pytest.mark.parametrize("secure_mode", [False, True])

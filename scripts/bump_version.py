@@ -50,16 +50,17 @@ def normalize_version(version):
     return clean_version
 
 
-def replace_required(content, pattern, replacement, path):
+def replace_required(content, pattern, replacement, path, expected_count=1):
     new_content, count = re.subn(
         pattern,
         replacement,
         content,
         flags=re.MULTILINE,
     )
-    if count != 1:
+    if count != expected_count:
         raise ValueError(
-            f"Expected exactly one match for pattern '{pattern}' in {path}, found {count}"
+            f"Expected exactly {expected_count} match(es) for pattern '{pattern}' "
+            f"in {path}, found {count}"
         )
     return new_content
 
@@ -178,6 +179,7 @@ def bump_version(new_version, release_notes=None):
         r'(image:\s*tunnelsats/ts-umbrel-app:v?)[0-9a-zA-Z.-]+',
         lambda match: f"{match.group(1)}{clean_version}",
         COMPOSE_PATH,
+        expected_count=2,
     )
 
     updates[APP_PY_PATH] = replace_required(

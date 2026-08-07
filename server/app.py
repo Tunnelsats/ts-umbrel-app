@@ -14,18 +14,26 @@ from urllib.parse import quote
 
 import requests
 import yaml
-from flask import Flask, abort, jsonify, request, send_from_directory, send_file
+from flask import Flask, Response, abort, jsonify, request, send_from_directory, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from security import ManagementSecurity
+from daemon_transport import (
+    ALLOWED_METHODS as DAEMON_ALLOWED_METHODS,
+    DEFAULT_MAX_REQUEST_BYTES,
+    DaemonUnavailable,
+    UnixWSGIServer,
+    request_over_unix_socket,
+)
 
 # Ensure verbose logging for container restarts is visible and unbuffered
 import logging
 import sys
 
 app = Flask(__name__, static_folder="../web", static_url_path="")
+app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
@@ -90,6 +98,12 @@ app.logger.setLevel(logging.INFO)
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
+TUNNELSATS_ROLE = os.environ.get("TUNNELSATS_ROLE", "combined").strip().lower()
+if TUNNELSATS_ROLE not in {"combined", "web", "daemon"}:
+    raise ValueError("TUNNELSATS_ROLE must be combined, web, or daemon")
+DAEMON_SOCKET_PATH = os.environ.get(
+    "TUNNELSATS_DAEMON_SOCKET", "/run/tunnelsats/daemon.sock"
+)
 DATA_DIR = "/data"
 META_FILE = "tunnelsats-meta.json"
 DOCKER_SOCK = "/var/run/docker.sock"
@@ -134,7 +148,7 @@ MANAGEMENT_JSON_PATHS = frozenset(
     }
 )
 def dashboard_bind_config():
-    default_host = "0.0.0.0" if K3S_MODE else "127.0.0.1"
+    default_host = "0.0.0.0" if (K3S_MODE or TUNNELSATS_ROLE == "web") else "127.0.0.1"
     default_port = "9739" if K3S_MODE else "9740"
     host = os.environ.get("DASHBOARD_BIND_HOST", default_host).strip()
     raw_port = os.environ.get("DASHBOARD_BIND_PORT", default_port).strip()
@@ -369,9 +383,34 @@ def _get_direct_remote_addr():
     return MANAGEMENT_SECURITY.direct_remote_addr(request.environ)
 
 
+def _management_peer_is_trusted(direct_remote_addr):
+    if is_loopback_ip(direct_remote_addr):
+        return True
+
+    trusted_host = os.environ.get("MANAGEMENT_TRUSTED_PROXY_HOST", "").strip()
+    if not trusted_host:
+        return False
+    try:
+        direct_ip = ManagementSecurity.normalize_ip(direct_remote_addr)
+        resolved = socket.getaddrinfo(trusted_host, None, type=socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        return False
+
+    for result in resolved:
+        try:
+            if ManagementSecurity.normalize_ip(result[4][0]) == direct_ip:
+                return True
+        except (IndexError, TypeError, ValueError):
+            continue
+    return False
+
+
 def _management_host_is_allowed(raw_host, direct_remote_addr=None):
     direct_remote_addr = direct_remote_addr or _get_direct_remote_addr()
-    return MANAGEMENT_SECURITY.host_is_allowed(raw_host, direct_remote_addr)
+    return (
+        MANAGEMENT_SECURITY.parse_host_authority(raw_host) is not None
+        and _management_peer_is_trusted(direct_remote_addr)
+    )
 
 
 def _origin_matches_request(raw_origin):
@@ -2109,9 +2148,15 @@ def reconcile_result_success(result):
 
 @app.before_request
 def restrict_local_api():
+    if TUNNELSATS_ROLE == "daemon":
+        # The daemon is reachable only through its permissioned Unix socket.
+        # Browser-facing authentication, proxy validation, and CSRF enforcement
+        # happen in the web role before a request is forwarded here.
+        return None
+
     if _management_browser_security_enabled() and _management_request_is_sensitive():
         direct_remote_addr = _get_direct_remote_addr()
-        if not is_loopback_ip(direct_remote_addr):
+        if not _management_peer_is_trusted(direct_remote_addr):
             return _management_security_error("direct-peer")
         if not _management_host_is_allowed(request.host, direct_remote_addr):
             return _management_security_error("host")
@@ -2141,7 +2186,7 @@ def restrict_local_api():
 
         # Trust X-Forwarded-For only when the immediate peer is loopback (local reverse proxy).
         # Direct clients can otherwise spoof forwarded headers to bypass local-network checks.
-        if is_loopback_ip(direct_remote_addr):
+        if _management_peer_is_trusted(direct_remote_addr):
             effective_remote_addr = request.remote_addr
         else:
             effective_remote_addr = direct_remote_addr
@@ -2284,6 +2329,75 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     except requests.RequestException as e:
         app.logger.error(f"Failed to fetch subscription status for {wg_public_key}: {e}")
     return None
+
+
+_DAEMON_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-disposition",
+        "content-type",
+        "expires",
+        "pragma",
+        "x-content-type-options",
+    }
+)
+
+
+@app.before_request
+def dispatch_split_runtime_request():
+    if TUNNELSATS_ROLE == "daemon":
+        if not request.path.startswith("/api/local/"):
+            abort(404)
+        return None
+
+    if (
+        TUNNELSATS_ROLE != "web"
+        or not request.path.startswith("/api/local/")
+        or request.path == "/api/local/session"
+    ):
+        return None
+
+    if request.method not in DAEMON_ALLOWED_METHODS:
+        return jsonify({"success": False, "error": "Method not allowed."}), 405
+
+    body = request.get_data(cache=True)
+    daemon_headers = {}
+    for header_name in ("Content-Type", "Accept"):
+        value = request.headers.get(header_name)
+        if value:
+            daemon_headers[header_name] = value
+    path = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+    try:
+        daemon_response = request_over_unix_socket(
+            DAEMON_SOCKET_PATH,
+            request.method,
+            path,
+            body=body,
+            headers=daemon_headers,
+        )
+    except (DaemonUnavailable, ValueError, TypeError):
+        app.logger.warning(
+            "Privileged management request failed closed: method=%s path=%s",
+            request.method,
+            request.path,
+        )
+        return jsonify(
+            {
+                "success": False,
+                "error": "TunnelSats daemon is unavailable.",
+            }
+        ), 503
+
+    response_headers = [
+        (name, value)
+        for name, value in daemon_response.headers
+        if name.lower() in _DAEMON_RESPONSE_HEADERS
+    ]
+    return Response(
+        daemon_response.body,
+        status=daemon_response.status,
+        headers=response_headers,
+    )
 
 
 _subscription_sync_lock = threading.Lock()
@@ -3391,6 +3505,23 @@ def restore_node():
 
 
 if __name__ == "__main__":
+    if TUNNELSATS_ROLE == "daemon":
+        socket_uid = int(os.environ.get("TUNNELSATS_WEB_UID", "1000"))
+        socket_gid = int(os.environ.get("TUNNELSATS_WEB_GID", "1000"))
+        app.logger.info("Starting private daemon API on %s", DAEMON_SOCKET_PATH)
+        daemon_server = UnixWSGIServer(
+            DAEMON_SOCKET_PATH,
+            app,
+            socket_mode=0o660,
+            socket_uid=socket_uid,
+            socket_gid=socket_gid,
+        )
+        try:
+            daemon_server.serve_forever()
+        finally:
+            daemon_server.server_close()
+        raise SystemExit(0)
+
     dashboard_host, dashboard_port = dashboard_bind_config()
     app.logger.info(
         "Starting internal dashboard backend on %s:%d",
