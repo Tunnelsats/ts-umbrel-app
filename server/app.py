@@ -2900,6 +2900,7 @@ def local_status():
             if active_target_impl == "cln":
                 cln_config_conflicts = [c for c in announcement_conflicts if c.startswith("cln:")]
                 announcement_verified = len(cln_config_conflicts) == 0
+                verification_source = "config_file"
             else:
                 announcement_verified = bool(
                     isinstance(verification, dict)
@@ -2918,7 +2919,7 @@ def local_status():
                         }
                         _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
                         announcement_verified = v_ok
-            verification_source = "live_gossip"
+                verification_source = "live_gossip"
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
