@@ -3200,3 +3200,28 @@ def test_export_config_returns_file_and_404_when_missing(client):
             res_found = client.get('/api/local/export-config')
             assert res_found.status_code == 200
             assert b'PrivateKey=testkey' in res_found.data
+
+
+def test_parse_cln_getinfo_addresses():
+    raw_cln = json.dumps({
+        "id": "0200e0d6a3d224ff99a28c576385d78b1df86a67464f99c9de2774842b5885e155",
+        "address": [
+            {"type": "ipv4", "address": "178.156.167.202", "port": 23217},
+            {"type": "torv3", "address": "db4bzummaxm5emq5w4d5xjowpmr4whduouonujz53stk553vptsulhid.onion", "port": 9735}
+        ]
+    })
+    parsed = app_module._parse_cln_getinfo_addresses(raw_cln)
+    assert parsed == ["178.156.167.202:23217", "db4bzummaxm5emq5w4d5xjowpmr4whduouonujz53stk553vptsulhid.onion:9735"]
+
+
+def test_clean_and_verify_cln_announcements():
+    raw_cln = json.dumps({
+        "address": [{"type": "ipv4", "address": "178.156.167.202", "port": 23217}]
+    })
+    with patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+            patch('app.container_id_by_match', return_value='cln1'), \
+            patch('app.docker_exec', return_value=(True, raw_cln)), \
+            patch('socket.gethostbyname_ex', return_value=('us3.tunnelsats.com', [], ['178.156.167.202'])):
+        ok, removed, conflicts = app_module.clean_and_verify_cln_announcements('us3.tunnelsats.com', 23217, True)
+        assert ok is True
+        assert conflicts == []

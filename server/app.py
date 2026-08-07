@@ -1784,6 +1784,72 @@ def clean_and_verify_lnd_announcements(
     ):
         remaining.append(f"missing expected announcement {dns}:{port}")
     return not remaining, removed, remaining
+def _parse_cln_getinfo_addresses(raw: str) -> Optional[List[str]]:
+    """Parse output from CLN `lightning-cli getinfo` into a list of address:port strings."""
+    if not raw or not isinstance(raw, str):
+        return None
+    start = raw.find("{")
+    if start < 0:
+        return None
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError:
+        return None
+    addr_list = payload.get("address")
+    if not isinstance(addr_list, list):
+        return None
+    addresses = []
+    for item in addr_list:
+        if isinstance(item, dict):
+            addr = str(item.get("address", "")).strip()
+            port = item.get("port")
+            if addr and port:
+                endpoint = f"{addr}:{port}"
+                if endpoint not in addresses:
+                    addresses.append(endpoint)
+    return addresses
+
+
+def _query_cln_addresses(container_id: str, attempts: int = 5) -> Optional[List[str]]:
+    """Allow CLN a short readiness window after its required restart."""
+    for attempt in range(max(1, attempts)):
+        ok, output = docker_exec(container_id, ["lightning-cli", "getinfo"])
+        addresses = _parse_cln_getinfo_addresses(output) if ok else None
+        if addresses is not None:
+            return addresses
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    return None
+
+
+def clean_and_verify_cln_announcements(
+    dns: str,
+    port: int,
+    retain_tor: bool,
+) -> Tuple[bool, List[str], List[str]]:
+    """Verify live CLN announcements via lightning-cli getinfo RPC in non-secure mode."""
+    if SECURE_MODE or K3S_MODE:
+        return False, [], ["secure_mode_manual_required"]
+
+    container_id = container_id_by_match(CLN_CONTAINER_PATTERN)
+    if not container_id:
+        return False, [], ["cln_not_found"]
+
+    addresses = _query_cln_addresses(container_id)
+    if addresses is None:
+        return False, [], ["cln_initializing"]
+
+    conflicts = [
+        address for address in addresses
+        if not _is_expected_tunnelsats_address(address, dns, port)
+        and not (retain_tor and _is_onion_address(address))
+    ]
+    if not any(
+        _is_expected_tunnelsats_address(address, dns, port)
+        for address in addresses
+    ):
+        conflicts.append(f"missing expected announcement {dns}:{port}")
+    return not conflicts, [], conflicts
 
 
 def _k8s_list_pods_in_namespace(ns, token):
@@ -2897,17 +2963,25 @@ def local_status():
             announcement_verified = len(active_config_conflicts) == 0
             verification_source = "config_file"
         else:
-            if active_target_impl == "cln":
-                cln_config_conflicts = [c for c in announcement_conflicts if c.startswith("cln:")]
-                announcement_verified = len(cln_config_conflicts) == 0
-                verification_source = "config_file"
-            else:
-                announcement_verified = bool(
-                    isinstance(verification, dict)
-                    and verification.get("verified") is True
-                    and verification.get("endpoint") == expected_endpoint
-                )
-                if not announcement_verified and server_domain:
+            announcement_verified = bool(
+                isinstance(verification, dict)
+                and verification.get("verified") is True
+                and verification.get("endpoint") == expected_endpoint
+            )
+            if not announcement_verified and server_domain:
+                if active_target_impl == "cln":
+                    v_ok, v_rem, v_conf = clean_and_verify_cln_announcements(str(server_domain), expected_port, True)
+                    if "cln_initializing" not in v_conf and "cln_not_found" not in v_conf:
+                        new_verification = {
+                            "endpoint": expected_endpoint,
+                            "verified": v_ok,
+                            "checkedAt": datetime.now(timezone.utc).isoformat(),
+                            "removed": v_rem,
+                            "remainingConflicts": v_conf,
+                        }
+                        _update_announcement_metadata(meta_path, "cln", verification=new_verification)
+                        announcement_verified = v_ok
+                else:
                     v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
                     if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
                         new_verification = {
@@ -2919,7 +2993,7 @@ def local_status():
                         }
                         _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
                         announcement_verified = v_ok
-                verification_source = "live_gossip"
+            verification_source = "live_gossip"
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
