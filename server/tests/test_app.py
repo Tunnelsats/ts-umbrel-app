@@ -3225,3 +3225,24 @@ def test_clean_and_verify_cln_announcements():
         ok, removed, conflicts = app_module.clean_and_verify_cln_announcements('us3.tunnelsats.com', 23217, True)
         assert ok is True
         assert conflicts == []
+
+
+def test_update_announcement_metadata_cln():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, "tunnelsats-meta.json")
+        verification = {"endpoint": "us3.tunnelsats.com:23217", "verified": True}
+        ok = app_module._update_announcement_metadata(meta_path, "cln", verification=verification)
+        assert ok is True
+        with open(meta_path, "r") as f:
+            data = json.load(f)
+        assert data["clnAnnouncementVerification"] == verification
+
+
+def test_audit_node_announcement_config_requires_tunnelsats_endpoint():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_conf = os.path.join(tmp_dir, "lnd.conf")
+        with open(lnd_conf, "w") as f:
+            f.write("[Application Options]\nexternalhosts=someonion.onion:9735\n")
+        res = app_module.audit_node_announcement_config("lnd", lnd_conf, "us3.tunnelsats.com", 23217)
+        assert res["readable"] is True
+        assert res["has_expected_tunnelsats"] is False

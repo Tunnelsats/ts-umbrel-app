@@ -1007,7 +1007,7 @@ async function fetchStatus() {
         if (badgeRouting && badgeState) {
             badgeRouting.textContent = badgeState.text;
             badgeRouting.className = badgeState.className;
-            if (isConfigFileVerification) {
+            if (isConfigFileVerification && data.announcement_verified === true && !dataplaneError) {
                 const targetImpl = data.target_impl || (data.cln_detected ? 'cln' : 'lnd');
                 const configFileName = targetImpl === 'cln' ? 'config.cln' : (targetImpl === 'lnd' ? 'lnd.conf' : 'configuration');
                 badgeRouting.title = `Gossip announcement verified via node ${configFileName}`;

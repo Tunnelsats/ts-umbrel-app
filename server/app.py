@@ -967,7 +967,19 @@ def audit_node_announcement_config(
             elif key == "ip-discovery" and _config_bool(value) is True:
                 conflicts.append(f"ip-discovery={value}")
 
-    return {"readable": True, "settings": entries, "conflicts": conflicts}
+    has_tunnelsats = False
+    if dns and port:
+        has_tunnelsats = any(
+            _is_expected_tunnelsats_address(entry["value"], dns, port)
+            for entry in entries
+        )
+
+    return {
+        "readable": True,
+        "settings": entries,
+        "conflicts": conflicts,
+        "has_expected_tunnelsats": has_tunnelsats,
+    }
 
 
 def _write_config_lines_atomic(path: str, lines: List[str]) -> bool:
@@ -1305,9 +1317,9 @@ def _update_announcement_metadata(
             with open(meta_path, "r", encoding="utf-8") as meta_fp:
                 meta = json.load(meta_fp)
         except (IOError, OSError, json.JSONDecodeError):
-            return False
+            meta = {}
         if not isinstance(meta, dict):
-            return False
+            meta = {}
 
         backup_config = meta.get("backupConfig")
         if not isinstance(backup_config, dict):
@@ -1324,11 +1336,12 @@ def _update_announcement_metadata(
         else:
             meta.pop("backupConfig", None)
 
-        if node_type == "lnd":
+        if node_type in ("lnd", "cln"):
+            key = f"{node_type}AnnouncementVerification"
             if verification is None:
-                meta.pop("lndAnnouncementVerification", None)
+                meta.pop(key, None)
             else:
-                meta["lndAnnouncementVerification"] = verification
+                meta[key] = verification
         try:
             _write_file_secure(meta_path, json.dumps(meta, indent=2))
             return True
@@ -2941,12 +2954,15 @@ def local_status():
             announcement_conflicts.append("cln:config-unavailable")
 
     requested_node_type = str(meta_data.get("nodeType", "")).strip().lower()
-    if requested_node_type == "cln" and cln_detected:
+    dataplane_target = str(dataplane.get("target_impl", "")).strip().lower()
+    if dataplane_target in ("cln", "lnd") and ((dataplane_target == "cln" and cln_detected) or (dataplane_target == "lnd" and lnd_detected)):
+        active_target_impl = dataplane_target
+    elif requested_node_type == "cln" and cln_detected:
         active_target_impl = "cln"
     elif requested_node_type == "lnd" and lnd_detected:
         active_target_impl = "lnd"
     else:
-        active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else str(dataplane.get("target_impl", "lnd")).strip().lower())
+        active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))
 
     active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
     active_detected = cln_detected if active_target_impl == "cln" else lnd_detected
@@ -2960,7 +2976,12 @@ def local_status():
         if SECURE_MODE or K3S_MODE:
             prefix = f"{active_target_impl}:"
             active_config_conflicts = [c for c in announcement_conflicts if c.startswith(prefix)]
-            announcement_verified = len(active_config_conflicts) == 0
+            active_audit = cln_audit if active_target_impl == "cln" else lnd_audit
+            has_ts_endpoint = bool(active_audit.get("has_expected_tunnelsats"))
+            if not has_ts_endpoint and server_domain and expected_port:
+                key_name = "externalhosts" if active_target_impl == "lnd" else "announce-addr"
+                announcement_conflicts.append(f"{active_target_impl}:missing-{key_name}={expected_endpoint}")
+            announcement_verified = len(active_config_conflicts) == 0 and has_ts_endpoint
             verification_source = "config_file"
         else:
             announcement_verified = bool(

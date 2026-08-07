@@ -572,6 +572,7 @@ describe('UI Routing and Initialization', () => {
                     version: 'v3.0.0',
                     rules_synced: true,
                     last_error: null,
+                    announcement_verified: true,
                     announcement_verification_source: 'config_file'
                 }),
                 ok: true
@@ -616,6 +617,7 @@ describe('UI Routing and Initialization', () => {
                     version: 'v3.0.0',
                     rules_synced: true,
                     last_error: null,
+                    announcement_verified: true,
                     announcement_verification_source: 'config_file'
                 }),
                 ok: true
@@ -625,6 +627,37 @@ describe('UI Routing and Initialization', () => {
         await window.fetchStatus();
 
         expect(document.getElementById('badge-routing').title).toBe('Gossip announcement verified via node config.cln');
+    });
+
+    test('fetchStatus removes tooltip when announcement_verified is false', async () => {
+        global.fetch = csrfFetchMock(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: false,
+                    lnd_routing_active: true,
+                    cln_routing_active: false,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: 'lnd',
+                    configs_found: [],
+                    version: 'v3.0.0',
+                    rules_synced: false,
+                    last_error: 'Announcement conflicts detected',
+                    announcement_verified: false,
+                    announcement_verification_source: 'config_file'
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('badge-routing').hasAttribute('title')).toBe(false);
     });
 
     test('fetchStatus shows green Active badge and hides subtitle when verification source is live_gossip', async () => {
