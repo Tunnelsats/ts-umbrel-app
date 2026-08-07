@@ -2938,6 +2938,8 @@ def local_status():
     except (TypeError, ValueError):
         expected_port = 0
     announcement_conflicts: List[str] = []
+    lnd_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
+    cln_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
     if lnd_detected or os.path.exists(LND_CONFIG_PATH):
         lnd_audit = audit_node_announcement_config(
             "lnd", LND_CONFIG_PATH, str(server_domain), expected_port
