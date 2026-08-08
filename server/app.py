@@ -3374,7 +3374,8 @@ def configure_node():
             cleanup_lines = ["announce-addr=<non-TunnelSats-address>", "ip-discovery=true"]
             gossip_command = ""
 
-        _persist_node_type(meta_path, node_type)
+        if not _persist_node_type(meta_path, node_type):
+            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         return jsonify({
             "success": True,
             "manual_mode": True,
@@ -3448,7 +3449,8 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
-        _persist_node_type(meta_path, "lnd")
+        if not _persist_node_type(meta_path, "lnd"):
+            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         return jsonify(
             {
                 "success": True,
@@ -3500,7 +3502,8 @@ def configure_node():
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
-    _persist_node_type(meta_path, "cln")
+    if not _persist_node_type(meta_path, "cln"):
+        return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
     return jsonify(
         {
             "success": True,
