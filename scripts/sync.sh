@@ -136,7 +136,7 @@ fi
 if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
     run_sudo sed -i 's|${APP_DATA_DIR}/runtime:/run/tunnelsats|${APP_DATA_DIR}/runtime:/run/tunnelsats\n      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro|g' "${UMBREL_COMPOSE}"
 fi
-umbreld client apps.restart.mutate --appId "${APP_ID}"
+run_sudo umbreld client apps.restart.mutate --appId "${APP_ID}"
 for i in $(seq 1 10); do
     WEB_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-web | head -n 1)"
     DAEMON_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-daemon | head -n 1)"
