@@ -3316,3 +3316,23 @@ def test_configure_node_persists_node_type_in_standard_mode(client):
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         assert meta["nodeType"] == "cln"
+
+
+def test_configure_node_does_not_persist_node_type_on_failure(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "lnd", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=False), \
+                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 500
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["nodeType"] == "lnd"

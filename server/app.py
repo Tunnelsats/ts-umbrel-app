@@ -1352,6 +1352,22 @@ def _update_announcement_metadata(
             return False
 
 
+def _persist_node_type(meta_path: str, node_type: str) -> bool:
+    with _metadata_lock:
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+            if not isinstance(meta, dict):
+                return False
+            if meta.get("nodeType") != node_type:
+                meta["nodeType"] = node_type
+                _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            return True
+        except (IOError, OSError, json.JSONDecodeError) as exc:
+            app.logger.error(f"Failed to persist nodeType {node_type} to metadata: {exc}")
+            return False
+
+
 def _backup_lines_from_meta(meta: Dict[str, Any], node_type: str) -> Optional[List[str]]:
     backup_config = meta.get("backupConfig")
     if not isinstance(backup_config, dict):
@@ -3336,14 +3352,6 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
-        if meta.get("nodeType") != node_type:
-            meta["nodeType"] = node_type
-            try:
-                _write_file_secure(meta_path, json.dumps(meta, indent=2))
-            except (IOError, OSError) as exc:
-                app.logger.error(f"Failed to save nodeType to metadata: {exc}")
-                return jsonify({"success": False, "error": "Failed to update metadata file."}), 500
-
     if SECURE_MODE:
         _, config_path = resolve_node_config(node_type)
         if node_type == "lnd":
@@ -3366,6 +3374,7 @@ def configure_node():
             cleanup_lines = ["announce-addr=<non-TunnelSats-address>", "ip-discovery=true"]
             gossip_command = ""
 
+        _persist_node_type(meta_path, node_type)
         return jsonify({
             "success": True,
             "manual_mode": True,
@@ -3439,6 +3448,7 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
+        _persist_node_type(meta_path, "lnd")
         return jsonify(
             {
                 "success": True,
@@ -3490,6 +3500,7 @@ def configure_node():
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
+    _persist_node_type(meta_path, "cln")
     return jsonify(
         {
             "success": True,
