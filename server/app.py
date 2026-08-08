@@ -1364,6 +1364,7 @@ def _is_metadata_writable(meta_path: str) -> bool:
 
 
 def _persist_node_type(meta_path: str, node_type: Optional[str]) -> bool:
+    """Persist the selected nodeType ('lnd' or 'cln') to metadata upon successful configuration."""
     with _metadata_lock:
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
