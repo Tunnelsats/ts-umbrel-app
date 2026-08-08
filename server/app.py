@@ -131,10 +131,13 @@ ANNOUNCEMENT_CONFLICT_ERROR = (
 ANNOUNCEMENT_VERIFICATION_ERROR = (
     "LND gossip announcements have not been verified free of conflicting clearnet addresses."
 )
+TARGET_SWITCH_PENDING_ERROR = "Lightning target switch is pending dataplane reconciliation."
+RECONCILE_WAIT_TIMEOUT_SECONDS = 60.0
+RECONCILE_WAIT_POLL_SECONDS = 0.1
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
-K3S_MODE = os.environ.get("K3S_MODE", "false").lower() == "true"
-SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() == "true"
+K3S_MODE = os.environ.get("K3S_MODE", "false").strip().lower() == "true"
+SECURE_MODE = os.environ.get("SECURE_MODE", "false").strip().lower() == "true"
 MANAGEMENT_SECURITY = ManagementSecurity()
 MANAGEMENT_CSRF_HEADER = MANAGEMENT_SECURITY.csrf_header
 MANAGEMENT_CSRF_REFRESH_HEADER = MANAGEMENT_SECURITY.csrf_refresh_header
@@ -967,7 +970,21 @@ def audit_node_announcement_config(
             elif key == "ip-discovery" and _config_bool(value) is True:
                 conflicts.append(f"ip-discovery={value}")
 
-    return {"readable": True, "settings": entries, "conflicts": conflicts}
+    has_tunnelsats = False
+    if dns and port:
+        target_key = "externalhosts" if node_type == "lnd" else "announce-addr"
+        has_tunnelsats = any(
+            _is_expected_tunnelsats_address(entry["value"], dns, port)
+            for entry in entries
+            if entry.get("key") == target_key
+        )
+
+    return {
+        "readable": True,
+        "settings": entries,
+        "conflicts": conflicts,
+        "has_expected_tunnelsats": has_tunnelsats,
+    }
 
 
 def _write_config_lines_atomic(path: str, lines: List[str]) -> bool:
@@ -1324,16 +1341,50 @@ def _update_announcement_metadata(
         else:
             meta.pop("backupConfig", None)
 
-        if node_type == "lnd":
+        if node_type in ("lnd", "cln"):
+            key = f"{node_type}AnnouncementVerification"
             if verification is None:
-                meta.pop("lndAnnouncementVerification", None)
+                meta.pop(key, None)
             else:
-                meta["lndAnnouncementVerification"] = verification
+                meta[key] = verification
         try:
             _write_file_secure(meta_path, json.dumps(meta, indent=2))
             return True
         except (IOError, OSError) as exc:
             app.logger.warning(f"Failed to persist announcement metadata: {exc}")
+            return False
+
+
+def _is_metadata_writable(meta_path: str) -> bool:
+    try:
+        if not os.path.exists(meta_path):
+            return False
+        with open(meta_path, "r+", encoding="utf-8") as fp:
+            pass
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def _persist_node_type(meta_path: str, node_type: Optional[str]) -> bool:
+    """Persist the selected nodeType ('lnd' or 'cln') to metadata upon successful configuration."""
+    with _metadata_lock:
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+            if not isinstance(meta, dict):
+                return False
+            normalized = str(node_type).strip().lower() if node_type else ""
+            current = str(meta.get("nodeType", "")).strip().lower()
+            if current != normalized:
+                if normalized:
+                    meta["nodeType"] = normalized
+                else:
+                    meta.pop("nodeType", None)
+                _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            return True
+        except (IOError, OSError, json.JSONDecodeError) as exc:
+            app.logger.error(f"Failed to persist nodeType {node_type} to metadata: {exc}")
             return False
 
 
@@ -1784,6 +1835,72 @@ def clean_and_verify_lnd_announcements(
     ):
         remaining.append(f"missing expected announcement {dns}:{port}")
     return not remaining, removed, remaining
+def _parse_cln_getinfo_addresses(raw: str) -> Optional[List[str]]:
+    """Parse output from CLN `lightning-cli getinfo` into a list of address:port strings."""
+    if not raw or not isinstance(raw, str):
+        return None
+    start = raw.find("{")
+    if start < 0:
+        return None
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError:
+        return None
+    addr_list = payload.get("address")
+    if not isinstance(addr_list, list):
+        return None
+    addresses = []
+    for item in addr_list:
+        if isinstance(item, dict):
+            addr = str(item.get("address", "")).strip()
+            port = item.get("port")
+            if addr and port:
+                endpoint = f"{addr}:{port}"
+                if endpoint not in addresses:
+                    addresses.append(endpoint)
+    return addresses
+
+
+def _query_cln_addresses(container_id: str, attempts: int = 5) -> Optional[List[str]]:
+    """Allow CLN a short readiness window after its required restart."""
+    for attempt in range(max(1, attempts)):
+        ok, output = docker_exec(container_id, ["lightning-cli", "getinfo"])
+        addresses = _parse_cln_getinfo_addresses(output) if ok else None
+        if addresses is not None:
+            return addresses
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    return None
+
+
+def clean_and_verify_cln_announcements(
+    dns: str,
+    port: int,
+    retain_tor: bool,
+) -> Tuple[bool, List[str], List[str]]:
+    """Verify live CLN announcements via lightning-cli getinfo RPC in non-secure mode."""
+    if SECURE_MODE or K3S_MODE:
+        return False, [], ["secure_mode_manual_required"]
+
+    container_id = container_id_by_match(CLN_CONTAINER_PATTERN)
+    if not container_id:
+        return False, [], ["cln_not_found"]
+
+    addresses = _query_cln_addresses(container_id)
+    if addresses is None:
+        return False, [], ["cln_initializing"]
+
+    conflicts = [
+        address for address in addresses
+        if not _is_expected_tunnelsats_address(address, dns, port)
+        and not (retain_tor and _is_onion_address(address))
+    ]
+    if not any(
+        _is_expected_tunnelsats_address(address, dns, port)
+        for address in addresses
+    ):
+        conflicts.append(f"missing expected announcement {dns}:{port}")
+    return not conflicts, [], conflicts
 
 
 def _k8s_list_pods_in_namespace(ns, token):
@@ -2144,6 +2261,39 @@ def reconcile_result_success(result):
     if isinstance(state, dict):
         return bool(state.get("rules_synced", False))
     return False
+
+
+def reconcile_target_and_wait(
+    expected_target: Optional[str],
+    timeout: float = RECONCILE_WAIT_TIMEOUT_SECONDS,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Trigger reconciliation and wait until the dataplane confirms the expected target."""
+    request_id = str(uuid.uuid4())
+    try:
+        ensure_reconcile_dirs()
+        atomic_write_text(reconcile_trigger_path(request_id), f"{request_id}\n")
+    except Exception as exc:
+        return False, {"error": f"Unable to trigger reconcile: {exc}"}
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        result = read_reconcile_result(request_id)
+        if isinstance(result, dict) and result.get("request_id") == request_id:
+            state = result.get("state")
+            if not isinstance(state, dict):
+                return False, {"error": "Reconcile returned an invalid dataplane state."}
+            target_matches = not expected_target or state.get("target_impl") == expected_target
+            success = reconcile_result_success(result) and target_matches
+            if success:
+                return True, result
+            error = state.get("last_error") or (
+                f"Reconciled target {state.get('target_impl') or 'none'} does not match "
+                f"requested target {expected_target}."
+            )
+            return False, {**result, "error": str(error)}
+        time.sleep(RECONCILE_WAIT_POLL_SECONDS)
+
+    return False, {"error": "Timed out waiting for dataplane reconciliation."}
 
 
 @app.before_request
@@ -2859,6 +3009,8 @@ def local_status():
     except (TypeError, ValueError):
         expected_port = 0
     announcement_conflicts: List[str] = []
+    lnd_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
+    cln_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
     if lnd_detected or os.path.exists(LND_CONFIG_PATH):
         lnd_audit = audit_node_announcement_config(
             "lnd", LND_CONFIG_PATH, str(server_domain), expected_port
@@ -2874,20 +3026,43 @@ def local_status():
         if cln_detected and not cln_audit["readable"] and not cln_audit["conflicts"]:
             announcement_conflicts.append("cln:config-unavailable")
 
-    verification_required = bool(lnd_detected and lnd_routing_active)
-    verification = meta_data.get("lndAnnouncementVerification")
+    requested_node_type = str(meta_data.get("nodeType", "")).strip().lower()
+    dataplane_target = str(dataplane.get("target_impl", "")).strip().lower()
+    requested_target_detected = (
+        (requested_node_type == "cln" and cln_detected)
+        or (requested_node_type == "lnd" and lnd_detected)
+    )
+    if dataplane_target in ("lnd", "cln"):
+        active_target_impl = dataplane_target
+    elif requested_target_detected:
+        active_target_impl = requested_node_type
+    else:
+        active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))
+
+    requested_target_impl = requested_node_type if requested_node_type in ("lnd", "cln") else None
+    target_switch_pending = bool(
+        requested_target_impl
+        and requested_target_impl != dataplane_target
+    )
+
+    active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
+    active_detected = cln_detected if active_target_impl == "cln" else lnd_detected
+
+    verification_required = bool(active_detected and active_routing_active)
+    verification = meta_data.get(f"{active_target_impl}AnnouncementVerification")
     expected_endpoint = f"{server_domain}:{expected_port}"
     announcement_verified: Optional[bool] = None
     verification_source: Optional[str] = None
     if verification_required:
         if SECURE_MODE or K3S_MODE:
-            # lnd.conf is mounted :ro in secure_mode — we can read it but not run lncli.
-            # Trust the config file: if the audit found no conflicts the user has correctly
-            # set externalhosts= per the manual setup instructions.
-            # NOTE: this is config-state verification, not live-gossip verification.
-            # LND must have been restarted after editing lnd.conf for changes to take effect.
-            lnd_config_conflicts = [c for c in announcement_conflicts if c.startswith("lnd:")]
-            announcement_verified = len(lnd_config_conflicts) == 0
+            prefix = f"{active_target_impl}:"
+            active_config_conflicts = [c for c in announcement_conflicts if c.startswith(prefix)]
+            active_audit = cln_audit if active_target_impl == "cln" else lnd_audit
+            has_ts_endpoint = bool(active_audit.get("has_expected_tunnelsats"))
+            if not has_ts_endpoint and server_domain and expected_port:
+                key_name = "externalhosts" if active_target_impl == "lnd" else "announce-addr"
+                announcement_conflicts.append(f"{active_target_impl}:missing-{key_name}={expected_endpoint}")
+            announcement_verified = len(active_config_conflicts) == 0 and has_ts_endpoint
             verification_source = "config_file"
         else:
             announcement_verified = bool(
@@ -2896,22 +3071,38 @@ def local_status():
                 and verification.get("endpoint") == expected_endpoint
             )
             if not announcement_verified and server_domain:
-                v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
-                if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
-                    new_verification = {
-                        "endpoint": expected_endpoint,
-                        "verified": v_ok,
-                        "checkedAt": datetime.now(timezone.utc).isoformat(),
-                        "removed": v_rem,
-                        "remainingConflicts": v_conf,
-                    }
-                    _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
-                    announcement_verified = v_ok
+                if active_target_impl == "cln":
+                    v_ok, v_rem, v_conf = clean_and_verify_cln_announcements(str(server_domain), expected_port, True)
+                    if "cln_initializing" not in v_conf and "cln_not_found" not in v_conf:
+                        new_verification = {
+                            "endpoint": expected_endpoint,
+                            "verified": v_ok,
+                            "checkedAt": datetime.now(timezone.utc).isoformat(),
+                            "removed": v_rem,
+                            "remainingConflicts": v_conf,
+                        }
+                        _update_announcement_metadata(meta_path, "cln", verification=new_verification)
+                        announcement_verified = v_ok
+                else:
+                    v_ok, v_rem, v_conf = clean_and_verify_lnd_announcements(str(server_domain), expected_port, True)
+                    if "lnd_initializing" not in v_conf and "lnd_not_found" not in v_conf:
+                        new_verification = {
+                            "endpoint": expected_endpoint,
+                            "verified": v_ok,
+                            "checkedAt": datetime.now(timezone.utc).isoformat(),
+                            "removed": v_rem,
+                            "remainingConflicts": v_conf,
+                        }
+                        _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
+                        announcement_verified = v_ok
             verification_source = "live_gossip"
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
-    if announcement_conflicts:
+    if target_switch_pending:
+        effective_rules_synced = False
+        effective_error = TARGET_SWITCH_PENDING_ERROR
+    elif announcement_conflicts:
         effective_rules_synced = False
         effective_error = ANNOUNCEMENT_CONFLICT_ERROR
     elif verification_required and not announcement_verified:
@@ -2955,7 +3146,11 @@ def local_status():
             "secure_mode": SECURE_MODE,
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
-            "target_impl": dataplane["target_impl"],
+            "target_impl": active_target_impl,
+            "requested_target_impl": requested_target_impl,
+            "target_switch_pending": target_switch_pending,
+            "announcement_verified": announcement_verified,
+            "announcement_verification_source": verification_source,
             "docker_network": dataplane["docker_network"],
             "forwarding_port": dataplane["forwarding_port"],
             "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
@@ -3221,16 +3416,36 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
-        if SECURE_MODE:
-            if meta.get("nodeType") != node_type:
-                meta["nodeType"] = node_type
-                try:
-                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
-                except (IOError, OSError) as exc:
-                    app.logger.error(f"Failed to save nodeType to metadata: {exc}")
-                    return jsonify({"success": False, "error": "Failed to update metadata file."}), 500
+        previous_node_type = str(meta.get("nodeType", "")).strip().lower()
+
+        if not _is_metadata_writable(meta_path):
+            return jsonify({"success": False, "error": "Unable to write to metadata file."}), 500
+
+    def _persist_and_reconcile_target(selected_node_type: str):
+        if not _persist_node_type(meta_path, selected_node_type):
+            return False, "Failed to persist nodeType to metadata."
+
+        reconciled, result = reconcile_target_and_wait(selected_node_type)
+        if reconciled:
+            return True, ""
+
+        rollback_target = previous_node_type if previous_node_type in ("lnd", "cln") else None
+        rollback_persisted = _persist_node_type(meta_path, rollback_target)
+        detail = str(result.get("error") or "Dataplane reconciliation failed.")
+        if not rollback_persisted:
+            detail = f"{detail} Failed to restore the previous nodeType."
+        elif rollback_target != selected_node_type:
+            rollback_reconciled, rollback_result = reconcile_target_and_wait(rollback_target)
+            if not rollback_reconciled:
+                rollback_error = str(
+                    rollback_result.get("error") or "Previous target reconciliation failed."
+                )
+                detail = f"{detail} Failed to reconcile the previous target: {rollback_error}"
+        return False, detail
 
     if SECURE_MODE:
+        if not _persist_node_type(meta_path, node_type):
+            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         _, config_path = resolve_node_config(node_type)
         if node_type == "lnd":
             config_lines = [
@@ -3325,6 +3540,11 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
+        # Commit the desired target only after node configuration succeeds, then
+        # wait for the dataplane to confirm that the same target is protected.
+        target_ready, target_error = _persist_and_reconcile_target("lnd")
+        if not target_ready:
+            return jsonify({"success": False, "error": target_error}), 500
         return jsonify(
             {
                 "success": True,
@@ -3376,6 +3596,11 @@ def configure_node():
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
+    # Commit the desired target only after node configuration succeeds, then
+    # wait for the dataplane to confirm that the same target is protected.
+    target_ready, target_error = _persist_and_reconcile_target("cln")
+    if not target_ready:
+        return jsonify({"success": False, "error": target_error}), 500
     return jsonify(
         {
             "success": True,

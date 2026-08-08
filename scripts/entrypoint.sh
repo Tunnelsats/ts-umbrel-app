@@ -11,6 +11,7 @@ RECONCILE_RESULT_DIR="/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_TRIGGER_LEGACY="/tmp/tunnelsats_reconcile_trigger"
 RECONCILE_RESULT_LEGACY="/tmp/tunnelsats_reconcile_result.json"
 RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
+TUNNELSATS_META_PATH="${TUNNELSATS_META_PATH:-/data/tunnelsats-meta.json}"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
@@ -1422,43 +1423,48 @@ detect_k3s_target() {
     K3S_TARGET_POD_NAMESPACE=""
     K3S_TARGET_POD_SELECTOR=""
 
-    local svc_name svc_fqdn svc_ip
-
-    if [ -n "${LND_K8S_SERVICE}" ]; then
-        svc_name="${LND_K8S_SERVICE}"
-        svc_fqdn="${svc_name}.${LND_K8S_NAMESPACE}.svc.cluster.local"
-        svc_ip=$(resolve_svc_ip "${svc_fqdn}" "${svc_name}" || true)
-        if [ -n "${svc_ip}" ]; then
-            TARGET_IMPL="lnd"
-            TARGET_CONTAINER_NAME="${svc_name}"
-            LN_TARGET_PORT="9735"
-            log INFO "k3s: Detected LND service ${svc_fqdn} at ClusterIP ${svc_ip}"
-            # Use the actual pod IP for DNAT and policy routing to avoid asymmetric
-            # routing caused by kube-proxy's double NAT through the ClusterIP.
-            if ! resolve_k3s_target_pod "lnd" "${LND_K8S_NAMESPACE}" "${LND_K8S_POD_SELECTOR}"; then
-                return 1
-            fi
-            return 0
-        fi
-        log WARN "k3s: Could not resolve LND service ${svc_fqdn}"
+    local meta_node=""
+    local impl_order=("lnd" "cln")
+    local impl svc_name svc_fqdn svc_ip namespace selector target_port
+    if [ -f "${TUNNELSATS_META_PATH}" ]; then
+        meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    fi
+    if [ "${meta_node}" = "cln" ]; then
+        impl_order=("cln" "lnd")
     fi
 
-    if [ -n "${CLN_K8S_SERVICE}" ]; then
-        svc_name="${CLN_K8S_SERVICE}"
-        svc_fqdn="${svc_name}.${CLN_K8S_NAMESPACE}.svc.cluster.local"
-        svc_ip=$(resolve_svc_ip "${svc_fqdn}" "${svc_name}" || true)
-        if [ -n "${svc_ip}" ]; then
-            TARGET_IMPL="cln"
-            TARGET_CONTAINER_NAME="${svc_name}"
-            LN_TARGET_PORT="9736"
-            log INFO "k3s: Detected CLN service ${svc_fqdn} at ClusterIP ${svc_ip}"
-            if ! resolve_k3s_target_pod "cln" "${CLN_K8S_NAMESPACE}" "${CLN_K8S_POD_SELECTOR}"; then
-                return 1
-            fi
-            return 0
+    for impl in "${impl_order[@]}"; do
+        if [ "${impl}" = "cln" ]; then
+            svc_name="${CLN_K8S_SERVICE}"
+            namespace="${CLN_K8S_NAMESPACE}"
+            selector="${CLN_K8S_POD_SELECTOR}"
+            target_port="9736"
+        else
+            svc_name="${LND_K8S_SERVICE}"
+            namespace="${LND_K8S_NAMESPACE}"
+            selector="${LND_K8S_POD_SELECTOR}"
+            target_port="9735"
         fi
-        log WARN "k3s: Could not resolve CLN service ${svc_fqdn}"
-    fi
+        [ -n "${svc_name}" ] || continue
+
+        svc_fqdn="${svc_name}.${namespace}.svc.cluster.local"
+        svc_ip=$(resolve_svc_ip "${svc_fqdn}" "${svc_name}" || true)
+        if [ -z "${svc_ip}" ]; then
+            log WARN "k3s: Could not resolve ${impl^^} service ${svc_fqdn}"
+            continue
+        fi
+
+        TARGET_IMPL="${impl}"
+        TARGET_CONTAINER_NAME="${svc_name}"
+        LN_TARGET_PORT="${target_port}"
+        log INFO "k3s: Detected ${impl^^} service ${svc_fqdn} at ClusterIP ${svc_ip}"
+        # Use the actual pod IP for DNAT and policy routing to avoid asymmetric
+        # routing caused by kube-proxy's double NAT through the ClusterIP.
+        if ! resolve_k3s_target_pod "${impl}" "${namespace}" "${selector}"; then
+            return 1
+        fi
+        return 0
+    done
 
     LAST_ERROR="k3s: No LND/CLN service resolved (LND_K8S_SERVICE=${LND_K8S_SERVICE:-}, CLN_K8S_SERVICE=${CLN_K8S_SERVICE:-})"
     return 1
@@ -1491,8 +1497,8 @@ detect_lightning_container() {
 
         # Load metadata node type configuration if available to break ties
         local meta_node=""
-        if [ -f "/data/tunnelsats-meta.json" ]; then
-            meta_node=$(jq -r '.nodeType // empty' /data/tunnelsats-meta.json 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        if [ -f "${TUNNELSATS_META_PATH}" ]; then
+            meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
         fi
 
         # 2. Tie resolution if both TCP probes succeeded
@@ -1525,22 +1531,16 @@ detect_lightning_container() {
         return 1
     fi
 
+    local meta_node=""
+    if [ -f "${TUNNELSATS_META_PATH}" ]; then
+        meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    fi
+
     local containers
     containers=$(docker_api "GET" "/containers/json?all=0") || return 1
 
-    local pick
-    pick=$(echo "${containers}" | jq -r '
-        def cname: (.Names[0] // "") | ltrimstr("/");
-        [ .[]
-          | {id: .Id, name: cname}
-          | select(.name | test("(^|[_-])lnd([_-]|$)"))
-          | select(.name | test("(app|proxy|tor|web|ui)") | not)
-        ]
-        | if length > 0 then .[0] else empty end
-        | "\(.id)|\(.name)|lnd"
-    ')
-
-    if [ -z "${pick}" ]; then
+    local pick=""
+    if [ "${meta_node}" = "cln" ]; then
         pick=$(echo "${containers}" | jq -r '
             def cname: (.Names[0] // "") | ltrimstr("/");
             [ .[]
@@ -1551,6 +1551,41 @@ detect_lightning_container() {
             | if length > 0 then .[0] else empty end
             | "\(.id)|\(.name)|cln"
         ')
+        if [ -z "${pick}" ]; then
+            pick=$(echo "${containers}" | jq -r '
+                def cname: (.Names[0] // "") | ltrimstr("/");
+                [ .[]
+                  | {id: .Id, name: cname}
+                  | select(.name | test("(^|[_-])lnd([_-]|$)"))
+                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
+                ]
+                | if length > 0 then .[0] else empty end
+                | "\(.id)|\(.name)|lnd"
+            ')
+        fi
+    else
+        pick=$(echo "${containers}" | jq -r '
+            def cname: (.Names[0] // "") | ltrimstr("/");
+            [ .[]
+              | {id: .Id, name: cname}
+              | select(.name | test("(^|[_-])lnd([_-]|$)"))
+              | select(.name | test("(app|proxy|tor|web|ui)") | not)
+            ]
+            | if length > 0 then .[0] else empty end
+            | "\(.id)|\(.name)|lnd"
+        ')
+        if [ -z "${pick}" ]; then
+            pick=$(echo "${containers}" | jq -r '
+                def cname: (.Names[0] // "") | ltrimstr("/");
+                [ .[]
+                  | {id: .Id, name: cname}
+                  | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
+                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
+                ]
+                | if length > 0 then .[0] else empty end
+                | "\(.id)|\(.name)|cln"
+            ')
+        fi
     fi
 
     if [ -z "${pick}" ]; then

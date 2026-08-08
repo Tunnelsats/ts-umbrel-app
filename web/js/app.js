@@ -98,6 +98,10 @@ const BADGE_STATES = {
     active: {
         text: "Active",
         className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"
+    },
+    configVerified: {
+        text: "\u24d8 Config Verified",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"
     }
 };
 
@@ -806,14 +810,20 @@ async function fetchStatus() {
         const vpnActive = data.vpn_active === true;
         const lndDetected = data.lnd_detected === true;
         const clnDetected = data.cln_detected === true;
+        const targetImpl = data.target_impl || (clnDetected && !lndDetected ? 'cln' : 'lnd');
         const lndRouting = data.lnd_routing_active === true;
         const clnRouting = data.cln_routing_active === true;
         const hasNode = lndDetected || clnDetected;
-        const routingActive = lndRouting || clnRouting;
+        const routingActive = targetImpl === 'cln' ? clnRouting : lndRouting;
         const rulesSynced = data.rules_synced === true;
+        const targetSwitchPending = data.target_switch_pending === true;
         const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
             ? data.last_error.trim()
-            : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : '');
+            : (targetSwitchPending
+                ? 'Lightning target switch is pending dataplane reconciliation.'
+                : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : ''));
+        const verificationSource = data.announcement_verification_source || null;
+        const isConfigFileVerification = verificationSource === 'config_file';
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
@@ -989,7 +999,11 @@ async function fetchStatus() {
             if (txtRoutingStatus) txtRoutingStatus.textContent = "Hybrid Lightning Connectivity";
             if (btnDashEnable) btnDashEnable.classList.remove('hidden');
         } else {
-            badgeState = BADGE_STATES.active;
+            if (isConfigFileVerification) {
+                badgeState = BADGE_STATES.configVerified;
+            } else {
+                badgeState = BADGE_STATES.active;
+            }
             if (txtRoutingStatus) txtRoutingStatus.textContent = "Node Routing Secured";
             if (btnDashDisable) btnDashDisable.classList.remove('hidden');
         }
@@ -997,6 +1011,26 @@ async function fetchStatus() {
         if (badgeRouting && badgeState) {
             badgeRouting.textContent = badgeState.text;
             badgeRouting.className = badgeState.className;
+            if (isConfigFileVerification && data.announcement_verified === true && !dataplaneError) {
+                const targetImpl = data.target_impl || (data.cln_detected ? 'cln' : 'lnd');
+                const configFileName = targetImpl === 'cln' ? 'config.cln' : (targetImpl === 'lnd' ? 'lnd.conf' : 'configuration');
+                badgeRouting.title = `Gossip announcement verified via node ${configFileName}`;
+            } else {
+                badgeRouting.removeAttribute('title');
+            }
+        }
+
+        // Subtle routing verification subtitle
+        const txtRoutingSubtitle = document.getElementById('txt-routing-subtitle');
+        if (txtRoutingSubtitle) {
+            const showSubtitle = isConfigFileVerification && !dataplaneError && routingActive && rulesSynced;
+            if (showSubtitle) {
+                txtRoutingSubtitle.textContent = "Verified via node configuration";
+                txtRoutingSubtitle.classList.remove('hidden');
+            } else {
+                txtRoutingSubtitle.textContent = "";
+                txtRoutingSubtitle.classList.add('hidden');
+            }
         }
 
         // Update Dashboard Banner

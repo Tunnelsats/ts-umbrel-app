@@ -34,6 +34,15 @@ def mock_lnd_announcement_cleanup():
     with patch('app.clean_and_verify_lnd_announcements', return_value=(True, [], [])) as mocked:
         yield mocked, original
 
+
+@pytest.fixture(autouse=True)
+def mock_target_reconcile():
+    """Keep configuration tests synchronous; reconciliation-specific tests use the original helper."""
+    original = app_module.reconcile_target_and_wait
+    result = {"state": {"target_impl": "lnd", "rules_synced": True, "last_error": None}}
+    with patch('app.reconcile_target_and_wait', return_value=(True, result)) as mocked:
+        yield mocked, original
+
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
@@ -2097,7 +2106,7 @@ class TestDataplaneAndRegressionFixes:
             )
 
             with open(meta_path, 'w') as f:
-                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com', 'nodeType': 'cln'}, f)
             with open(cln_path, 'w') as f:
                 f.write(original_content)
 
@@ -3200,3 +3209,227 @@ def test_export_config_returns_file_and_404_when_missing(client):
             res_found = client.get('/api/local/export-config')
             assert res_found.status_code == 200
             assert b'PrivateKey=testkey' in res_found.data
+
+
+def test_parse_cln_getinfo_addresses():
+    raw_cln = json.dumps({
+        "id": "0200e0d6a3d224ff99a28c576385d78b1df86a67464f99c9de2774842b5885e155",
+        "address": [
+            {"type": "ipv4", "address": "178.156.167.202", "port": 23217},
+            {"type": "torv3", "address": "db4bzummaxm5emq5w4d5xjowpmr4whduouonujz53stk553vptsulhid.onion", "port": 9735}
+        ]
+    })
+    parsed = app_module._parse_cln_getinfo_addresses(raw_cln)
+    assert parsed == ["178.156.167.202:23217", "db4bzummaxm5emq5w4d5xjowpmr4whduouonujz53stk553vptsulhid.onion:9735"]
+
+
+def test_clean_and_verify_cln_announcements():
+    raw_cln = json.dumps({
+        "address": [{"type": "ipv4", "address": "178.156.167.202", "port": 23217}]
+    })
+    with patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+            patch('app.container_id_by_match', return_value='cln1'), \
+            patch('app.docker_exec', return_value=(True, raw_cln)), \
+            patch('socket.gethostbyname_ex', return_value=('us3.tunnelsats.com', [], ['178.156.167.202'])):
+        ok, removed, conflicts = app_module.clean_and_verify_cln_announcements('us3.tunnelsats.com', 23217, True)
+        assert ok is True
+        assert conflicts == []
+
+
+def test_update_announcement_metadata_cln():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, "tunnelsats-meta.json")
+        initial_data = {
+            "serverDomain": "us3.tunnelsats.com",
+            "vpnPort": 23217,
+            "expiresAt": "2027-05-10T13:19:06.000Z",
+            "subscriptionHash": "abc123hash",
+        }
+        with open(meta_path, "w") as f:
+            json.dump(initial_data, f)
+
+        verification = {"endpoint": "us3.tunnelsats.com:23217", "verified": True}
+        ok = app_module._update_announcement_metadata(meta_path, "cln", verification=verification)
+        assert ok is True
+        with open(meta_path, "r") as f:
+            data = json.load(f)
+        assert data["clnAnnouncementVerification"] == verification
+        assert data["serverDomain"] == "us3.tunnelsats.com"
+        assert data["vpnPort"] == 23217
+        assert data["expiresAt"] == "2027-05-10T13:19:06.000Z"
+        assert data["subscriptionHash"] == "abc123hash"
+
+
+def test_audit_node_announcement_config_requires_tunnelsats_endpoint():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_conf = os.path.join(tmp_dir, "lnd.conf")
+        with open(lnd_conf, "w") as f:
+            f.write("[Application Options]\nexternalhosts=someonion.onion:9735\n")
+        res = app_module.audit_node_announcement_config("lnd", lnd_conf, "us3.tunnelsats.com", 23217)
+        assert res["readable"] is True
+        assert res["has_expected_tunnelsats"] is False
+
+
+def test_audit_cln_config_bind_addr_does_not_satisfy_tunnelsats_endpoint():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cln_conf = os.path.join(tmp_dir, "config")
+        with open(cln_conf, "w") as f:
+            f.write("bind-addr=us3.tunnelsats.com:23217\nannounce-addr=someonion.onion:9735\n")
+        res = app_module.audit_node_announcement_config("cln", cln_conf, "us3.tunnelsats.com", 23217)
+        assert res["readable"] is True
+        assert res["has_expected_tunnelsats"] is False
+
+
+def test_status_reports_reconciled_target_while_requested_switch_is_pending(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "cln", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        dataplane = app_module.read_dataplane_state()
+        dataplane.update({
+            "target_impl": "lnd",
+            "target_container": "lightning_lnd_1",
+            "target_ip": "10.21.21.9",
+            "rules_synced": True,
+            "last_error": None,
+        })
+        containers = [
+            {"Names": ["/lightning_lnd_1"], "Id": "lnd1", "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}}},
+            {"Names": ["/lightning_cln_1"], "Id": "cln1", "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.94"}}}},
+        ]
+        with patch('app.DATA_DIR', tmp_dir), patch('app._get_wireguard_state', return_value=('Connected', 'pub123')), \
+                patch('app.list_containers', return_value=containers), \
+                patch('app.read_dataplane_state', return_value=dataplane), \
+                patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
+            res = json.loads(client.get('/api/local/status').data)
+        assert res["target_impl"] == "lnd"
+        assert res["requested_target_impl"] == "cln"
+        assert res["target_switch_pending"] is True
+        assert res["rules_synced"] is False
+        assert res["last_error"] == app_module.TARGET_SWITCH_PENDING_ERROR
+
+
+def test_configure_node_persists_node_type_in_standard_mode(client, mock_target_reconcile):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=True), \
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))), \
+                patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 200
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["nodeType"] == "cln"
+        mock_target_reconcile[0].assert_called_once_with("cln")
+        with open(os.path.join(tmp_dir, 'config'), 'r') as f:
+            assert "announce-addr=us3.tunnelsats.com:23217" in f.read()
+
+
+def test_configure_node_does_not_persist_node_type_on_failure(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "lnd", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=False), \
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 500
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["nodeType"] == "lnd"
+
+
+def test_configure_node_removes_node_type_on_first_time_failure(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=False), \
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 500
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert "nodeType" not in meta
+
+
+def test_configure_node_atomic_persistence_success(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "lnd", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=True), \
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 200
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["nodeType"] == "cln"
+
+
+def test_configure_node_restores_previous_target_when_reconcile_fails(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        cln_path = os.path.join(tmp_dir, 'config')
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "lnd", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+        with open(cln_path, 'w') as f:
+            f.write('')
+
+        failed = {"state": {"target_impl": "lnd", "rules_synced": False}, "error": "switch failed"}
+        restored = {"state": {"target_impl": "lnd", "rules_synced": True}}
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=True), \
+                patch('app.resolve_node_config', return_value=(cln_path, cln_path)), \
+                patch('app.reconcile_target_and_wait', side_effect=[(False, failed), (True, restored)]) as reconcile:
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+
+        assert res.status_code == 500
+        assert json.loads(res.data)["error"] == "switch failed"
+        with open(meta_path, 'r') as f:
+            assert json.load(f)["nodeType"] == "lnd"
+        assert [call.args[0] for call in reconcile.call_args_list] == ["cln", "lnd"]
+
+
+def test_reconcile_target_and_wait_rejects_a_different_synced_target(mock_target_reconcile):
+    original_reconcile = mock_target_reconcile[1]
+    result = {
+        "request_id": "request-1",
+        "state": {"target_impl": "lnd", "rules_synced": True, "last_error": None},
+    }
+    with patch('app.uuid.uuid4', return_value='request-1'), \
+            patch('app.ensure_reconcile_dirs'), \
+            patch('app.atomic_write_text'), \
+            patch('app.read_reconcile_result', return_value=result):
+        ok, detail = original_reconcile("cln", timeout=1)
+
+    assert ok is False
+    assert "does not match requested target cln" in detail["error"]

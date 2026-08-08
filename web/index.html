@@ -116,6 +116,7 @@
                         <div id="txt-routing-status" class="text-xl font-bold text-white mt-4">
                             <span class="skeleton w-48 h-6"></span>
                         </div>
+                        <p id="txt-routing-subtitle" class="text-xs text-gray-400 mt-1 hidden"></p>
                         <p id="txt-routing-error"
                             class="hidden mt-3 rounded-lg border border-red-800/70 bg-red-950/40 p-3 font-mono text-xs text-red-300 break-words">
                         </p>
@@ -886,6 +887,7 @@
                             </h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p>To comply with Umbrel's official security rules, TunnelSats runs in a hardened sandbox (without root system access or direct access to the Docker socket). Consequently, it cannot write to your node's config files or trigger container restarts automatically.</p>
+                                <p class="text-tsgreen font-semibold font-mono text-xs bg-green-950/30 border border-green-800/40 p-2.5 rounded-lg">ⓘ Dashboard Status Note: In Secure Mode, the routing badge displays <strong>Config Verified</strong> because TunnelSats audits your <code>lnd.conf</code> file directly to confirm your external IP/port announcement settings.</p>
                                 <p class="text-tsyellow font-semibold">Without these manual config changes, your Lightning node will not broadcast its TunnelSats clearnet IP/port to the gossip network. This means other nodes will not know how to connect to you, and inbound channel opens will fail.</p>
                                 <p class="text-red-300 font-semibold">Before adding TunnelSats, remove/comment LND <code>externalip=</code> values and set <code>nat=false</code>, or remove non-TunnelSats CLN <code>announce-addr=</code> values and set <code>ip-discovery=false</code>. Deliberate Tor <code>.onion</code> announcements may be retained.</p>
                                 <h4 class="text-white font-semibold mt-4 mb-2">How to apply manually:</h4>

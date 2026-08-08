@@ -88,7 +88,7 @@ run_node() {
     SECURE_MODE_VAL="${SECURE_MODE:-false}"
     (
         echo "SSHPASS=\"${SSHPASS}\""
-        echo "SECURE_MODE=\"${SECURE_MODE_VAL}\""
+        echo "SECURE_MODE_VAL=\"${SECURE_MODE_VAL}\""
         cat << 'EOF'
 set -euo pipefail
 APP_ID="tunnelsats"
@@ -98,8 +98,8 @@ UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
 UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
 
 run_sudo() {
-    if [ -n "${SSHPASS}" ]; then
-        printf '%s\n' "${SSHPASS}" | sudo -S "$@"
+    if [ -n "${SSHPASS:-}" ]; then
+        printf '%s\n' "${SSHPASS}" | sudo -S -p "" "$@"
     else
         sudo "$@"
     fi
@@ -110,6 +110,11 @@ run_sudo() {
 # authenticated app_proxy service (image, auth secret, and public port).
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/docker-compose.yml "${UMBREL_COMPOSE}"
 run_sudo cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+TARGET_IMAGE=$(run_sudo grep "image: tunnelsats/ts-umbrel-app:" "${UMBREL_COMPOSE}" | head -n 1 | awk '{print $2}')
+EXISTING_IMAGE=$(run_sudo docker images --format "{{.Repository}}:{{.Tag}}" | grep "^tunnelsats/ts-umbrel-app:" | head -n 1)
+if [ -n "${EXISTING_IMAGE}" ] && [ -n "${TARGET_IMAGE}" ]; then
+    run_sudo docker tag "${EXISTING_IMAGE}" "${TARGET_IMAGE}" || true
+fi
 if ! run_sudo grep -A 3 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "image:"; then
     run_sudo sed -i '/app_proxy:/a \    image: getumbrel/app-proxy:1.7.0' "${UMBREL_COMPOSE}"
 fi
@@ -117,15 +122,19 @@ if ! run_sudo grep -A 15 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "po
     run_sudo sed -i '/app_proxy:/a \    ports:\n      - "9739:9739"\n    volumes:\n      - '"${UMBREL_APP_DATA}"'/umbrel-app.yml:/extra/umbrel-app.yml:ro' "${UMBREL_COMPOSE}"
 fi
 if ! run_sudo grep -A 10 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "UMBREL_AUTH_SECRET"; then
-    run_sudo sed -i '/app_proxy:/,/environment:/ { /environment:/a \      - AUTH_SERVICE_PORT=2000\n      - PROXY_PORT=9739\n      - UMBREL_AUTH_SECRET=DEADBEEF\n      - JWT_SECRET=10e3158d95b3fc002b2b8873f741488887c72e439bd248835cbb1f5fed63f31e\n      - MANAGER_IP=tunnelsats-web\n      - MANAGER_PORT=9740
-}' "${UMBREL_COMPOSE}"
+    run_sudo sed -i 's|APP_PORT: "9740"|APP_PORT: "9740"\n      AUTH_SERVICE_PORT: "2000"\n      PROXY_PORT: "9739"\n      UMBREL_AUTH_SECRET: DEADBEEF\n      JWT_SECRET: 10e3158d95b3fc002b2b8873f741488887c72e439bd248835cbb1f5fed63f31e\n      MANAGER_IP: tunnelsats-web\n      MANAGER_PORT: "9740"|' "${UMBREL_COMPOSE}"
 fi
-run_sudo sed -i "s|SECURE_MODE=\${SECURE_MODE:-false}|SECURE_MODE=${SECURE_MODE}|" "${UMBREL_COMPOSE}"
+run_sudo sed -i "s|SECURE_MODE=\${SECURE_MODE:-false}|SECURE_MODE=${SECURE_MODE_VAL}|" "${UMBREL_COMPOSE}"
+if [ "${SECURE_MODE_VAL}" = "true" ]; then
+    if ! run_sudo grep -A 10 "tunnelsats-web:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
+        run_sudo sed -i 's|MANAGEMENT_TRUSTED_PROXY_HOST=app_proxy|MANAGEMENT_TRUSTED_PROXY_HOST=app_proxy\n      - SECURE_MODE=true|' "${UMBREL_COMPOSE}"
+    fi
+    if ! run_sudo grep -A 10 "tunnelsats-daemon:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
+        run_sudo sed -i 's|MANAGEMENT_BROWSER_SECURITY_ENABLED=false|MANAGEMENT_BROWSER_SECURITY_ENABLED=false\n      - SECURE_MODE=true|' "${UMBREL_COMPOSE}"
+    fi
+fi
 if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
-    run_sudo sed -i '/tunnelsats-web:/,/volumes:/ { /volumes:/a \      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro
-}' "${UMBREL_COMPOSE}"
-    run_sudo sed -i '/tunnelsats-daemon:/,/volumes:/ { /volumes:/a \      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro
-}' "${UMBREL_COMPOSE}"
+    run_sudo sed -i 's|${APP_DATA_DIR}/runtime:/run/tunnelsats|${APP_DATA_DIR}/runtime:/run/tunnelsats\n      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro|g' "${UMBREL_COMPOSE}"
 fi
 umbreld client apps.restart.mutate --appId "${APP_ID}"
 for i in $(seq 1 10); do

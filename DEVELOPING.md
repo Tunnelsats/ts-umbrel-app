@@ -29,6 +29,30 @@ This document explains the repository structure and workflow for the TunnelSats 
 
 ---
 
+## Local Development & Hot-Syncing (`sync.sh node`)
+
+To test code changes directly on a physical or virtual Umbrel node without building Docker images:
+
+### 1. Configure Credentials (`.env.local`)
+Create `.env.local` in the root of the repository (**never commit passwords or credentials — `.env.local` is gitignored**):
+```env
+UMBREL_HOST=umbrel.local
+UMBREL_PASSWORD=your_umbrel_password
+```
+
+### 2. Hot-Patch Code to Node
+Run the hot-sync tool to stage your local `server/`, `web/`, and `scripts/` changes directly to the running Umbrel containers:
+```bash
+# Hot-sync in Standard Mode:
+./scripts/sync.sh node
+
+# Hot-sync in Secure Mode (Official Umbrel App Store mode):
+SECURE_MODE=true ./scripts/sync.sh node
+```
+This automatically mounts local source files into `tunnelsats-web` and `tunnelsats-daemon` containers and restarts them gracefully.
+
+---
+
 ## Release & Versioning Workflow (Step-by-Step Sequence)
 
 To ensure 100% version parity, prevent silent CI release suppression, and maintain clean release notes, follow this exact sequence when preparing a release:
