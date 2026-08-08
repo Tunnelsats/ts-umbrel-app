@@ -690,6 +690,35 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
     });
 
+    test('fetchStatus never reports Protected while a target switch is pending', async () => {
+        global.fetch = csrfFetchMock(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: true,
+                    lnd_routing_active: true,
+                    cln_routing_active: true,
+                    target_impl: 'lnd',
+                    requested_target_impl: 'cln',
+                    target_switch_pending: true,
+                    rules_synced: true,
+                    last_error: null,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    announcement_verified: true,
+                    announcement_verification_source: 'live_gossip'
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+        expect(document.getElementById('txt-routing-error').textContent).toContain('pending dataplane reconciliation');
+    });
+
     test('fetchStatus shows green Active badge and hides subtitle when verification source is live_gossip', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({

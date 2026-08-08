@@ -131,6 +131,9 @@ ANNOUNCEMENT_CONFLICT_ERROR = (
 ANNOUNCEMENT_VERIFICATION_ERROR = (
     "LND gossip announcements have not been verified free of conflicting clearnet addresses."
 )
+TARGET_SWITCH_PENDING_ERROR = "Lightning target switch is pending dataplane reconciliation."
+RECONCILE_WAIT_TIMEOUT_SECONDS = 60.0
+RECONCILE_WAIT_POLL_SECONDS = 0.1
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").strip().lower() == "true"
@@ -2260,6 +2263,39 @@ def reconcile_result_success(result):
     return False
 
 
+def reconcile_target_and_wait(
+    expected_target: Optional[str],
+    timeout: float = RECONCILE_WAIT_TIMEOUT_SECONDS,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Trigger reconciliation and wait until the dataplane confirms the expected target."""
+    request_id = str(uuid.uuid4())
+    try:
+        ensure_reconcile_dirs()
+        atomic_write_text(reconcile_trigger_path(request_id), f"{request_id}\n")
+    except Exception as exc:
+        return False, {"error": f"Unable to trigger reconcile: {exc}"}
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        result = read_reconcile_result(request_id)
+        if isinstance(result, dict) and result.get("request_id") == request_id:
+            state = result.get("state")
+            if not isinstance(state, dict):
+                return False, {"error": "Reconcile returned an invalid dataplane state."}
+            target_matches = not expected_target or state.get("target_impl") == expected_target
+            success = reconcile_result_success(result) and target_matches
+            if success:
+                return True, result
+            error = state.get("last_error") or (
+                f"Reconciled target {state.get('target_impl') or 'none'} does not match "
+                f"requested target {expected_target}."
+            )
+            return False, {**result, "error": str(error)}
+        time.sleep(RECONCILE_WAIT_POLL_SECONDS)
+
+    return False, {"error": "Timed out waiting for dataplane reconciliation."}
+
+
 @app.before_request
 def restrict_local_api():
     if TUNNELSATS_ROLE == "daemon":
@@ -2992,16 +3028,22 @@ def local_status():
 
     requested_node_type = str(meta_data.get("nodeType", "")).strip().lower()
     dataplane_target = str(dataplane.get("target_impl", "")).strip().lower()
-    if requested_node_type == "cln" and cln_detected:
-        active_target_impl = "cln"
-    elif requested_node_type == "lnd" and lnd_detected:
-        active_target_impl = "lnd"
-    elif dataplane_target == "cln" and cln_detected:
-        active_target_impl = "cln"
-    elif dataplane_target == "lnd" and lnd_detected:
-        active_target_impl = "lnd"
+    requested_target_detected = (
+        (requested_node_type == "cln" and cln_detected)
+        or (requested_node_type == "lnd" and lnd_detected)
+    )
+    if dataplane_target in ("lnd", "cln"):
+        active_target_impl = dataplane_target
+    elif requested_target_detected:
+        active_target_impl = requested_node_type
     else:
         active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))
+
+    requested_target_impl = requested_node_type if requested_node_type in ("lnd", "cln") else None
+    target_switch_pending = bool(
+        requested_target_impl
+        and requested_target_impl != dataplane_target
+    )
 
     active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
     active_detected = cln_detected if active_target_impl == "cln" else lnd_detected
@@ -3057,7 +3099,10 @@ def local_status():
 
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
-    if announcement_conflicts:
+    if target_switch_pending:
+        effective_rules_synced = False
+        effective_error = TARGET_SWITCH_PENDING_ERROR
+    elif announcement_conflicts:
         effective_rules_synced = False
         effective_error = ANNOUNCEMENT_CONFLICT_ERROR
     elif verification_required and not announcement_verified:
@@ -3102,6 +3147,8 @@ def local_status():
             "target_container": dataplane["target_container"],
             "target_ip": dataplane["target_ip"],
             "target_impl": active_target_impl,
+            "requested_target_impl": requested_target_impl,
+            "target_switch_pending": target_switch_pending,
             "announcement_verified": announcement_verified,
             "announcement_verification_source": verification_source,
             "docker_network": dataplane["docker_network"],
@@ -3369,6 +3416,33 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
+        previous_node_type = str(meta.get("nodeType", "")).strip().lower()
+
+        if not _is_metadata_writable(meta_path):
+            return jsonify({"success": False, "error": "Unable to write to metadata file."}), 500
+
+    def _persist_and_reconcile_target(selected_node_type: str):
+        if not _persist_node_type(meta_path, selected_node_type):
+            return False, "Failed to persist nodeType to metadata."
+
+        reconciled, result = reconcile_target_and_wait(selected_node_type)
+        if reconciled:
+            return True, ""
+
+        rollback_target = previous_node_type if previous_node_type in ("lnd", "cln") else None
+        rollback_persisted = _persist_node_type(meta_path, rollback_target)
+        detail = str(result.get("error") or "Dataplane reconciliation failed.")
+        if not rollback_persisted:
+            detail = f"{detail} Failed to restore the previous nodeType."
+        elif rollback_target != selected_node_type:
+            rollback_reconciled, rollback_result = reconcile_target_and_wait(rollback_target)
+            if not rollback_reconciled:
+                rollback_error = str(
+                    rollback_result.get("error") or "Previous target reconciliation failed."
+                )
+                detail = f"{detail} Failed to reconcile the previous target: {rollback_error}"
+        return False, detail
+
     if SECURE_MODE:
         if not _persist_node_type(meta_path, node_type):
             return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
@@ -3466,9 +3540,11 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
-        # Persist selected nodeType to metadata only after LND configuration and announcement verification succeed
-        if not _persist_node_type(meta_path, "lnd"):
-            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
+        # Commit the desired target only after node configuration succeeds, then
+        # wait for the dataplane to confirm that the same target is protected.
+        target_ready, target_error = _persist_and_reconcile_target("lnd")
+        if not target_ready:
+            return jsonify({"success": False, "error": target_error}), 500
         return jsonify(
             {
                 "success": True,
@@ -3520,9 +3596,11 @@ def configure_node():
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
-    # Persist selected nodeType to metadata only after CLN configuration and container restart succeed
-    if not _persist_node_type(meta_path, "cln"):
-        return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
+    # Commit the desired target only after node configuration succeeds, then
+    # wait for the dataplane to confirm that the same target is protected.
+    target_ready, target_error = _persist_and_reconcile_target("cln")
+    if not target_ready:
+        return jsonify({"success": False, "error": target_error}), 500
     return jsonify(
         {
             "success": True,

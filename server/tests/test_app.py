@@ -34,6 +34,15 @@ def mock_lnd_announcement_cleanup():
     with patch('app.clean_and_verify_lnd_announcements', return_value=(True, [], [])) as mocked:
         yield mocked, original
 
+
+@pytest.fixture(autouse=True)
+def mock_target_reconcile():
+    """Keep configuration tests synchronous; reconciliation-specific tests use the original helper."""
+    original = app_module.reconcile_target_and_wait
+    result = {"state": {"target_impl": "lnd", "rules_synced": True, "last_error": None}}
+    with patch('app.reconcile_target_and_wait', return_value=(True, result)) as mocked:
+        yield mocked, original
+
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
@@ -3271,7 +3280,7 @@ def test_audit_cln_config_bind_addr_does_not_satisfy_tunnelsats_endpoint():
         assert res["has_expected_tunnelsats"] is False
 
 
-def test_requested_node_type_cln_precedes_dataplane_target_lnd(client):
+def test_status_reports_reconciled_target_while_requested_switch_is_pending(client):
     with tempfile.TemporaryDirectory() as tmp_dir:
         meta_path = os.path.join(tmp_dir, app_module.META_FILE)
         with open(meta_path, "w") as f:
@@ -3294,10 +3303,14 @@ def test_requested_node_type_cln_precedes_dataplane_target_lnd(client):
                 patch('app.read_dataplane_state', return_value=dataplane), \
                 patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
             res = json.loads(client.get('/api/local/status').data)
-        assert res["target_impl"] == "cln"
+        assert res["target_impl"] == "lnd"
+        assert res["requested_target_impl"] == "cln"
+        assert res["target_switch_pending"] is True
+        assert res["rules_synced"] is False
+        assert res["last_error"] == app_module.TARGET_SWITCH_PENDING_ERROR
 
 
-def test_configure_node_persists_node_type_in_standard_mode(client):
+def test_configure_node_persists_node_type_in_standard_mode(client, mock_target_reconcile):
     with tempfile.TemporaryDirectory() as tmp_dir:
         meta_path = os.path.join(tmp_dir, app_module.META_FILE)
         with open(meta_path, "w") as f:
@@ -3306,7 +3319,7 @@ def test_configure_node_persists_node_type_in_standard_mode(client):
         with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
                 patch('app.container_ids_by_match', return_value=['cln1']), \
                 patch('app.restart_container_by_pattern', return_value=True), \
-                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))), \
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))), \
                 patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
             with open(os.path.join(tmp_dir, 'config'), 'w') as f:
                 f.write('')
@@ -3316,6 +3329,9 @@ def test_configure_node_persists_node_type_in_standard_mode(client):
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         assert meta["nodeType"] == "cln"
+        mock_target_reconcile[0].assert_called_once_with("cln")
+        with open(os.path.join(tmp_dir, 'config'), 'r') as f:
+            assert "announce-addr=us3.tunnelsats.com:23217" in f.read()
 
 
 def test_configure_node_does_not_persist_node_type_on_failure(client):
@@ -3327,7 +3343,7 @@ def test_configure_node_does_not_persist_node_type_on_failure(client):
         with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
                 patch('app.container_ids_by_match', return_value=['cln1']), \
                 patch('app.restart_container_by_pattern', return_value=False), \
-                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))):
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
             with open(os.path.join(tmp_dir, 'config'), 'w') as f:
                 f.write('')
             res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
@@ -3347,7 +3363,7 @@ def test_configure_node_removes_node_type_on_first_time_failure(client):
         with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
                 patch('app.container_ids_by_match', return_value=['cln1']), \
                 patch('app.restart_container_by_pattern', return_value=False), \
-                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))):
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
             with open(os.path.join(tmp_dir, 'config'), 'w') as f:
                 f.write('')
             res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
@@ -3367,7 +3383,7 @@ def test_configure_node_atomic_persistence_success(client):
         with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
                 patch('app.container_ids_by_match', return_value=['cln1']), \
                 patch('app.restart_container_by_pattern', return_value=True), \
-                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))):
+                patch('app.resolve_node_config', return_value=(os.path.join(tmp_dir, 'config'), os.path.join(tmp_dir, 'config'))):
             with open(os.path.join(tmp_dir, 'config'), 'w') as f:
                 f.write('')
             res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
@@ -3376,3 +3392,44 @@ def test_configure_node_atomic_persistence_success(client):
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         assert meta["nodeType"] == "cln"
+
+
+def test_configure_node_restores_previous_target_when_reconcile_fails(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        cln_path = os.path.join(tmp_dir, 'config')
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "lnd", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+        with open(cln_path, 'w') as f:
+            f.write('')
+
+        failed = {"state": {"target_impl": "lnd", "rules_synced": False}, "error": "switch failed"}
+        restored = {"state": {"target_impl": "lnd", "rules_synced": True}}
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=True), \
+                patch('app.resolve_node_config', return_value=(cln_path, cln_path)), \
+                patch('app.reconcile_target_and_wait', side_effect=[(False, failed), (True, restored)]) as reconcile:
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+
+        assert res.status_code == 500
+        assert json.loads(res.data)["error"] == "switch failed"
+        with open(meta_path, 'r') as f:
+            assert json.load(f)["nodeType"] == "lnd"
+        assert [call.args[0] for call in reconcile.call_args_list] == ["cln", "lnd"]
+
+
+def test_reconcile_target_and_wait_rejects_a_different_synced_target(mock_target_reconcile):
+    original_reconcile = mock_target_reconcile[1]
+    result = {
+        "request_id": "request-1",
+        "state": {"target_impl": "lnd", "rules_synced": True, "last_error": None},
+    }
+    with patch('app.uuid.uuid4', return_value='request-1'), \
+            patch('app.ensure_reconcile_dirs'), \
+            patch('app.atomic_write_text'), \
+            patch('app.read_reconcile_result', return_value=result):
+        ok, detail = original_reconcile("cln", timeout=1)
+
+    assert ok is False
+    assert "does not match requested target cln" in detail["error"]

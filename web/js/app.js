@@ -816,9 +816,12 @@ async function fetchStatus() {
         const hasNode = lndDetected || clnDetected;
         const routingActive = targetImpl === 'cln' ? clnRouting : lndRouting;
         const rulesSynced = data.rules_synced === true;
+        const targetSwitchPending = data.target_switch_pending === true;
         const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
             ? data.last_error.trim()
-            : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : '');
+            : (targetSwitchPending
+                ? 'Lightning target switch is pending dataplane reconciliation.'
+                : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : ''));
         const verificationSource = data.announcement_verification_source || null;
         const isConfigFileVerification = verificationSource === 'config_file';
 

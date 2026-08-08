@@ -58,6 +58,37 @@ def test_web_role_dispatches_before_any_privileged_dataplane_startup():
     assert 'exec python3 /app/server/app.py' in source[web_dispatch:kill_switch_start]
 
 
+def test_k3s_target_discovery_honors_persisted_node_type():
+    result = run_bash(
+        r'''
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"cln"}' > "${TUNNELSATS_META_PATH}"
+source "$1"
+
+LND_K8S_SERVICE="lnd"
+CLN_K8S_SERVICE="cln"
+LND_K8S_NAMESPACE="default"
+CLN_K8S_NAMESPACE="default"
+LND_K8S_POD_SELECTOR="app=lnd"
+CLN_K8S_POD_SELECTOR="app=cln"
+
+resolve_svc_ip() { printf '%s\n' "10.43.0.10"; }
+resolve_k3s_target_pod() { DOCKER_TARGET_IP="10.42.0.10"; return 0; }
+
+detect_k3s_target
+[[ "${TARGET_IMPL}" == "cln" ]]
+[[ "${TARGET_CONTAINER_NAME}" == "cln" ]]
+
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+detect_k3s_target
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${TARGET_CONTAINER_NAME}" == "lnd" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_daemon_role_owns_private_socket_directory_and_api_lifecycle():
     source = open(ENTRYPOINT_PATH, encoding="utf-8").read()
 
