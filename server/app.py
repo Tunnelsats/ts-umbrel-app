@@ -3465,6 +3465,7 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
+        # Persist selected nodeType to metadata only after LND configuration and announcement verification succeed
         if not _persist_node_type(meta_path, "lnd"):
             return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         return jsonify(
@@ -3518,6 +3519,7 @@ def configure_node():
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
+    # Persist selected nodeType to metadata only after CLN configuration and container restart succeed
     if not _persist_node_type(meta_path, "cln"):
         return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
     return jsonify(
