@@ -15,3 +15,7 @@
 ## [3.4.0]
 
 - Secure management API with native Umbrel authentication and optimize browser favicon for high-resolution display
+
+## [3.4.1]
+
+- UI status badge indicator distinguishing config_file vs live_gossip verification source
