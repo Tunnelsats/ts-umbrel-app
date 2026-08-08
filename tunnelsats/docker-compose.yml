@@ -10,7 +10,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   tunnelsats-web:
-    image: tunnelsats/ts-umbrel-app:3.4.1
+    image: tunnelsats/ts-umbrel-app:3.4.0
     container_name: tunnelsats-web
     restart: on-failure
     user: "1000:1000"
@@ -31,7 +31,7 @@ services:
       - ${APP_DATA_DIR}/runtime:/run/tunnelsats
 
   tunnelsats-daemon:
-    image: tunnelsats/ts-umbrel-app:3.4.1
+    image: tunnelsats/ts-umbrel-app:3.4.0
     container_name: tunnelsats-daemon
     restart: on-failure
     network_mode: "host"
