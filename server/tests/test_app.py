@@ -3230,12 +3230,25 @@ def test_clean_and_verify_cln_announcements():
 def test_update_announcement_metadata_cln():
     with tempfile.TemporaryDirectory() as tmp_dir:
         meta_path = os.path.join(tmp_dir, "tunnelsats-meta.json")
+        initial_data = {
+            "serverDomain": "us3.tunnelsats.com",
+            "vpnPort": 23217,
+            "expiresAt": "2027-05-10T13:19:06.000Z",
+            "subscriptionHash": "abc123hash",
+        }
+        with open(meta_path, "w") as f:
+            json.dump(initial_data, f)
+
         verification = {"endpoint": "us3.tunnelsats.com:23217", "verified": True}
         ok = app_module._update_announcement_metadata(meta_path, "cln", verification=verification)
         assert ok is True
         with open(meta_path, "r") as f:
             data = json.load(f)
         assert data["clnAnnouncementVerification"] == verification
+        assert data["serverDomain"] == "us3.tunnelsats.com"
+        assert data["vpnPort"] == 23217
+        assert data["expiresAt"] == "2027-05-10T13:19:06.000Z"
+        assert data["subscriptionHash"] == "abc123hash"
 
 
 def test_audit_node_announcement_config_requires_tunnelsats_endpoint():
@@ -3244,5 +3257,15 @@ def test_audit_node_announcement_config_requires_tunnelsats_endpoint():
         with open(lnd_conf, "w") as f:
             f.write("[Application Options]\nexternalhosts=someonion.onion:9735\n")
         res = app_module.audit_node_announcement_config("lnd", lnd_conf, "us3.tunnelsats.com", 23217)
+        assert res["readable"] is True
+        assert res["has_expected_tunnelsats"] is False
+
+
+def test_audit_cln_config_bind_addr_does_not_satisfy_tunnelsats_endpoint():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cln_conf = os.path.join(tmp_dir, "config")
+        with open(cln_conf, "w") as f:
+            f.write("bind-addr=us3.tunnelsats.com:23217\nannounce-addr=someonion.onion:9735\n")
+        res = app_module.audit_node_announcement_config("cln", cln_conf, "us3.tunnelsats.com", 23217)
         assert res["readable"] is True
         assert res["has_expected_tunnelsats"] is False

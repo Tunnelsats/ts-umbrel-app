@@ -969,9 +969,11 @@ def audit_node_announcement_config(
 
     has_tunnelsats = False
     if dns and port:
+        target_key = "externalhosts" if node_type == "lnd" else "announce-addr"
         has_tunnelsats = any(
             _is_expected_tunnelsats_address(entry["value"], dns, port)
             for entry in entries
+            if entry.get("key") == target_key
         )
 
     return {
@@ -1317,9 +1319,9 @@ def _update_announcement_metadata(
             with open(meta_path, "r", encoding="utf-8") as meta_fp:
                 meta = json.load(meta_fp)
         except (IOError, OSError, json.JSONDecodeError):
-            meta = {}
+            return False
         if not isinstance(meta, dict):
-            meta = {}
+            return False
 
         backup_config = meta.get("backupConfig")
         if not isinstance(backup_config, dict):

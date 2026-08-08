@@ -810,10 +810,11 @@ async function fetchStatus() {
         const vpnActive = data.vpn_active === true;
         const lndDetected = data.lnd_detected === true;
         const clnDetected = data.cln_detected === true;
+        const targetImpl = data.target_impl || (clnDetected && !lndDetected ? 'cln' : 'lnd');
         const lndRouting = data.lnd_routing_active === true;
         const clnRouting = data.cln_routing_active === true;
         const hasNode = lndDetected || clnDetected;
-        const routingActive = lndRouting || clnRouting;
+        const routingActive = targetImpl === 'cln' ? clnRouting : lndRouting;
         const rulesSynced = data.rules_synced === true;
         const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
             ? data.last_error.trim()

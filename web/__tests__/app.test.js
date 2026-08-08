@@ -660,6 +660,36 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('badge-routing').hasAttribute('title')).toBe(false);
     });
 
+    test('fetchStatus evaluates routingActive based on target_impl rather than either-node OR', async () => {
+        global.fetch = csrfFetchMock(() =>
+            Promise.resolve({
+                json: () => Promise.resolve({
+                    vpn_active: true,
+                    lnd_detected: true,
+                    cln_detected: true,
+                    lnd_routing_active: false,
+                    cln_routing_active: true,
+                    wg_status: 'Connected',
+                    wg_pubkey: 'testpubkey123',
+                    server_domain: 'au1.tunnelsats.com',
+                    vpn_port: 39486,
+                    expires_at: '2027-03-10T12:00:00Z',
+                    target_impl: 'lnd',
+                    configs_found: [],
+                    version: 'v3.0.0',
+                    rules_synced: true,
+                    last_error: null,
+                    announcement_verification_source: 'live_gossip'
+                }),
+                ok: true
+            })
+        );
+
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+    });
+
     test('fetchStatus shows green Active badge and hides subtitle when verification source is live_gossip', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
