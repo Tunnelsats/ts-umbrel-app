@@ -3352,7 +3352,15 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
+        previous_node_type = str(meta.get("nodeType", "")).strip().lower()
+
+    def _rollback_node_type():
+        if previous_node_type and previous_node_type != node_type:
+            _persist_node_type(meta_path, previous_node_type)
+
     if SECURE_MODE:
+        if not _persist_node_type(meta_path, node_type):
+            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         _, config_path = resolve_node_config(node_type)
         if node_type == "lnd":
             config_lines = [
@@ -3374,8 +3382,6 @@ def configure_node():
             cleanup_lines = ["announce-addr=<non-TunnelSats-address>", "ip-discovery=true"]
             gossip_command = ""
 
-        if not _persist_node_type(meta_path, node_type):
-            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         return jsonify({
             "success": True,
             "manual_mode": True,
@@ -3393,11 +3399,15 @@ def configure_node():
             "dns": dns
         })
 
+    if not _persist_node_type(meta_path, node_type):
+        return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
+
     lnd_pending_key = "lndRestartPending"
     cln_pending_key = "clnRestartPending"
 
     if node_type == "lnd":
         if not lnd_exists():
+            _rollback_node_type()
             app.logger.warning("LND container not found. Skipping configuration.")
             return jsonify({
                 "success": False, 
@@ -3411,6 +3421,7 @@ def configure_node():
 
         audit = audit_node_announcement_config("lnd", LND_CONFIG_PATH, dns, port)
         if audit["conflicts"] and not confirmed:
+            _rollback_node_type()
             return jsonify({
                 "success": False,
                 "requires_confirmation": True,
@@ -3423,11 +3434,13 @@ def configure_node():
         if not _update_announcement_metadata(
             meta_path, "lnd", backup_lines=original_settings, verification=None
         ):
+            _rollback_node_type()
             return jsonify({"success": False, "error": "Failed to back up LND announcement settings."}), 500
         lnd_processed, lnd_changed, _ = apply_node_announcement_protection(
             "lnd", LND_CONFIG_PATH, dns, port, retain_tor
         )
         if not lnd_processed:
+            _rollback_node_type()
             return jsonify({"success": False, "error": "Failed to modify LND config."}), 500
         _set_restart_pending(meta_path, meta, lnd_pending_key, False)
 
@@ -3440,8 +3453,10 @@ def configure_node():
             "remainingConflicts": remaining,
         }
         if not _update_announcement_metadata(meta_path, "lnd", verification=verification):
+            _rollback_node_type()
             return jsonify({"success": False, "error": "Failed to save LND announcement verification."}), 500
         if not verified:
+            _rollback_node_type()
             return jsonify({
                 "success": False,
                 "error": ANNOUNCEMENT_VERIFICATION_ERROR,
@@ -3449,8 +3464,6 @@ def configure_node():
                 "remaining_conflicts": remaining,
             }), 500
 
-        if not _persist_node_type(meta_path, "lnd"):
-            return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         return jsonify(
             {
                 "success": True,
@@ -3466,6 +3479,7 @@ def configure_node():
 
     # CLN target
     if not cln_exists():
+        _rollback_node_type()
         app.logger.warning("CLN container not found. Skipping configuration.")
         return jsonify({
             "success": False, 
@@ -3480,6 +3494,7 @@ def configure_node():
     cln_container_config, _ = resolve_node_config("cln")
     audit = audit_node_announcement_config("cln", cln_container_config, dns, port)
     if audit["conflicts"] and not confirmed:
+        _rollback_node_type()
         return jsonify({
             "success": False,
             "requires_confirmation": True,
@@ -3490,20 +3505,21 @@ def configure_node():
         }), 409
     original_settings = [entry["line"] for entry in audit["settings"]]
     if not _update_announcement_metadata(meta_path, "cln", backup_lines=original_settings):
+        _rollback_node_type()
         return jsonify({"success": False, "error": "Failed to back up CLN announcement settings."}), 500
     cln_processed, cln_changed, _ = apply_node_announcement_protection(
         "cln", cln_container_config, dns, port, retain_tor
     )
     if not cln_processed:
+        _rollback_node_type()
         return jsonify({"success": False, "error": "Failed to modify CLN config."}), 500
 
     if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
         _set_restart_pending(meta_path, meta, cln_pending_key, True)
+        _rollback_node_type()
         return jsonify({"success": False, "error": "Failed to restart CLN container."}), 500
     _set_restart_pending(meta_path, meta, cln_pending_key, False)
 
-    if not _persist_node_type(meta_path, "cln"):
-        return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
     return jsonify(
         {
             "success": True,
