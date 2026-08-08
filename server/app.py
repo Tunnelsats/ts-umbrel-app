@@ -3368,9 +3368,6 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
-        if not _is_metadata_writable(meta_path):
-            return jsonify({"success": False, "error": "Unable to write to metadata file."}), 500
-
     if SECURE_MODE:
         if not _persist_node_type(meta_path, node_type):
             return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
