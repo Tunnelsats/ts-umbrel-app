@@ -2959,11 +2959,13 @@ def local_status():
 
     requested_node_type = str(meta_data.get("nodeType", "")).strip().lower()
     dataplane_target = str(dataplane.get("target_impl", "")).strip().lower()
-    if dataplane_target in ("cln", "lnd") and ((dataplane_target == "cln" and cln_detected) or (dataplane_target == "lnd" and lnd_detected)):
-        active_target_impl = dataplane_target
-    elif requested_node_type == "cln" and cln_detected:
+    if requested_node_type == "cln" and cln_detected:
         active_target_impl = "cln"
     elif requested_node_type == "lnd" and lnd_detected:
+        active_target_impl = "lnd"
+    elif dataplane_target == "cln" and cln_detected:
+        active_target_impl = "cln"
+    elif dataplane_target == "lnd" and lnd_detected:
         active_target_impl = "lnd"
     else:
         active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))

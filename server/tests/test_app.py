@@ -3269,3 +3269,29 @@ def test_audit_cln_config_bind_addr_does_not_satisfy_tunnelsats_endpoint():
         res = app_module.audit_node_announcement_config("cln", cln_conf, "us3.tunnelsats.com", 23217)
         assert res["readable"] is True
         assert res["has_expected_tunnelsats"] is False
+
+
+def test_requested_node_type_cln_precedes_dataplane_target_lnd(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"nodeType": "cln", "serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        dataplane = app_module.read_dataplane_state()
+        dataplane.update({
+            "target_impl": "lnd",
+            "target_container": "lightning_lnd_1",
+            "target_ip": "10.21.21.9",
+            "rules_synced": True,
+            "last_error": None,
+        })
+        containers = [
+            {"Names": ["/lightning_lnd_1"], "Id": "lnd1", "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}}},
+            {"Names": ["/lightning_cln_1"], "Id": "cln1", "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.94"}}}},
+        ]
+        with patch('app.DATA_DIR', tmp_dir), patch('app._get_wireguard_state', return_value=('Connected', 'pub123')), \
+                patch('app.list_containers', return_value=containers), \
+                patch('app.read_dataplane_state', return_value=dataplane), \
+                patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
+            res = json.loads(client.get('/api/local/status').data)
+        assert res["target_impl"] == "cln"
