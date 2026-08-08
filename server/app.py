@@ -1352,15 +1352,20 @@ def _update_announcement_metadata(
             return False
 
 
-def _persist_node_type(meta_path: str, node_type: str) -> bool:
+def _persist_node_type(meta_path: str, node_type: Optional[str]) -> bool:
     with _metadata_lock:
         try:
             with open(meta_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
             if not isinstance(meta, dict):
                 return False
-            if meta.get("nodeType") != node_type:
-                meta["nodeType"] = node_type
+            normalized = str(node_type).strip().lower() if node_type else ""
+            current = str(meta.get("nodeType", "")).strip().lower()
+            if current != normalized:
+                if normalized:
+                    meta["nodeType"] = normalized
+                else:
+                    meta.pop("nodeType", None)
                 _write_file_secure(meta_path, json.dumps(meta, indent=2))
             return True
         except (IOError, OSError, json.JSONDecodeError) as exc:
@@ -3355,8 +3360,8 @@ def configure_node():
         previous_node_type = str(meta.get("nodeType", "")).strip().lower()
 
     def _rollback_node_type():
-        if previous_node_type and previous_node_type != node_type:
-            _persist_node_type(meta_path, previous_node_type)
+        if previous_node_type != node_type:
+            _persist_node_type(meta_path, previous_node_type if previous_node_type else None)
 
     if SECURE_MODE:
         if not _persist_node_type(meta_path, node_type):
