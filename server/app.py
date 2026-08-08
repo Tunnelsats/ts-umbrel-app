@@ -1352,6 +1352,17 @@ def _update_announcement_metadata(
             return False
 
 
+def _is_metadata_writable(meta_path: str) -> bool:
+    try:
+        if not os.path.exists(meta_path):
+            return False
+        with open(meta_path, "r+", encoding="utf-8") as fp:
+            pass
+        return True
+    except (IOError, OSError):
+        return False
+
+
 def _persist_node_type(meta_path: str, node_type: Optional[str]) -> bool:
     with _metadata_lock:
         try:
@@ -3356,6 +3367,9 @@ def configure_node():
 
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
+
+        if not _is_metadata_writable(meta_path):
+            return jsonify({"success": False, "error": "Unable to write to metadata file."}), 500
 
     if SECURE_MODE:
         if not _persist_node_type(meta_path, node_type):
