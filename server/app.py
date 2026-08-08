@@ -3336,14 +3336,13 @@ def configure_node():
         if not dns or port <= 0:
             return jsonify({"success": False, "error": "Metadata is missing vpnPort or serverDomain."}), 400
 
-        if SECURE_MODE:
-            if meta.get("nodeType") != node_type:
-                meta["nodeType"] = node_type
-                try:
-                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
-                except (IOError, OSError) as exc:
-                    app.logger.error(f"Failed to save nodeType to metadata: {exc}")
-                    return jsonify({"success": False, "error": "Failed to update metadata file."}), 500
+        if meta.get("nodeType") != node_type:
+            meta["nodeType"] = node_type
+            try:
+                _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            except (IOError, OSError) as exc:
+                app.logger.error(f"Failed to save nodeType to metadata: {exc}")
+                return jsonify({"success": False, "error": "Failed to update metadata file."}), 500
 
     if SECURE_MODE:
         _, config_path = resolve_node_config(node_type)

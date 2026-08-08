@@ -2097,7 +2097,7 @@ class TestDataplaneAndRegressionFixes:
             )
 
             with open(meta_path, 'w') as f:
-                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com'}, f)
+                json.dump({'vpnPort': 35825, 'serverDomain': 'de2.tunnelsats.com', 'nodeType': 'cln'}, f)
             with open(cln_path, 'w') as f:
                 f.write(original_content)
 
@@ -3295,3 +3295,24 @@ def test_requested_node_type_cln_precedes_dataplane_target_lnd(client):
                 patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
             res = json.loads(client.get('/api/local/status').data)
         assert res["target_impl"] == "cln"
+
+
+def test_configure_node_persists_node_type_in_standard_mode(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"serverDomain": "us3.tunnelsats.com", "vpnPort": 23217}, f)
+
+        with patch('app.DATA_DIR', tmp_dir), patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_ids_by_match', return_value=['cln1']), \
+                patch('app.restart_container_by_pattern', return_value=True), \
+                patch('app.resolve_node_config', return_value=('cln', os.path.join(tmp_dir, 'config'))), \
+                patch('app.clean_and_verify_cln_announcements', return_value=(True, [], [])):
+            with open(os.path.join(tmp_dir, 'config'), 'w') as f:
+                f.write('')
+            res = client.post('/api/local/configure-node', json={"nodeType": "cln"})
+            assert res.status_code == 200
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        assert meta["nodeType"] == "cln"

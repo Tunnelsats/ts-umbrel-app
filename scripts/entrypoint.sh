@@ -1525,22 +1525,16 @@ detect_lightning_container() {
         return 1
     fi
 
+    local meta_node=""
+    if [ -f "/data/tunnelsats-meta.json" ]; then
+        meta_node=$(jq -r '.nodeType // empty' /data/tunnelsats-meta.json 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    fi
+
     local containers
     containers=$(docker_api "GET" "/containers/json?all=0") || return 1
 
-    local pick
-    pick=$(echo "${containers}" | jq -r '
-        def cname: (.Names[0] // "") | ltrimstr("/");
-        [ .[]
-          | {id: .Id, name: cname}
-          | select(.name | test("(^|[_-])lnd([_-]|$)"))
-          | select(.name | test("(app|proxy|tor|web|ui)") | not)
-        ]
-        | if length > 0 then .[0] else empty end
-        | "\(.id)|\(.name)|lnd"
-    ')
-
-    if [ -z "${pick}" ]; then
+    local pick=""
+    if [ "${meta_node}" = "cln" ]; then
         pick=$(echo "${containers}" | jq -r '
             def cname: (.Names[0] // "") | ltrimstr("/");
             [ .[]
@@ -1551,6 +1545,41 @@ detect_lightning_container() {
             | if length > 0 then .[0] else empty end
             | "\(.id)|\(.name)|cln"
         ')
+        if [ -z "${pick}" ]; then
+            pick=$(echo "${containers}" | jq -r '
+                def cname: (.Names[0] // "") | ltrimstr("/");
+                [ .[]
+                  | {id: .Id, name: cname}
+                  | select(.name | test("(^|[_-])lnd([_-]|$)"))
+                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
+                ]
+                | if length > 0 then .[0] else empty end
+                | "\(.id)|\(.name)|lnd"
+            ')
+        fi
+    else
+        pick=$(echo "${containers}" | jq -r '
+            def cname: (.Names[0] // "") | ltrimstr("/");
+            [ .[]
+              | {id: .Id, name: cname}
+              | select(.name | test("(^|[_-])lnd([_-]|$)"))
+              | select(.name | test("(app|proxy|tor|web|ui)") | not)
+            ]
+            | if length > 0 then .[0] else empty end
+            | "\(.id)|\(.name)|lnd"
+        ')
+        if [ -z "${pick}" ]; then
+            pick=$(echo "${containers}" | jq -r '
+                def cname: (.Names[0] // "") | ltrimstr("/");
+                [ .[]
+                  | {id: .Id, name: cname}
+                  | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
+                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
+                ]
+                | if length > 0 then .[0] else empty end
+                | "\(.id)|\(.name)|cln"
+            ')
+        fi
     fi
 
     if [ -z "${pick}" ]; then
