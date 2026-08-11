@@ -1,17 +1,106 @@
 version: 2
 updates:
+  # NPM (Root dependencies)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Berlin"
+    
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      
+      utility-types-major:
+        patterns:
+          - "@types/uuid"
+          - "@types/jest"
+          - "prettier"
+          - "eslint*"
+          - "jest*"
+        update-types:
+          - "major"
+
+    # Prevent Dependabot from suggesting runtime-breaking major updates
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # NPM (Frontend web dependencies)
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Berlin"
+    
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Docker Container Images
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Berlin"
+    
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
     labels:
       - "dependencies"
       - "docker"
-  
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions Workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+    
+    groups:
+      actions-all:
+        patterns:
+          - "*"
+          
     labels:
       - "dependencies"
-      - "actions"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+
