@@ -33,7 +33,7 @@
 - **The Problem**: Writing to `umbrel-lnd.conf` is futile because it is an ephemeral file overwritten on boot by `lightning_app_1`.
 - **The Pattern**:
   1. Write desired changes to the source of truth: `lnd.conf`.
-  2. Restart middleware: `docker restart $(docker ps -q --filter "name=r\"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)(?:[_-]?\d+)?$\"")`.
+  2. Restart middleware: `docker restart $(docker ps -q --filter "name=(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)(?:[_-]?\d+)?$")`.
   3. Sleep for 3 seconds to allow `umbrel-lnd.conf` generation.
   4. Restart daemon: `docker restart $(docker ps -q --filter "name=^lightning[_-]lnd[_-]\d+$")`.
 
@@ -79,9 +79,11 @@ export SSHPASS="$UMBREL_PASSWORD"
 # 1. Sync source directory to Umbrel host
 sshpass -e rsync -avz --exclude "node_modules" --exclude ".venv" ./ "umbrel@$UMBREL_HOST:dev-patch/"
 
-# 2. Copy updated server files into running daemon container
+# 2. Copy updated server and web files into the split containers
 sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/server/. tunnelsats-daemon:/app/server/"
+sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/server/. tunnelsats-web:/app/server/"
+sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/web/. tunnelsats-web:/app/web/"
 
-# 3. Restart daemon container
-sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker restart tunnelsats-daemon"
+# 3. Restart both containers
+sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker restart tunnelsats-web tunnelsats-daemon"
 ```
