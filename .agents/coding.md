@@ -33,7 +33,7 @@
 - **The Problem**: Writing to `umbrel-lnd.conf` is futile because it is an ephemeral file overwritten on boot by `lightning_app_1`.
 - **The Pattern**:
   1. Write desired changes to the source of truth: `lnd.conf`.
-  2. Restart middleware: `docker restart $(docker ps -q --filter "name=^lightning[_-]app[_-]\d+$")`.
+  2. Restart middleware: `docker restart $(docker ps -q --filter "name=r\"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)(?:[_-]?\d+)?$\"")`.
   3. Sleep for 3 seconds to allow `umbrel-lnd.conf` generation.
   4. Restart daemon: `docker restart $(docker ps -q --filter "name=^lightning[_-]lnd[_-]\d+$")`.
 
@@ -61,15 +61,27 @@
 
 ## Deployment & Development Sync
 
-### Manual Umbrel Sync Pattern
-When automated deployment scripts fail due to missing remote dependencies, use the manual sync pattern:
+### Standard Umbrel Synchronization Workflow
+Use the project's maintained synchronization workflow (`scripts/sync.sh node`), which stages source via rsync, safely injects code into the split-container architecture (`tunnelsats-daemon` and `tunnelsats-web`), and securely passes credentials via environment variables without leaking them into process arguments:
+
 ```bash
+# Export password in environment (avoids argument exposure in process lists)
+export UMBREL_PASSWORD="your_node_password"
+export UMBREL_HOST="umbrel.local"
+
+# Run automated hot-patching workflow
+./scripts/sync.sh node
+```
+
+For manual emergency fallback without the script:
+```bash
+export SSHPASS="$UMBREL_PASSWORD"
 # 1. Sync source directory to Umbrel host
-sshpass -p "$PASSWORD" rsync -avz --exclude "node_modules" --exclude ".venv" ./ "umbrel@$HOST:/home/umbrel/tunnelsats/"
+sshpass -e rsync -avz --exclude "node_modules" --exclude ".venv" ./ "umbrel@$UMBREL_HOST:dev-patch/"
 
-# 2. Copy updated files into running container
-sshpass -p "$PASSWORD" ssh "umbrel@$HOST" "sudo docker cp /home/umbrel/tunnelsats/server/. tunnelsats_app_1:/app/server/"
+# 2. Copy updated server files into running daemon container
+sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/server/. tunnelsats-daemon:/app/server/"
 
-# 3. Restart container
-sshpass -p "$PASSWORD" ssh "umbrel@$HOST" "sudo docker restart tunnelsats_app_1"
+# 3. Restart daemon container
+sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker restart tunnelsats-daemon"
 ```
