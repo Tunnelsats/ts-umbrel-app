@@ -104,8 +104,7 @@ class ManagementSecurity:
 
     @staticmethod
     @lru_cache(maxsize=1)
-    def default_gateway_ip(route_path="/proc/net/route"):
-        """Return the lowest-metric usable IPv4 default gateway from procfs."""
+    def _cached_default_gateway_ip(route_path):
         candidates = []
         try:
             with open(route_path, "r", encoding="utf-8") as route_table:
@@ -141,6 +140,14 @@ class ManagementSecurity:
             return None
         return min(candidates, key=lambda candidate: candidate[0])[1]
 
+    @staticmethod
+    def default_gateway_ip(route_path="/proc/net/route"):
+        """Return the lowest-metric usable IPv4 default gateway from procfs."""
+        gateway_ip = ManagementSecurity._cached_default_gateway_ip(route_path)
+        if gateway_ip is None:
+            ManagementSecurity._cached_default_gateway_ip.cache_clear()
+        return gateway_ip
+
     def peer_is_trusted(self, direct_remote_addr, trusted_proxy_host=""):
         """Authenticate an immediate management peer by exact IP identity."""
         try:
@@ -156,12 +163,8 @@ class ManagementSecurity:
         # therefore the host trust boundary; adjacent containers retain their
         # own distinct source addresses and do not match it.
         gateway_ip = self.default_gateway_ip()
-        if gateway_ip:
-            try:
-                if self.normalize_ip(gateway_ip) == direct_ip:
-                    return True
-            except (TypeError, ValueError):
-                pass
+        if gateway_ip and gateway_ip == direct_ip:
+            return True
 
         trusted_host = str(trusted_proxy_host or "").strip()
         if not trusted_host:

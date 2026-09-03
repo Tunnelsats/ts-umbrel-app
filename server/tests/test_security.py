@@ -13,12 +13,10 @@ from security import ManagementSecurity
 
 @pytest.fixture(autouse=True)
 def clear_default_gateway_cache():
-    gateway_lookup = getattr(ManagementSecurity, "default_gateway_ip", None)
-    if gateway_lookup is not None:
-        gateway_lookup.cache_clear()
+    gateway_lookup = ManagementSecurity._cached_default_gateway_ip
+    gateway_lookup.cache_clear()
     yield
-    if gateway_lookup is not None:
-        gateway_lookup.cache_clear()
+    gateway_lookup.cache_clear()
 
 
 def route_table(*rows):
@@ -82,6 +80,21 @@ def test_default_gateway_result_is_cached(tmp_path):
     route_path.write_text(
         route_table(
             "eth0\t00000000\t01001EAC\t0003\t0\t0\t100\t00000000\t0\t0\t0"
+        ),
+        encoding="utf-8",
+    )
+
+    assert ManagementSecurity.default_gateway_ip(str(route_path)) == "172.21.0.1"
+
+
+def test_default_gateway_retries_after_transient_negative_lookup(tmp_path):
+    route_path = tmp_path / "route"
+    route_path.write_text(route_table(), encoding="utf-8")
+    assert ManagementSecurity.default_gateway_ip(str(route_path)) is None
+
+    route_path.write_text(
+        route_table(
+            "eth0\t00000000\t010015AC\t0003\t0\t0\t100\t00000000\t0\t0\t0"
         ),
         encoding="utf-8",
     )

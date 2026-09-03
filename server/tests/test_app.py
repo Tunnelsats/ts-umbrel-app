@@ -210,6 +210,10 @@ def test_management_security_trusts_only_resolved_app_proxy_peer(
     resolved_proxy = [(None, None, None, None, ("172.30.0.2", 0))]
     with patch.dict(
         os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": "app_proxy"}, clear=False
+    ), patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
     ), patch("security.socket.getaddrinfo", return_value=resolved_proxy):
         trusted = client.get(
             "/api/local/session",
