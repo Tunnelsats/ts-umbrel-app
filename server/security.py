@@ -151,6 +151,10 @@ class ManagementSecurity:
         if self.is_loopback_ip(direct_ip):
             return True
 
+        # umbrelOS AppGateway authenticates on the host but exposes no
+        # backend-verifiable credential. Its kernel-assigned gateway address is
+        # therefore the host trust boundary; adjacent containers retain their
+        # own distinct source addresses and do not match it.
         gateway_ip = self.default_gateway_ip()
         if gateway_ip:
             try:

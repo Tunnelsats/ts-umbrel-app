@@ -26,6 +26,23 @@ leave the Umbrel App Store proxy declaration intact.
 - Preserve `tunnelsats/docker-compose.yml`, the frontend, and all dataplane
   behavior.
 
+## Trust Boundary
+
+umbrelOS 2.0 AppGateway authenticates and authorizes the Umbrel session before
+proxying, but it deliberately strips its session cookies and does not provide
+an application-verifiable credential to the upstream service. The exact
+kernel-assigned container gateway address is therefore the only backend-visible
+identity for the host proxy.
+
+Trusting that address includes other processes already executing in the Umbrel
+host network namespace. Such processes are outside this application's threat
+model: host-side execution can already control Docker networking, alter the
+kernel route table used for peer identity, and modify application state. This
+matches the existing management-security design, which excludes arbitrary host
+process execution and root access. The boundary still excludes adjacent
+containers, whose direct connections retain their distinct container source
+addresses.
+
 ## TDD Cycles
 
 ### Cycle 1: Default gateway discovery
