@@ -378,42 +378,17 @@ def client_is_allowed(remote_addr):
     return any(remote_ip in subnet for subnet in ALLOWED_NETWORKS)
 
 
-def is_loopback_ip(remote_addr):
-    return ManagementSecurity.is_loopback_ip(remote_addr)
-
-
 def _get_direct_remote_addr():
     return MANAGEMENT_SECURITY.direct_remote_addr(request.environ)
 
 
 def _management_peer_is_trusted(direct_remote_addr):
-    if is_loopback_ip(direct_remote_addr):
-        return True
-
     trusted_host = os.environ.get("MANAGEMENT_TRUSTED_PROXY_HOST", "").strip()
-    if not trusted_host:
-        return False
-    try:
-        direct_ip = ManagementSecurity.normalize_ip(direct_remote_addr)
-        resolved = socket.getaddrinfo(trusted_host, None, type=socket.SOCK_STREAM)
-    except (OSError, ValueError):
-        return False
-
-    for result in resolved:
-        try:
-            if ManagementSecurity.normalize_ip(result[4][0]) == direct_ip:
-                return True
-        except (IndexError, TypeError, ValueError):
-            continue
-    return False
+    return MANAGEMENT_SECURITY.peer_is_trusted(direct_remote_addr, trusted_host)
 
 
-def _management_host_is_allowed(raw_host, direct_remote_addr=None):
-    direct_remote_addr = direct_remote_addr or _get_direct_remote_addr()
-    return (
-        MANAGEMENT_SECURITY.parse_host_authority(raw_host) is not None
-        and _management_peer_is_trusted(direct_remote_addr)
-    )
+def _management_host_is_allowed(raw_host):
+    return MANAGEMENT_SECURITY.host_is_allowed(raw_host)
 
 
 def _origin_matches_request(raw_origin):
@@ -2308,7 +2283,11 @@ def restrict_local_api():
         direct_remote_addr = _get_direct_remote_addr()
         if not _management_peer_is_trusted(direct_remote_addr):
             return _management_security_error("direct-peer")
-        if not _management_host_is_allowed(request.host, direct_remote_addr):
+        # ProxyFix exposes the forwarded client as request.remote_addr. Use it
+        # only after authenticating the original socket peer above.
+        if not client_is_allowed(request.remote_addr):
+            return _management_security_error("client-ip")
+        if not _management_host_is_allowed(request.host):
             return _management_security_error("host")
         changes_state = _management_request_changes_state()
         requires_csrf = _management_request_requires_csrf()
@@ -2334,7 +2313,7 @@ def restrict_local_api():
     if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
         direct_remote_addr = _get_direct_remote_addr()
 
-        # Trust X-Forwarded-For only when the immediate peer is loopback (local reverse proxy).
+        # Trust X-Forwarded-For only after authenticating the immediate proxy peer.
         # Direct clients can otherwise spoof forwarded headers to bypass local-network checks.
         if _management_peer_is_trusted(direct_remote_addr):
             effective_remote_addr = request.remote_addr

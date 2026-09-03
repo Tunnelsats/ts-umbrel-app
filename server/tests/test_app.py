@@ -210,7 +210,7 @@ def test_management_security_trusts_only_resolved_app_proxy_peer(
     resolved_proxy = [(None, None, None, None, ("172.30.0.2", 0))]
     with patch.dict(
         os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": "app_proxy"}, clear=False
-    ), patch("app.socket.getaddrinfo", return_value=resolved_proxy):
+    ), patch("security.socket.getaddrinfo", return_value=resolved_proxy):
         trusted = client.get(
             "/api/local/session",
             environ_base={"REMOTE_ADDR": "172.30.0.2"},
@@ -224,6 +224,159 @@ def test_management_security_trusts_only_resolved_app_proxy_peer(
 
     assert trusted.status_code == 200
     assert untrusted.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "forwarded_client",
+    ["192.168.1.20", "10.0.0.20", "172.16.0.20", "100.100.10.20", "fd00::20"],
+)
+def test_management_security_accepts_allowed_clients_through_default_gateway(
+    client, management_browser_security, forwarded_client
+):
+    with patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
+    ), patch.dict(
+        os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": "app_proxy"}, clear=False
+    ), patch(
+        "security.socket.getaddrinfo", side_effect=AssertionError("DNS lookup")
+    ):
+        response = client.get(
+            "/api/local/session",
+            environ_base={"REMOTE_ADDR": "172.30.0.1"},
+            headers={
+                "Host": "umbrel.local:9739",
+                "X-Forwarded-For": forwarded_client,
+            },
+        )
+
+    assert response.status_code == 200
+
+
+def test_gateway_proxy_reaches_web_role_daemon_transport(
+    client, management_browser_security
+):
+    daemon_response = UnixHTTPResponse(
+        status=200,
+        reason="OK",
+        headers=(("Content-Type", "application/json"),),
+        body=b'{"wg_status":"Connected"}',
+    )
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
+    ), patch(
+        "app.request_over_unix_socket", return_value=daemon_response
+    ) as request_daemon:
+        response = client.get(
+            "/api/local/status",
+            environ_base={"REMOTE_ADDR": "172.30.0.1"},
+            headers={
+                "Host": "umbrel.local:9739",
+                "X-Forwarded-For": "192.168.1.20",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"wg_status": "Connected"}
+    assert request_daemon.call_args.args[:3] == (
+        app_module.DAEMON_SOCKET_PATH,
+        "GET",
+        "/api/local/status",
+    )
+
+
+@pytest.mark.parametrize("forwarded_client", ["8.8.8.8", "203.0.113.20", "not-an-ip"])
+def test_gateway_proxy_rejects_disallowed_forwarded_clients(
+    client, management_browser_security, forwarded_client
+):
+    with patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
+    ):
+        response = client.get(
+            "/api/local/session",
+            environ_base={"REMOTE_ADDR": "172.30.0.1"},
+            headers={
+                "Host": "umbrel.local:9739",
+                "X-Forwarded-For": forwarded_client,
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+
+
+def test_unrelated_bridge_peer_cannot_inject_forwarded_client(
+    client, management_browser_security, caplog
+):
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
+    ), patch.dict(
+        os.environ, {"MANAGEMENT_TRUSTED_PROXY_HOST": ""}, clear=False
+    ), patch(
+        "app.request_over_unix_socket"
+    ) as request_daemon:
+        response = client.get(
+            "/api/local/status",
+            environ_base={"REMOTE_ADDR": "172.30.0.3"},
+            headers={
+                "Host": "umbrel.local:9739",
+                "X-Forwarded-For": "192.168.1.20",
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"success": False, "error": "Forbidden"}
+    assert "reason=direct-peer" in caplog.text
+    request_daemon.assert_not_called()
+
+
+def test_gateway_proxy_preserves_origin_and_csrf_checks(
+    client, management_browser_security
+):
+    proxy_headers = {
+        "Host": "umbrel.local:9739",
+        "X-Forwarded-For": "192.168.1.20",
+        "X-Forwarded-Host": "umbrel.local:9739",
+        "X-Forwarded-Proto": "https",
+    }
+    with patch.object(
+        app_module.MANAGEMENT_SECURITY,
+        "default_gateway_ip",
+        return_value="172.30.0.1",
+    ):
+        session = client.get(
+            "/api/local/session",
+            environ_base={"REMOTE_ADDR": "172.30.0.1"},
+            headers=proxy_headers,
+        )
+        csrf_token = session.get_json()["csrf_token"]
+        rejected = client.post(
+            "/api/local/restart",
+            environ_base={"REMOTE_ADDR": "172.30.0.1"},
+            headers=proxy_headers,
+        )
+        with patch("builtins.open", MagicMock()):
+            accepted = client.post(
+                "/api/local/restart",
+                environ_base={"REMOTE_ADDR": "172.30.0.1"},
+                headers={
+                    **proxy_headers,
+                    "Origin": "https://umbrel.local:9739",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-TunnelSats-CSRF-Token": csrf_token,
+                },
+            )
+
+    assert session.status_code == 200
+    assert rejected.status_code == 403
+    assert accepted.status_code == 200
 
 
 @pytest.mark.parametrize("secure_mode", [False, True])
