@@ -37,7 +37,7 @@ app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.4.1"
+APP_VERSION = "v3.4.2"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:

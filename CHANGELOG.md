@@ -19,3 +19,7 @@
 ## [3.4.1]
 
 - UI status badge indicator distinguishing config_file vs live_gossip verification source
+
+## [3.4.2]
+
+- Fix ingress reverse proxy authentication on umbrelOS 2.0+ host gateway while preserving full umbrelOS 1.6.x backward compatibility
