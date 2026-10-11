@@ -3751,6 +3751,73 @@ def test_restore_node_fails_closed_without_decommissioning_when_restart_or_confi
         decommission_mock.assert_not_called()
 
 
+def test_restore_node_rejects_restore_when_node_running_state_lookup_fails(
+    client, mock_dataplane_decommission
+):
+    decommission_mock = mock_dataplane_decommission[0]
+    assert decommission_mock is not None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        cln_path = os.path.join(tmp_dir, "config")
+        original_lnd = "[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n"
+        with open(lnd_path, "w") as f:
+            f.write(original_lnd)
+
+        # 1. Kubernetes lookup timeout/error in K3S_MODE must reject restore before touching configs or decommissioning
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
+                patch("app._k8s_session.get", side_effect=requests.Timeout("k8s api timeout")):
+            res_k8s = client.post("/api/local/restore-node")
+
+        assert res_k8s.status_code == 500
+        err_k8s = json.loads(res_k8s.data)["error"]
+        assert "Failed to determine LND running state." in err_k8s
+        decommission_mock.assert_not_called()
+        with open(lnd_path, "r") as f:
+            assert f.read() == original_lnd
+
+        # 2. Docker lookup failure (docker_api -> None) must reject restore before touching configs or decommissioning
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", False), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.docker_api", return_value=None):
+            res_docker = client.post("/api/local/restore-node")
+
+        assert res_docker.status_code == 500
+        err_docker = json.loads(res_docker.data)["error"]
+        assert "Failed to determine LND running state." in err_docker
+        decommission_mock.assert_not_called()
+        with open(lnd_path, "r") as f:
+            assert f.read() == original_lnd
+
+        # 3. Confirmed stopped node (lookup succeeds with empty items) restores config and decommissions without restart
+        empty_k8s_resp = MagicMock()
+        empty_k8s_resp.status_code = 200
+        empty_k8s_resp.json.return_value = {"items": []}
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
+                patch("app._k8s_session.get", return_value=empty_k8s_resp), \
+                patch("app.restart_container_by_pattern") as mock_restart:
+            res_stopped = client.post("/api/local/restore-node")
+
+        assert res_stopped.status_code == 200
+        mock_restart.assert_not_called()
+        decommission_mock.assert_called_once()
+        with open(lnd_path, "r") as f:
+            assert "# externalhosts=de2.tunnelsats.com:35825\n" in f.read()
+
+
+
 def test_restore_node_fails_when_dataplane_decommission_fails(client):
     with tempfile.TemporaryDirectory() as tmp_dir:
         lnd_path = os.path.join(tmp_dir, "lnd.conf")

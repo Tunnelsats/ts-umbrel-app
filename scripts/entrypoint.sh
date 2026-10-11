@@ -210,6 +210,8 @@ K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
 K3S_ISOLATION_RETRY_INTERVAL="${K3S_ISOLATION_RETRY_INTERVAL:-2}"
+K3S_SHUTDOWN_NETPOL_ATTEMPTS="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
+K3S_SHUTDOWN_RETRY_INTERVAL="${K3S_SHUTDOWN_RETRY_INTERVAL:-1}"
 
 API_PID=""
 LAST_RECONCILE_EPOCH=0
@@ -4714,12 +4716,14 @@ preserve_fail_closed_dataplane() {
         fi
         local guard_ok=false
         local blackhole_ok=false
+        local quarantine_ok=false
+        local policy_ok=false
         if [ -n "${target_ip}" ]; then
             MANAGED_K3S_TARGET_IP="${target_ip}"
-            MANAGED_K3S_TARGET_IMPL="${TARGET_IMPL:-}"
-            MANAGED_K3S_POD_NAME="${K3S_TARGET_POD_NAME:-}"
-            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-}"
-            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-}"
+            MANAGED_K3S_TARGET_IMPL="${TARGET_IMPL:-${MANAGED_K3S_TARGET_IMPL:-}}"
+            MANAGED_K3S_POD_NAME="${K3S_TARGET_POD_NAME:-${MANAGED_K3S_POD_NAME:-}}"
+            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
             K3S_POLICY_STATE_LOADED="true"
             persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
             if ensure_k3s_egress_guard "${target_ip}"; then
@@ -4732,24 +4736,76 @@ preserve_fail_closed_dataplane() {
                 blackhole_ok=true
             fi
             if [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ]; then
-                ensure_k3s_subnet_quarantine "${target_ip}" || true
+                if ensure_k3s_subnet_quarantine "${target_ip}"; then
+                    quarantine_ok=true
+                fi
             fi
         else
-            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-}"
-            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-}"
+            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
             K3S_POLICY_STATE_LOADED="true"
             persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
         fi
         # Always install selector-based emergency NetworkPolicy before exiting or
         # restarting so any controller-created replacement Lightning pod (with a
         # new IP) is also fail-closed while TunnelSats is stopped.
-        ensure_k3s_emergency_network_policy || true
+        local quarantine_for_netpol=false
+        if ensure_k3s_emergency_network_policy; then
+            policy_ok=true
+        elif [ -n "${target_ip}" ] && [ "${quarantine_ok}" = false ]; then
+            # If the Kubernetes API is unavailable on the first attempt, immediately
+            # quarantine the pod CIDR in the kernel so replacement pods scheduled on
+            # this node cannot egress over clearnet while forwarding is removed and
+            # the cluster-wide emergency NetworkPolicy is retried.
+            if ensure_k3s_subnet_quarantine "${target_ip}"; then
+                quarantine_ok=true
+                quarantine_for_netpol=true
+            fi
+        fi
         cleanup_dataplane "--keep-tunnel"
+        if [ "${policy_ok}" = false ]; then
+            local max_attempts="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
+            local attempt=1
+            while [ "${attempt}" -lt "${max_attempts}" ]; do
+                attempt=$((attempt + 1))
+                if [ "${K3S_SHUTDOWN_RETRY_INTERVAL:-1}" -gt 0 ] 2>/dev/null; then
+                    sleep "${K3S_SHUTDOWN_RETRY_INTERVAL}"
+                fi
+                if ensure_k3s_emergency_network_policy; then
+                    policy_ok=true
+                    if [ "${quarantine_for_netpol}" = true ]; then
+                        remove_k3s_subnet_quarantine || true
+                    fi
+                    break
+                fi
+            done
+        fi
+        if [ "${policy_ok}" = false ] || \
+           { [ -n "${target_ip}" ] && [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ] && [ "${quarantine_ok}" = false ]; }; then
+            LAST_ERROR="${LAST_ERROR:-k3s: Failed to establish replacement-pod fail-closed protection during shutdown}"
+            RULES_SYNCED="false"
+            IPV4_RULES_SYNCED="false"
+            write_state
+            log ERROR "${LAST_ERROR}"
+            return 1
+        fi
         return 0
     fi
+    local kill_switch_ok=true
     ensure_reconcile_kill_switch || true
     cleanup_dataplane "--keep-tunnel"
-    ensure_reconcile_kill_switch || true
+    if ! ensure_reconcile_kill_switch; then
+        kill_switch_ok=false
+    fi
+    if [ "${kill_switch_ok}" = false ]; then
+        LAST_ERROR="${LAST_ERROR:-Failed to preserve reconciliation kill switch during shutdown}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        write_state
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+    return 0
 }
 
 restore_saved_decommission_ownership() {
@@ -4969,17 +5025,20 @@ process_decommission_triggers() {
 }
 
 cleanup() {
+    local rc=0
     log INFO "Received SIGTERM. Stopping ${APP_NAME}."
     if [ -n "${API_PID}" ]; then
         kill "${API_PID}" >/dev/null 2>&1 || true
     fi
-    load_decommissioned_state || true
-    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
-        cleanup_dataplane
-    else
-        preserve_fail_closed_dataplane
+    if ! load_decommissioned_state; then
+        DECOMMISSIONED="false"
     fi
-    exit 0
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        cleanup_dataplane || rc=$?
+    else
+        preserve_fail_closed_dataplane || rc=$?
+    fi
+    exit "${rc}"
 }
 
 handle_restart_trigger() {
@@ -4988,7 +5047,7 @@ handle_restart_trigger() {
     DECOMMISSIONED="false"
     persist_decommissioned_state || log WARN "${LAST_ERROR}"
     LAST_ERROR="Restart requested; dataplane remains fail-closed"
-    preserve_fail_closed_dataplane
+    preserve_fail_closed_dataplane || log WARN "${LAST_ERROR}"
     if wg show "${WG_IFACE}" >/dev/null 2>&1; then
         wg-quick down "${WG_CONF_PATH}" >/dev/null 2>&1 \
             || wg-quick down "${WG_IFACE}" >/dev/null 2>&1 \

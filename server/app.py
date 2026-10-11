@@ -1936,17 +1936,20 @@ def k8s_list_pods():
 _k8s_deleted_pod_uids: Dict[Tuple[str, str], str] = {}
 
 
-def k8s_get_pod_name(label_selector, namespace=None):
-    """Return the name of the first Running pod matching label_selector."""
+def _k8s_lookup_pod_name(
+    label_selector, namespace=None, use_cache: bool = True
+) -> Tuple[bool, Optional[str]]:
+    """Return (lookup_ok, pod_name) for the first Running pod matching label_selector."""
     if not label_selector:
-        return None
+        return True, None
     ns = namespace or K8S_NAMESPACE
     cache_key = f"pod_name:{ns}:{label_selector}"
-    cached = _k8s_cache_get(cache_key)
-    if cached is not None:
-        # Cache the negative result too (cached=="") so we don't re-hit the API
-        # in tight loops when a pod is genuinely missing.
-        return cached or None
+    if use_cache:
+        cached = _k8s_cache_get(cache_key)
+        if cached is not None:
+            # Cache the negative result too (cached=="") so we don't re-hit the API
+            # in tight loops when a pod is genuinely missing.
+            return True, (cached or None)
     try:
         with open(K8S_SA_TOKEN_PATH) as f:
             token = f.read().strip()
@@ -1954,19 +1957,41 @@ def k8s_get_pod_name(label_selector, namespace=None):
         url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods?labelSelector={encoded_selector}"
         resp = _k8s_session.get(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=5)
         resp.raise_for_status()
-        for pod in resp.json().get("items", []):
-            if pod.get("status", {}).get("phase") == "Running":
+        body = resp.json()
+        if not isinstance(body, dict) or not isinstance(body.get("items", []), list):
+            return False, None
+        has_indeterminate_pod = False
+        for pod in body.get("items", []):
+            if not isinstance(pod, dict):
+                continue
+            phase = pod.get("status", {}).get("phase")
+            if phase == "Running":
                 meta = pod.get("metadata", {})
                 name = meta["name"]
                 uid = str(meta.get("uid", "") or "").strip()
                 _k8s_cache_set(cache_key, name)
                 if uid:
                     _k8s_cache_set(f"pod_uid:{ns}:{name}", uid)
-                return name
+                return True, name
+            if phase not in ("Succeeded", "Failed"):
+                has_indeterminate_pod = True
+        if has_indeterminate_pod:
+            return False, None
         _k8s_cache_set(cache_key, "")
+        return True, None
     except Exception as exc:
         app.logger.warning(f"k8s pod lookup failed (selector={label_selector}, ns={ns}): {exc}")
-    return None
+        return False, None
+
+
+def k8s_get_pod_name(label_selector, namespace=None):
+    """Return the name of the first Running pod matching label_selector."""
+    _, pod_name = _k8s_lookup_pod_name(label_selector, namespace=namespace, use_cache=True)
+    return pod_name
+
+
+_DEFAULT_K8S_GET_POD_NAME = k8s_get_pod_name
+
 
 
 def k8s_delete_pod(pod_name, namespace=None):
@@ -2145,6 +2170,62 @@ def container_id_by_match(pattern):
     return ids[0] if ids else ""
 
 
+_DEFAULT_LND_EXISTS = lnd_exists
+_DEFAULT_CLN_EXISTS = cln_exists
+_DEFAULT_CONTAINER_IDS_BY_MATCH = container_ids_by_match
+_DEFAULT_CONTAINER_ID_BY_MATCH = container_id_by_match
+
+
+def detect_node_running_state(node_type: str) -> Tuple[bool, bool]:
+    """Return (lookup_ok, is_running) for 'lnd' or 'cln'."""
+    is_lnd = node_type == "lnd"
+    exists_fn = lnd_exists if is_lnd else cln_exists
+    default_exists_fn = _DEFAULT_LND_EXISTS if is_lnd else _DEFAULT_CLN_EXISTS
+    if exists_fn is not default_exists_fn:
+        try:
+            res = exists_fn()
+        except Exception as exc:
+            app.logger.warning(f"{node_type.upper()} running-state check failed: {exc}")
+            return False, False
+        if res is None:
+            return False, False
+        return True, bool(res)
+
+    if SECURE_MODE:
+        probe_ip = LND_PROBE_IP if is_lnd else CLN_PROBE_IP
+        probe_port = LND_PROBE_PORT if is_lnd else CLN_PROBE_PORT
+        return True, bool(check_tcp_port_cached(probe_ip, probe_port))
+
+    if K3S_MODE:
+        selector = LND_K8S_POD_SELECTOR if is_lnd else CLN_K8S_POD_SELECTOR
+        ns = LND_K8S_NAMESPACE if is_lnd else CLN_K8S_NAMESPACE
+        if k8s_get_pod_name is not _DEFAULT_K8S_GET_POD_NAME:
+            try:
+                pod_name = k8s_get_pod_name(selector, namespace=ns)
+            except Exception as exc:
+                app.logger.warning(f"k8s pod lookup failed (selector={selector}, ns={ns}): {exc}")
+                return False, False
+            return True, bool(pod_name)
+        lookup_ok, pod_name = _k8s_lookup_pod_name(selector, namespace=ns, use_cache=False)
+        return lookup_ok, bool(pod_name)
+
+    pattern = LND_CONTAINER_PATTERN if is_lnd else CLN_CONTAINER_PATTERN
+    if container_ids_by_match is not _DEFAULT_CONTAINER_IDS_BY_MATCH:
+        try:
+            ids = container_ids_by_match(pattern)
+        except Exception as exc:
+            app.logger.warning(f"Docker container lookup failed for {node_type}: {exc}")
+            return False, False
+        if ids is None:
+            return False, False
+        return True, bool(ids)
+
+    containers = list_containers()
+    if not isinstance(containers, list):
+        return False, False
+    return True, bool(container_ids_by_match(pattern, containers=containers))
+
+
 def restart_container_by_pattern(pattern, is_lnd=False):
     if K3S_MODE:
         selector = LND_K8S_POD_SELECTOR if is_lnd else CLN_K8S_POD_SELECTOR
@@ -2167,9 +2248,23 @@ def restart_container_by_pattern(pattern, is_lnd=False):
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
     if is_lnd:
         app.logger.info("Triggering LND container restart sequence")
-        
+        preloaded_daemon_id: Optional[str] = None
+        if (
+            container_id_by_match is _DEFAULT_CONTAINER_ID_BY_MATCH
+            and container_ids_by_match is _DEFAULT_CONTAINER_IDS_BY_MATCH
+        ):
+            containers = list_containers()
+            if not isinstance(containers, list):
+                app.logger.error("Failed to list Docker containers for LND restart sequence.")
+                return False
+            middleware_ids = container_ids_by_match(LND_MIDDLEWARE_PATTERN, containers=containers)
+            middleware_id = middleware_ids[0] if middleware_ids else ""
+            daemon_ids = container_ids_by_match(LND_CONTAINER_PATTERN, containers=containers)
+            preloaded_daemon_id = daemon_ids[0] if daemon_ids else ""
+        else:
+            middleware_id = container_id_by_match(LND_MIDDLEWARE_PATTERN)
+
         # 1. Restart middleware if present (excluding proxy)
-        middleware_id = container_id_by_match(LND_MIDDLEWARE_PATTERN)
         if middleware_id:
             app.logger.info(f"Found LND middleware container (ID: {middleware_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{middleware_id}/restart")
@@ -2184,7 +2279,11 @@ def restart_container_by_pattern(pattern, is_lnd=False):
             app.logger.info("No LND middleware container found; proceeding directly to daemon restart.")
         
         # 2. Restart LND daemon
-        daemon_id = container_id_by_match(LND_CONTAINER_PATTERN)
+        daemon_id = (
+            preloaded_daemon_id
+            if preloaded_daemon_id is not None and not middleware_id
+            else container_id_by_match(LND_CONTAINER_PATTERN)
+        )
         if daemon_id:
             app.logger.info(f"Found LND daemon container (ID: {daemon_id[:12]}). Restarting...")
             res = docker_api_post(f"/containers/{daemon_id}/restart")
@@ -3839,8 +3938,14 @@ def restore_node():
 
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
-    lnd_detected = lnd_exists()
-    cln_detected = cln_exists()
+    lnd_lookup_ok, lnd_detected = detect_node_running_state("lnd")
+    cln_lookup_ok, cln_detected = detect_node_running_state("cln")
+    if not lnd_lookup_ok:
+        errors.append("Failed to determine LND running state.")
+    if not cln_lookup_ok:
+        errors.append("Failed to determine CLN running state.")
+    if errors:
+        return jsonify({"success": False, "error": " ".join(errors)}), 500
 
     meta_path = os.path.join(DATA_DIR, META_FILE)
     meta: Dict[str, Any] = {}

@@ -2493,6 +2493,55 @@ NETPOL_ENSURED=0
 cleanup
 [[ "${QUARANTINE_ENSURED}" == "0" ]]
 [[ "${NETPOL_ENSURED}" == "1" ]]
+
+# When the Kubernetes API is unavailable during SIGTERM (emergency NetworkPolicy
+# creation fails) even though per-pod guard/blackhole succeed, shutdown must
+# install pod-CIDR subnet quarantine to protect replacement pods AND exit non-zero.
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=2
+K3S_SHUTDOWN_RETRY_INTERVAL=0
+DOCKER_TARGET_IP="10.42.1.7"
+QUARANTINE_ENSURED=0
+NETPOL_ATTEMPTS=0
+ensure_k3s_egress_guard() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_subnet_quarantine() {
+    if [[ "$1" == "10.42.1.7" ]]; then
+        QUARANTINE_ENSURED=1
+        return 0
+    fi
+    return 1
+}
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
+    return 1
+}
+unset -f exit
+set +e
+( cleanup )
+CLEANUP_RC=$?
+set -e
+[[ "${CLEANUP_RC}" == "1" ]]
+exit() { return 0; }
+QUARANTINE_ENSURED=0
+NETPOL_ATTEMPTS=0
+! preserve_fail_closed_dataplane
+[[ "${QUARANTINE_ENSURED}" == "1" ]]
+[[ "${NETPOL_ATTEMPTS}" == "2" ]]
+
+# When the first emergency NetworkPolicy attempt fails transiently and the
+# second attempt succeeds, temporary pod-CIDR quarantine is installed during the
+# retry window and then released once the selector policy is active.
+QUARANTINE_ENSURED=0
+SUBNET_QUARANTINE_REMOVED=0
+NETPOL_ATTEMPTS=0
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
+    [[ "${NETPOL_ATTEMPTS}" -ge 2 ]]
+}
+preserve_fail_closed_dataplane
+[[ "${QUARANTINE_ENSURED}" == "1" ]]
+[[ "${SUBNET_QUARANTINE_REMOVED}" == "1" ]]
+[[ "${NETPOL_ATTEMPTS}" == "2" ]]
 '''
     )
 
