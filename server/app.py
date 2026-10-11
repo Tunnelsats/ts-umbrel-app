@@ -111,6 +111,8 @@ STATE_FILE = "/tmp/tunnelsats_state.json"
 RECONCILE_TRIGGER_DIR = "/tmp/tunnelsats_reconcile_trigger.d"
 RECONCILE_RESULT_DIR = "/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_RESULT_LEGACY = "/tmp/tunnelsats_reconcile_result.json"
+DECOMMISSION_TRIGGER_DIR = "/tmp/tunnelsats_decommission_trigger.d"
+DECOMMISSION_RESULT_DIR = "/tmp/tunnelsats_decommission_result.d"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 LND_CONFIG_PATH = "/lightning-data/lnd/lnd.conf"
 CLN_CONFIG_PATH = "/lightning-data/cln/config"
@@ -134,6 +136,10 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
 TARGET_SWITCH_PENDING_ERROR = "Lightning target switch is pending dataplane reconciliation."
 RECONCILE_WAIT_TIMEOUT_SECONDS = 60.0
 RECONCILE_WAIT_POLL_SECONDS = 0.1
+K8S_POD_TERMINATION_TIMEOUT_SECONDS = 30.0
+DAEMON_RESTORE_TIMEOUT_SECONDS = (
+    RECONCILE_WAIT_TIMEOUT_SECONDS + (2 * K8S_POD_TERMINATION_TIMEOUT_SECONDS) + 30.0
+)
 
 # k3s mode: set via env var K3S_MODE=true to use the Kubernetes API instead of the Docker socket
 K3S_MODE = os.environ.get("K3S_MODE", "false").strip().lower() == "true"
@@ -1927,6 +1933,9 @@ def k8s_list_pods():
         return None
 
 
+_k8s_deleted_pod_uids: Dict[Tuple[str, str], str] = {}
+
+
 def k8s_get_pod_name(label_selector, namespace=None):
     """Return the name of the first Running pod matching label_selector."""
     if not label_selector:
@@ -1947,8 +1956,12 @@ def k8s_get_pod_name(label_selector, namespace=None):
         resp.raise_for_status()
         for pod in resp.json().get("items", []):
             if pod.get("status", {}).get("phase") == "Running":
-                name = pod["metadata"]["name"]
+                meta = pod.get("metadata", {})
+                name = meta["name"]
+                uid = str(meta.get("uid", "") or "").strip()
                 _k8s_cache_set(cache_key, name)
+                if uid:
+                    _k8s_cache_set(f"pod_uid:{ns}:{name}", uid)
                 return name
         _k8s_cache_set(cache_key, "")
     except Exception as exc:
@@ -1966,6 +1979,16 @@ def k8s_delete_pod(pod_name, namespace=None):
             token = f.read().strip()
         url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{pod_name}"
         resp = _k8s_session.delete(url, headers={"Authorization": f"Bearer {token}"}, verify=K8S_SA_CA_PATH, timeout=10)
+        if resp.status_code in (200, 202):
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    deleted_uid = str(body.get("metadata", {}).get("uid", "") or "").strip()
+                    if deleted_uid:
+                        with _k8s_cache_lock:
+                            _k8s_deleted_pod_uids[(ns, pod_name)] = deleted_uid
+            except Exception:
+                pass
         # Invalidate the cache so the next list/lookup sees the post-delete state
         # (the Deployment will spin up a new pod with a different name+IP).
         with _k8s_cache_lock:
@@ -1974,6 +1997,57 @@ def k8s_delete_pod(pod_name, namespace=None):
     except Exception as exc:
         app.logger.warning(f"k8s pod deletion failed ({pod_name}, ns={ns}): {exc}")
         return False
+
+
+def k8s_wait_for_pod_termination(pod_name, namespace=None, pod_uid=None, timeout=30.0):
+    """Wait until the deleted pod has stopped (404, terminal phase, or replaced by a new UID)."""
+    if not pod_name:
+        return False
+    ns = namespace or K8S_NAMESPACE
+    if not pod_uid:
+        with _k8s_cache_lock:
+            pod_uid = _k8s_deleted_pod_uids.get((ns, pod_name))
+    url = f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{pod_name}"
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            with open(K8S_SA_TOKEN_PATH) as f:
+                token = f.read().strip()
+            resp = _k8s_session.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                verify=K8S_SA_CA_PATH,
+                timeout=5,
+            )
+            if resp.status_code == 404:
+                with _k8s_cache_lock:
+                    _k8s_cache.clear()
+                    _k8s_deleted_pod_uids.pop((ns, pod_name), None)
+                return True
+            if resp.status_code == 200:
+                body = resp.json()
+                meta = body.get("metadata", {}) if isinstance(body, dict) else {}
+                status = body.get("status", {}) if isinstance(body, dict) else {}
+                phase = status.get("phase")
+                current_uid = str(meta.get("uid", "") or "").strip()
+                deletion_ts = meta.get("deletionTimestamp")
+                if phase in ("Succeeded", "Failed"):
+                    with _k8s_cache_lock:
+                        _k8s_cache.clear()
+                        _k8s_deleted_pod_uids.pop((ns, pod_name), None)
+                    return True
+                if pod_uid and current_uid and current_uid != pod_uid and not deletion_ts:
+                    with _k8s_cache_lock:
+                        _k8s_cache.clear()
+                        _k8s_deleted_pod_uids.pop((ns, pod_name), None)
+                    return True
+        except Exception as exc:
+            app.logger.warning(f"k8s pod termination check failed ({pod_name}, ns={ns}): {exc}")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    app.logger.error(f"k8s: Timed out waiting for pod {pod_name} in ns={ns} to terminate")
+    return False
 
 
 def list_containers():
@@ -2080,10 +2154,15 @@ def restart_container_by_pattern(pattern, is_lnd=False):
         if not pod_name:
             app.logger.error(f"k3s: No Running pod found for selector {selector} in ns={ns}")
             return False
+        pod_uid = _k8s_cache_get(f"pod_uid:{ns}:{pod_name}")
         app.logger.info(f"k3s: Deleting pod {pod_name} (Deployment will recreate it)")
         result = k8s_delete_pod(pod_name, namespace=ns)
         app.logger.info(f"k3s: Pod deletion {'successful' if result else 'failed'}")
-        return result
+        if not result:
+            return False
+        if not k8s_wait_for_pod_termination(pod_name, namespace=ns, pod_uid=pod_uid):
+            return False
+        return True
 
     # Specialized LND event chain to accommodate umbrelOS Node.js middleware
     if is_lnd:
@@ -2145,6 +2224,7 @@ def read_dataplane_state():
         "rules_synced": False,
         "ipv4_rules_synced": False,
         "ipv6_rules_synced": False,
+        "decommissioned": False,
         "ipv6_policy": "deny",
         "target_ipv6_addresses": [],
         "target_ipv6_default_route": False,
@@ -2191,12 +2271,25 @@ def ensure_reconcile_dirs():
     os.makedirs(RECONCILE_RESULT_DIR, exist_ok=True)
 
 
+def ensure_decommission_dirs():
+    os.makedirs(DECOMMISSION_TRIGGER_DIR, exist_ok=True)
+    os.makedirs(DECOMMISSION_RESULT_DIR, exist_ok=True)
+
+
 def reconcile_trigger_path(request_id):
     return os.path.join(RECONCILE_TRIGGER_DIR, f"{request_id}.trigger")
 
 
 def reconcile_result_path(request_id):
     return os.path.join(RECONCILE_RESULT_DIR, f"{request_id}.json")
+
+
+def decommission_trigger_path(request_id):
+    return os.path.join(DECOMMISSION_TRIGGER_DIR, f"{request_id}.trigger")
+
+
+def decommission_result_path(request_id):
+    return os.path.join(DECOMMISSION_RESULT_DIR, f"{request_id}.json")
 
 
 def atomic_write_text(path, payload):
@@ -2208,6 +2301,18 @@ def atomic_write_text(path, payload):
 
 def read_reconcile_result(request_id):
     result_path = reconcile_result_path(request_id)
+    if not os.path.exists(result_path):
+        return None
+
+    try:
+        with open(result_path, "r", encoding="utf-8") as result_fp:
+            return json.load(result_fp)
+    except Exception:
+        return None
+
+
+def read_decommission_result(request_id):
+    result_path = decommission_result_path(request_id)
     if not os.path.exists(result_path):
         return None
 
@@ -2235,6 +2340,17 @@ def reconcile_result_success(result):
     state = result.get("state", {})
     if isinstance(state, dict):
         return bool(state.get("rules_synced", False))
+    return False
+
+
+def decommission_result_success(result):
+    if not isinstance(result, dict):
+        return False
+    if result.get("decommissioned") is not True:
+        return False
+    state = result.get("state", {})
+    if isinstance(state, dict):
+        return bool(state.get("decommissioned", False))
     return False
 
 
@@ -2269,6 +2385,33 @@ def reconcile_target_and_wait(
         time.sleep(RECONCILE_WAIT_POLL_SECONDS)
 
     return False, {"error": "Timed out waiting for dataplane reconciliation."}
+
+
+def decommission_dataplane_and_wait(
+    timeout: float = RECONCILE_WAIT_TIMEOUT_SECONDS,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Trigger dataplane decommission and wait until the daemon confirms full teardown."""
+    request_id = str(uuid.uuid4())
+    try:
+        ensure_decommission_dirs()
+        atomic_write_text(decommission_trigger_path(request_id), f"{request_id}\n")
+    except Exception as exc:
+        return False, {"error": f"Unable to trigger dataplane decommission: {exc}"}
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        result = read_decommission_result(request_id)
+        if isinstance(result, dict) and result.get("request_id") == request_id:
+            state = result.get("state")
+            if not isinstance(state, dict):
+                return False, {"error": "Decommission returned an invalid dataplane state."}
+            if decommission_result_success(result):
+                return True, result
+            error = state.get("last_error") or "Dataplane decommission failed."
+            return False, {**result, "error": str(error)}
+        time.sleep(RECONCILE_WAIT_POLL_SECONDS)
+
+    return False, {"error": "Timed out waiting for dataplane decommission."}
 
 
 @app.before_request
@@ -2496,13 +2639,18 @@ def dispatch_split_runtime_request():
         if value:
             daemon_headers[header_name] = value
     path = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+    request_kwargs: Dict[str, Any] = {
+        "body": body,
+        "headers": daemon_headers,
+    }
+    if request.path in ("/api/local/restore-node", "/api/local/configure-node"):
+        request_kwargs["timeout"] = DAEMON_RESTORE_TIMEOUT_SECONDS
     try:
         daemon_response = request_over_unix_socket(
             DAEMON_SOCKET_PATH,
             request.method,
             path,
-            body=body,
-            headers=daemon_headers,
+            **request_kwargs,
         )
     except (DaemonUnavailable, ValueError, TypeError):
         app.logger.warning(
@@ -3136,6 +3284,7 @@ def local_status():
             "rules_synced": effective_rules_synced,
             "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
             "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
+            "decommissioned": dataplane.get("decommissioned", False),
             "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
             "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
             "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
@@ -3423,6 +3572,33 @@ def configure_node():
         return False, detail
 
     if SECURE_MODE:
+        confirm_manual_setup = (
+            payload.get("confirmManualConfigure") is True
+            or payload.get("confirmManualSetup") is True
+        )
+        if confirm_manual_setup:
+            target_ready, target_error = _persist_and_reconcile_target(node_type)
+            if not target_ready:
+                return jsonify({
+                    "success": False,
+                    "error": target_error,
+                    "manual_mode": True,
+                    "requires_confirmation": True,
+                    "reconciled": False,
+                    "node_type": node_type,
+                    "port": port,
+                    "dns": dns,
+                }), 500
+            return jsonify({
+                "success": True,
+                "manual_mode": True,
+                "requires_confirmation": False,
+                "reconciled": True,
+                "node_type": node_type,
+                "port": port,
+                "dns": dns,
+            })
+
         if not _persist_node_type(meta_path, node_type):
             return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
         _, config_path = resolve_node_config(node_type)
@@ -3449,6 +3625,8 @@ def configure_node():
         return jsonify({
             "success": True,
             "manual_mode": True,
+            "requires_confirmation": True,
+            "reconciled": False,
             "node_type": node_type,
             "config_path": config_path,
             "config_lines": config_lines,
@@ -3595,6 +3773,13 @@ def configure_node():
 def restore_node():
     app.logger.info("Action Request: Restoring networking to default")
     if SECURE_MODE:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            payload = {}
+        confirmed = bool(
+            payload.get("confirmManualRestore")
+            or payload.get("confirmed")
+        )
         targets = []
         lnd_detected = lnd_exists() or os.path.exists(LND_CONFIG_PATH)
         cln_container_config, _ = resolve_node_config("cln")
@@ -3628,10 +3813,27 @@ def restore_node():
                     "Only re-enable old announce-addr or ip-discovery settings you deliberately want to publish."
                 ],
             })
+        if not confirmed:
+            return jsonify({
+                "success": True,
+                "manual_mode": True,
+                "restore": True,
+                "requires_confirmation": True,
+                "decommissioned": False,
+                "targets": targets
+            })
+        decommissioned, decomm_result = decommission_dataplane_and_wait()
+        if not decommissioned:
+            return jsonify({
+                "success": False,
+                "error": str(decomm_result.get("error") or "Failed to decommission dataplane."),
+            }), 500
         return jsonify({
             "success": True,
             "manual_mode": True,
             "restore": True,
+            "requires_confirmation": False,
+            "decommissioned": True,
             "targets": targets
         })
 
@@ -3656,6 +3858,7 @@ def restore_node():
     except (TypeError, ValueError):
         port = 0
 
+    lnd_config_exists = os.path.exists(LND_CONFIG_PATH)
     lnd_backup = _backup_lines_from_meta(meta, "lnd")
     if lnd_backup is None:
         lnd_processed, lnd_changed = comment_out_config_lines(
@@ -3666,13 +3869,16 @@ def restore_node():
         lnd_processed, lnd_changed = restore_node_announcement_config(
             "lnd", LND_CONFIG_PATH, lnd_backup, dns, port
         )
-    if lnd_processed and lnd_detected:
+    if (lnd_detected or lnd_config_exists or lnd_backup is not None) and not lnd_processed:
+        errors.append("Failed to restore LND configuration.")
+    elif lnd_processed and lnd_detected:
         if not restart_container_by_pattern(LND_CONTAINER_PATTERN, is_lnd=True):
             errors.append("Failed to restart LND container.")
     elif lnd_processed and not lnd_detected:
         app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
 
     cln_container_config, _ = resolve_node_config("cln")
+    cln_config_exists = bool(cln_container_config and os.path.exists(cln_container_config))
     cln_backup = _backup_lines_from_meta(meta, "cln")
     if cln_backup is None:
         cln_processed, cln_changed = comment_out_config_lines(
@@ -3683,7 +3889,9 @@ def restore_node():
         cln_processed, cln_changed = restore_node_announcement_config(
             "cln", cln_container_config, cln_backup, dns, port
         )
-    if cln_processed and cln_detected:
+    if (cln_detected or cln_config_exists or cln_backup is not None) and not cln_processed:
+        errors.append("Failed to restore CLN configuration.")
+    elif cln_processed and cln_detected:
         if not restart_container_by_pattern(CLN_CONTAINER_PATTERN):
             errors.append("Failed to restart CLN container.")
     elif cln_processed and not cln_detected:
@@ -3691,6 +3899,13 @@ def restore_node():
 
     if errors:
         return jsonify({"success": False, "error": " ".join(errors)}), 500
+
+    decommissioned, decomm_result = decommission_dataplane_and_wait()
+    if not decommissioned:
+        return jsonify({
+            "success": False,
+            "error": str(decomm_result.get("error") or "Failed to decommission dataplane."),
+        }), 500
 
     if meta:
         if lnd_processed:
@@ -3704,6 +3919,7 @@ def restore_node():
             "cln": cln_processed,
             "lnd_changed": lnd_changed,
             "cln_changed": cln_changed,
+            "decommissioned": True,
         }
     )
 

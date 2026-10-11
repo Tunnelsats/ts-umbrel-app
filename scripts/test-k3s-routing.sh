@@ -19,6 +19,10 @@ VPN_TMP="w0${TEST_SUFFIX}"
 CLEAR_ROUTER_TMP="cr${TEST_SUFFIX}"
 CLEAR_TMP="c0${TEST_SUFFIX}"
 IPV6_POLICY_STATE="/tmp/tunnelsats-ipv6-policy-${TEST_SUFFIX}.json"
+K3S_POLICY_STATE="/tmp/tunnelsats-k3s-policy-${TEST_SUFFIX}.json"
+K3S_PROTOCOL_STATE="/tmp/tunnelsats-k3s-protocol-${TEST_SUFFIX}"
+DECOMMISSION_STATE="/tmp/tunnelsats-decommissioned-${TEST_SUFFIX}.json"
+STATE_FILE_TMP="/tmp/tunnelsats-state-${TEST_SUFFIX}.json"
 
 cleanup() {
     local namespace
@@ -32,7 +36,12 @@ cleanup() {
     for namespace in "${POD_NS}" "${VPN_NS}" "${CLEAR_NS}" "${ROUTER_NS}"; do
         ip netns del "${namespace}" >/dev/null 2>&1 || true
     done
-    rm -f "${IPV6_POLICY_STATE}" "${IPV6_POLICY_STATE}.tmp."*
+    rm -f \
+        "${IPV6_POLICY_STATE}" "${IPV6_POLICY_STATE}.tmp."* \
+        "${K3S_POLICY_STATE}" "${K3S_POLICY_STATE}.tmp."* \
+        "${K3S_PROTOCOL_STATE}" "${K3S_PROTOCOL_STATE}.tmp."* \
+        "${DECOMMISSION_STATE}" "${DECOMMISSION_STATE}.tmp."* \
+        "${STATE_FILE_TMP}" "${STATE_FILE_TMP}.tmp."*
 }
 trap cleanup EXIT
 
@@ -121,6 +130,8 @@ fi
 ip netns exec "${ROUTER_NS}" env \
     ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
     IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
     bash -c '
         source "${ENTRYPOINT_PATH}"
         K3S_MODE="true"
@@ -204,6 +215,63 @@ ipv6_kill_route="$(
 )"
 if [[ "${ipv6_kill_route}" == *"dev clear0"* ]]; then
     echo "FAIL: IPv6 kill switch fell through to ordinary egress" >&2
+    exit 1
+fi
+
+# SIGTERM shutdown/restart/upgrade preservation must keep the pod fail-closed
+# even after active tunnel/bypass rules are removed.
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        DOCKER_TARGET_IP="10.42.1.7"
+        TARGET_IMPL="lnd"
+        K3S_TARGET_POD_NAME="lnd-0"
+        K3S_TARGET_POD_NAMESPACE="lightning"
+        K3S_TARGET_POD_SELECTOR="app=lnd"
+        ensure_k3s_emergency_network_policy() { return 0; }
+        preserve_fail_closed_dataplane
+    '
+if ip netns exec "${POD_NS}" ping -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: IPv4 traffic escaped during fail-closed SIGTERM preservation" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: IPv6 traffic escaped during fail-closed SIGTERM preservation" >&2
+    exit 1
+fi
+
+# Explicit decommission (Restore Node Networking) removes all fail-closed guards
+# and restores baseline clear-net routing. This standalone netns harness has no
+# Kubernetes API server, so stub the k8s API NetworkPolicy call (covered by unit tests).
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        STATE_FILE="'"${STATE_FILE_TMP}"'"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        remove_k3s_emergency_network_policy() { return 0; }
+        decommission_dataplane
+    '
+if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: baseline IPv4 routing was not restored after explicit decommission" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -6 -c 3 -W 2 2001:db8:100::2 >/dev/null; then
+    echo "FAIL: baseline IPv6 routing was not restored after explicit decommission" >&2
     exit 1
 fi
 

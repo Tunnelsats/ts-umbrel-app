@@ -1616,7 +1616,32 @@ function createModalOverlay(id) {
     return { overlay, panel, closeModal, mountAndAnimate };
 }
 
-function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipCommand = '', historicalWarning = '') {
+async function confirmManualConfigureReconcile(nodeType) {
+    const selectedNodeType = (nodeType || (document.getElementById('node-type-selected') || {}).value || 'lnd').toLowerCase();
+    setActionMessage('configure-node-msg', 'Reconciling TunnelSats routing and network guards...', 'info');
+    try {
+        const res = await managementFetch('/api/local/configure-node', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                nodeType: selectedNodeType,
+                confirmManualConfigure: true
+            })
+        });
+        const data = await safeFetchJson(res);
+        if (res.ok && data.success !== false && data.reconciled !== false) {
+            const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
+            setActionMessage('configure-node-msg', `Node configured successfully: ${location}`, 'success');
+            fetchStatus();
+        } else {
+            setActionMessage('configure-node-msg', data.error || 'Failed to reconcile TunnelSats routing.', 'error');
+        }
+    } catch (e) {
+        setActionMessage('configure-node-msg', `Failed to reconcile TunnelSats routing: ${e.message}`, 'error');
+    }
+}
+
+function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipCommand = '', historicalWarning = '', requiresConfirmation = true) {
     const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-config-modal');
 
     const title = document.createElement('h3');
@@ -1708,6 +1733,7 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
             <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
             <li>For every previously announced clearnet address, replace the placeholder in the command above and run it over SSH.</li>
             <li>Run <code>sudo docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
+            <li>Click <b>Done</b> below after restarting your node to reconcile TunnelSats routing and fail-closed network guards.</li>
         `;
     } else {
         ol.innerHTML = `
@@ -1716,19 +1742,46 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
             <li>Remove/comment non-TunnelSats <code>announce-addr=</code> lines, retain deliberate <code>.onion</code> values if desired, and disable <code>ip-discovery</code>.</li>
             <li>Add or update each TunnelSats configuration line shown above (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Core Lightning</b> app.</li>
+            <li>Click <b>Done</b> below after restarting your node to reconcile TunnelSats routing and fail-closed network guards.</li>
         `;
     }
 
     const doneBtn = document.createElement('button');
+    doneBtn.type = 'button';
     doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
     doneBtn.textContent = 'Done';
-    doneBtn.addEventListener('click', closeModal);
+    doneBtn.addEventListener('click', () => {
+        closeModal();
+        if (requiresConfirmation) {
+            confirmManualConfigureReconcile(nodeType);
+        }
+    });
 
     panel.append(title, desc, pathLabel, pathValContainer, linesLabel, pre, copyLinesBtn, privacyBox, instructionsHeader, ol, doneBtn);
     mountAndAnimate();
 }
 
-function showManualRestoreModal(targets) {
+async function confirmManualRestoreDecommission() {
+    setActionMessage('restore-node-msg', 'Removing fail-closed network guards...', 'info');
+    try {
+        const res = await managementFetch('/api/local/restore-node', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmManualRestore: true })
+        });
+        const data = await safeFetchJson(res);
+        if (res.ok && data.success !== false && data.decommissioned !== false) {
+            setActionMessage('restore-node-msg', 'Restore complete. Fail-closed network guards removed.', 'success');
+            fetchStatus();
+        } else {
+            setActionMessage('restore-node-msg', data.error || 'Failed to remove fail-closed network guards.', 'error');
+        }
+    } catch (e) {
+        setActionMessage('restore-node-msg', `Failed to remove fail-closed network guards: ${e.message}`, 'error');
+    }
+}
+
+function showManualRestoreModal(targets, requiresConfirmation = false) {
     const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-restore-modal');
 
     const title = document.createElement('h3');
@@ -1810,14 +1863,34 @@ function showManualRestoreModal(targets) {
         <li>Navigate to the configuration file path(s) shown above.</li>
         <li>Comment out (add <code>#</code> at the start of the line) or delete each configuration line.</li>
         <li>Go back to the Umbrel dashboard and restart your ${restartStr} app${restartApps.length > 1 ? 's' : ''}.</li>
+        <li>Click <b>Done</b> below only after your node has been restored and restarted to remove the TunnelSats fail-closed network guards.</li>
     `;
 
-    const doneBtn = document.createElement('button');
-    doneBtn.className = 'w-full rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
-    doneBtn.textContent = 'Done';
-    doneBtn.addEventListener('click', closeModal);
+    const actionsRow = document.createElement('div');
+    actionsRow.className = 'flex items-center gap-3';
 
-    panel.append(title, desc, container, instructionsHeader, ol, doneBtn);
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'w-1/3 rounded-xl border border-gray-700 bg-gray-900/70 px-4 py-3.5 text-sm font-semibold text-gray-300 hover:bg-gray-800 transition-all cursor-pointer';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => {
+        setActionMessage('restore-node-msg', 'Manual restore pending; fail-closed network guards remain active.', 'info');
+        closeModal();
+    });
+
+    const doneBtn = document.createElement('button');
+    doneBtn.type = 'button';
+    doneBtn.className = 'w-2/3 rounded-xl bg-gradient-to-r from-tsgreen to-green-500 px-6 py-3.5 text-base font-bold text-black hover:from-green-400 hover:to-green-300 transition-all shadow-lg hover:shadow-tsgreen/20 cursor-pointer';
+    doneBtn.textContent = 'Done';
+    doneBtn.addEventListener('click', () => {
+        closeModal();
+        if (requiresConfirmation) {
+            confirmManualRestoreDecommission();
+        }
+    });
+
+    actionsRow.append(cancelBtn, doneBtn);
+    panel.append(title, desc, container, instructionsHeader, ol, actionsRow);
     mountAndAnimate();
 }
 
@@ -1901,7 +1974,8 @@ async function configureNode() {
                     data.config_lines,
                     data.cleanup_lines,
                     data.gossip_command,
-                    data.historical_warning
+                    data.historical_warning,
+                    data.requires_confirmation !== false
                 );
             } else {
                 const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
@@ -1943,9 +2017,12 @@ async function restoreNode() {
             if (data.manual_mode) {
                 if (!data.targets || data.targets.length === 0) {
                     setActionMessage('restore-node-msg', 'No active Lightning nodes detected for manual restore.', 'info');
+                    if (data.requires_confirmation) {
+                        showManualRestoreModal([], true);
+                    }
                 } else {
                     setActionMessage('restore-node-msg', 'Manual restore required.', 'info');
-                    showManualRestoreModal(data.targets);
+                    showManualRestoreModal(data.targets, Boolean(data.requires_confirmation));
                 }
             } else {
                 const lndState = data.lnd ? (data.lnd_changed ? 'updated' : 'no changes') : 'config not found';

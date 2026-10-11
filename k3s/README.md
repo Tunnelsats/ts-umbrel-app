@@ -11,14 +11,15 @@ LND (and/or CLN) node running in the same cluster.
 # 2. Deploy everything:
 kubectl apply -k k3s/
 
-# Remove everything again (safe — see "Uninstall" below):
+# 3. Before uninstalling, run "Restore Node Networking" in the UI
+#    (POST /api/local/restore-node), then remove the manifests (see "Uninstall" below):
 kubectl delete -k k3s/
 ```
 
 > [!IMPORTANT]
 > The most common setup failures are **namespace/RBAC**, **node co-location**
 > (multi-node clusters only), and **PVC mount paths**. Read the sections below
-> carefully — they cover the errors you are most likely to hit on a first
+> carefully - they cover the errors you are most likely to hit on a first
 > install.
 
 ## 1. Namespace & RBAC
@@ -273,10 +274,31 @@ the config and its directory must be readable/writable by uid/gid 1000.)
 
 ## Uninstall
 
-`kubectl delete -k k3s/` removes only what these manifests
-create: the ServiceAccount, Role, RoleBinding, Service, Deployment, and the
-`tunnelsats-data` PVC. Your **LND/CLN PVC is never touched** — it is only
-*referenced* by `deployment.yaml`, not managed by this kustomization — so your
+By design, `SIGTERM` shutdown, container/pod restarts, and `Recreate`
+Deployment upgrades preserve fail-closed kernel policy routing (`ip rule`),
+`iptables`/`ip6tables` egress guards, and emergency `NetworkPolicy` containment
+on the node so the Lightning pod cannot leak traffic over clearnet while the
+TunnelSats pod is being replaced.
+
+Before deleting the Kubernetes manifests, you **must** decommission those
+node-level fail-closed guards and restore your Lightning node configuration:
+
+1. Open the TunnelSats web UI (or call `POST /api/local/restore-node`) and run
+   **Restore Node Networking** (**Disable Routing (Uninstall)**). This removes
+   the TunnelSats `externalhosts` / `announce-addr` directives, restarts the
+   Lightning pod, and instructs the privileged daemon to decommission its
+   node-level policy routing, firewall, IPv6, and emergency `NetworkPolicy`
+   guards.
+2. Once the restore operation succeeds, remove the Kubernetes manifests:
+
+```sh
+kubectl delete -k k3s/
+```
+
+`kubectl delete -k k3s/` removes only what these manifests create: the
+ServiceAccount, Role, RoleBinding, Service, Deployment, and the
+`tunnelsats-data` PVC. Your **LND/CLN PVC is never touched** - it is only
+*referenced* by `deployment.yaml`, not managed by this kustomization - so your
 `lnd.conf` and channel state are safe.
 
 Verify a clean removal:

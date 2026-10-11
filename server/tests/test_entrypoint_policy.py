@@ -16,6 +16,15 @@ def run_bash(script):
         env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "docker-policy-sources.json"
         )
+        env["IPV6_POLICY_STATE_FILE"] = os.path.join(
+            temp_dir, "ipv6-policy-sources.json"
+        )
+        env["K3S_POLICY_STATE_FILE"] = os.path.join(
+            temp_dir, "k3s-policy-state.json"
+        )
+        env["DECOMMISSION_STATE_FILE"] = os.path.join(
+            temp_dir, "decommissioned.json"
+        )
         env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
@@ -1621,8 +1630,16 @@ def test_k3s_target_resolution_rejects_unready_or_terminating_local_pods():
 source "$1"
 
 TUNNELSATS_K8S_NODE_NAME="worker-a"
+POLICY_ACTIVE=0
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}}]}'
+    if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]; then
+        if [[ "${POLICY_ACTIVE}" == "1" ]]; then
+            printf '%s\n' '{"metadata":{"name":"tunnelsats-emergency-egress-deny","annotations":{"tunnelsats.io/emergency-egress-deny":"true"}},"spec":{"podSelector":{"matchLabels":{"app":"lnd"}},"policyTypes":["Egress"],"egress":[]}}'
+            return 0
+        fi
+        return 1
+    fi
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-unready","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
@@ -1630,6 +1647,12 @@ if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
 fi
 [[ "${LAST_ERROR}" == *"No Ready non-terminating LND pod is co-located"* ]]
 [[ "${LAST_ERROR}" == *"TunnelSats node=worker-a"* ]]
+
+POLICY_ACTIVE=1
+LAST_ERROR=""
+resolve_k3s_target_pod "lnd" "lightning" "app=lnd"
+[[ "${DOCKER_TARGET_IP}" == "10.42.1.5" ]]
+[[ "${K3S_TARGET_POD_NAME}" == "lnd-unready" ]]
 '''
     )
 
@@ -2354,3 +2377,482 @@ cleanup_dataplane
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_k3s_sigterm_cleanup_preserves_fail_closed_guards_while_removing_forwarding():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+API_PID=""
+DELETED_RULES=""
+REMOVED_IPTABLES=""
+EGRESS_GUARD_ENSURED=0
+BLACKHOLE_ENSURED=0
+NETPOL_ENSURED=0
+IPV6_CLEANED=0
+SUBNET_QUARANTINE_REMOVED=0
+RULES=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+
+ensure_k3s_egress_guard() {
+    if [[ "$1" == "10.42.1.7" ]]; then
+        EGRESS_GUARD_ENSURED=1
+        return 0
+    fi
+    return 1
+}
+ensure_fallback_blackhole_rule() {
+    if [[ "$1" == "10.42.1.7" ]]; then
+        BLACKHOLE_ENSURED=1
+        return 0
+    fi
+    return 1
+}
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ENSURED=1
+    return 0
+}
+remove_tagged_iptables_rules() {
+    REMOVED_IPTABLES+="$1/$2/$3"$'\n'
+}
+cleanup_ipv6_containment() {
+    IPV6_CLEANED=1
+}
+remove_k3s_subnet_quarantine() {
+    SUBNET_QUARANTINE_REMOVED=1
+}
+ip() {
+    if [[ "$*" == "rule show pref 32500" ]]; then
+        printf '%s' "${RULES}" | grep '^32500:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32764" ]]; then
+        printf '%s' "${RULES}" | grep '^32764:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED_RULES+="$*"$'\n'
+        return 0
+    fi
+    return 0
+}
+
+( cleanup )
+[[ "$?" == "0" ]]
+# Running in subshell above verified exit 0; now inspect effects by overriding exit
+exit() { return 0; }
+cleanup
+
+[[ "${EGRESS_GUARD_ENSURED}" == "1" ]]
+[[ "${BLACKHOLE_ENSURED}" == "1" ]]
+[[ "${NETPOL_ENSURED}" == "1" ]]
+[[ "${DELETED_RULES}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
+[[ "${DELETED_RULES}" == *"from 10.42.1.7 lookup 51820"* ]]
+[[ "${DELETED_RULES}" != *"from 10.42.1.7 blackhole"* ]]
+[[ "${REMOVED_IPTABLES}" == *"nat/PREROUTING/tunnelsats-dnat"* ]]
+[[ "${REMOVED_IPTABLES}" == *"filter/FORWARD/tunnelsats-forward-in"* ]]
+[[ "${REMOVED_IPTABLES}" == *"filter/FORWARD/tunnelsats-forward-out"* ]]
+[[ "${REMOVED_IPTABLES}" != *"tunnelsats-k3s-egress-guard"* ]]
+[[ "${IPV6_CLEANED}" == "0" ]]
+[[ "${SUBNET_QUARANTINE_REMOVED}" == "0" ]]
+
+# When target IP is known (10.42.1.7) and per-pod guard/blackhole both fail,
+# preserve_fail_closed_dataplane falls back to subnet quarantine for that target IP
+# AND still applies the selector-scoped emergency NetworkPolicy.
+DOCKER_TARGET_IP="10.42.1.7"
+QUARANTINE_ENSURED=0
+NETPOL_ENSURED=0
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() { return 1; }
+ensure_k3s_subnet_quarantine() {
+    if [[ "$1" == "10.42.1.7" ]]; then
+        QUARANTINE_ENSURED=1
+        return 0
+    fi
+    return 1
+}
+cleanup
+[[ "${QUARANTINE_ENSURED}" == "1" ]]
+[[ "${NETPOL_ENSURED}" == "1" ]]
+
+# When no target IP is known on exit, ensure_k3s_subnet_quarantine must NOT be
+# called (avoiding blocking unrelated pods across an arbitrary bypass CIDR) and
+# containment uses the Lightning selector via emergency NetworkPolicy instead.
+DOCKER_TARGET_IP=""
+MANAGED_K3S_TARGET_IP=""
+K3S_POLICY_STATE_LOADED="true"
+QUARANTINE_ENSURED=0
+NETPOL_ENSURED=0
+cleanup
+[[ "${QUARANTINE_ENSURED}" == "0" ]]
+[[ "${NETPOL_ENSURED}" == "1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_and_secure_mode_sigterm_cleanup_preserve_fail_closed_blackholes():
+    result = run_bash(
+        r'''
+source "$1"
+
+API_PID=""
+exit() { return 0; }
+remove_tagged_iptables_rules() { :; }
+
+# 1. Docker mode
+K3S_MODE="false"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.9.9.9"
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=("172.18.0.5|172.18.0.0/16|172.18.0.1|0|0" "10.9.9.9|10.9.9.0/25|10.9.9.1|1|100")
+KILL_SWITCH_CALLS=0
+IPV6_CLEANED=0
+DELETED_RULES=""
+
+ensure_reconcile_kill_switch() {
+    KILL_SWITCH_CALLS=$((KILL_SWITCH_CALLS + 1))
+    return 0
+}
+cleanup_ipv6_containment() {
+    IPV6_CLEANED=1
+}
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED_RULES+="$*"$'\n'
+        return 0
+    fi
+    return 0
+}
+
+cleanup
+[[ "${KILL_SWITCH_CALLS}" -ge 1 ]]
+[[ "${IPV6_CLEANED}" == "0" ]]
+[[ "${DELETED_RULES}" == *"from 172.18.0.5 to 172.18.0.0/16 table main pref 32500"* ]]
+[[ "${DELETED_RULES}" == *"from 172.18.0.5 table 51820 pref 32764"* ]]
+[[ "${DELETED_RULES}" != *"blackhole"* ]]
+[[ "${#MANAGED_DOCKER_IPV4_ENDPOINTS[@]}" == "2" ]]
+
+# 2. Secure Mode
+SECURE_MODE="true"
+DOCKER_TARGET_IP="10.21.21.9"
+KILL_SWITCH_CALLS=0
+DELETED_RULES=""
+
+cleanup
+[[ "${KILL_SWITCH_CALLS}" -ge 1 ]]
+[[ "${IPV6_CLEANED}" == "0" ]]
+[[ "${DELETED_RULES}" == *"from 10.21.21.9 table 51820 pref 32764"* ]]
+[[ "${DELETED_RULES}" != *"blackhole"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_restart_trigger_bounces_wireguard_and_reconciles_while_preserving_fail_closed_guards():
+    result = run_bash(
+        r'''
+source "$1"
+
+RESTART_TRIGGER="${POLICY_TEST_STATE_FILE}.restart"
+printf 'trigger' > "${RESTART_TRIGGER}"
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+DECOMMISSIONED="true"
+EVENTS=""
+
+ensure_k3s_egress_guard() {
+    EVENTS+="guard:$1;"
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    EVENTS+="blackhole:$1;"
+    return 0
+}
+ensure_k3s_emergency_network_policy() {
+    EVENTS+="netpol;"
+    return 0
+}
+cleanup_dataplane() {
+    EVENTS+="cleanup:${1:-full};"
+    return 0
+}
+wg() {
+    if [[ "$1 $2" == "show tunnelsatsv2" ]]; then
+        return 0
+    fi
+    return 1
+}
+wg-quick() {
+    EVENTS+="wg-quick:$1:$2;"
+    return 0
+}
+reconcile_once() {
+    EVENTS+="reconcile:$1;"
+    return 0
+}
+
+handle_restart_trigger
+[[ ! -f "${RESTART_TRIGGER}" ]]
+[[ "${DECOMMISSIONED}" == "false" ]]
+[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_recreate_upgrade_persists_and_adopts_managed_target_state_across_restarts():
+    result = run_bash(
+        r'''
+# Process 1: active k3s pod 10.42.1.7, exits on SIGTERM during Recreate upgrade.
+(
+    source "$1"
+    K3S_MODE="true"
+    SECURE_MODE="false"
+    DOCKER_TARGET_IP="10.42.1.7"
+    TARGET_IMPL="lnd"
+    K3S_TARGET_POD_NAME="lnd-0"
+    K3S_TARGET_POD_NAMESPACE="lightning"
+    K3S_TARGET_POD_SELECTOR="app=lnd"
+    ensure_k3s_egress_guard() { return 0; }
+    ensure_fallback_blackhole_rule() { return 0; }
+    ensure_k3s_emergency_network_policy() { return 0; }
+    cleanup_dataplane() { return 0; }
+    cleanup
+)
+
+[[ -f "${K3S_POLICY_STATE_FILE}" ]]
+[[ "$(stat -c '%a' "${K3S_POLICY_STATE_FILE}")" == "600" ]]
+jq -e '
+    .version == 1
+    and .target_ip == "10.42.1.7"
+    and .target_impl == "lnd"
+    and .pod_name == "lnd-0"
+    and .pod_namespace == "lightning"
+    and .pod_selector == "app=lnd"
+    and .decommissioned == false
+' "${K3S_POLICY_STATE_FILE}" >/dev/null
+
+# Process 2: replacement TunnelSats pod starts on the same node before k8s API discovery runs.
+(
+    source "$1"
+    K3S_MODE="true"
+    SECURE_MODE="false"
+    GUARDED_IP=""
+    BLACKHOLED_IP=""
+    ensure_k3s_egress_guard() {
+        GUARDED_IP="$1"
+        return 0
+    }
+    ensure_fallback_blackhole_rule() {
+        BLACKHOLED_IP="$1"
+        return 0
+    }
+    ensure_reconcile_kill_switch
+    [[ "${DOCKER_TARGET_IP}" == "10.42.1.7" ]]
+    [[ "${TARGET_IMPL}" == "lnd" ]]
+    [[ "${K3S_TARGET_POD_NAME}" == "lnd-0" ]]
+    [[ "${K3S_TARGET_POD_NAMESPACE}" == "lightning" ]]
+    [[ "${K3S_TARGET_POD_SELECTOR}" == "app=lnd" ]]
+    [[ "${GUARDED_IP}" == "10.42.1.7" ]]
+    [[ "${BLACKHOLED_IP}" == "10.42.1.7" ]]
+
+    # Switching from LND (lightning/app=lnd) to CLN (cln-ns/app=cln) must remove
+    # LND's emergency NetworkPolicy before overwriting MANAGED_K3S_POD_NAMESPACE/SELECTOR.
+    TUNNELSATS_K8S_NODE_NAME="node-1"
+    REMOVED_TARGET=""
+    k8s_api() {
+        cat <<'JSON'
+{"items":[{"metadata":{"name":"cln-0","labels":{"app":"cln"}},"spec":{"nodeName":"node-1"},"status":{"phase":"Running","podIP":"10.42.1.8","conditions":[{"type":"Ready","status":"True"}]}}]}
+JSON
+    }
+    remove_k3s_emergency_network_policy() {
+        REMOVED_TARGET="${K3S_TARGET_POD_NAMESPACE}:${K3S_TARGET_POD_SELECTOR}"
+        return 1
+    }
+    if resolve_k3s_target_pod "cln" "cln-ns" "app=cln"; then
+        exit 1
+    fi
+    [[ "${REMOVED_TARGET}" == "lightning:app=lnd" ]]
+    [[ "${MANAGED_K3S_POD_NAMESPACE}" == "lightning" ]]
+    [[ "${MANAGED_K3S_POD_SELECTOR}" == "app=lnd" ]]
+
+    remove_k3s_emergency_network_policy() {
+        REMOVED_TARGET="${K3S_TARGET_POD_NAMESPACE}:${K3S_TARGET_POD_SELECTOR}"
+        return 0
+    }
+    resolve_k3s_target_pod "cln" "cln-ns" "app=cln"
+    [[ "${REMOVED_TARGET}" == "lightning:app=lnd" ]]
+    [[ "${MANAGED_K3S_POD_NAMESPACE}" == "cln-ns" ]]
+    [[ "${MANAGED_K3S_POD_SELECTOR}" == "app=cln" ]]
+)
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_decommission_trigger_performs_full_teardown_and_skips_periodic_reconcile_until_manual():
+    result = run_bash(
+        r'''
+source "$1"
+
+STATE_FILE="${POLICY_TEST_STATE_FILE}.state.json"
+DECOMMISSION_TRIGGER_DIR="${POLICY_TEST_STATE_FILE}.decomm_trigger.d"
+DECOMMISSION_RESULT_DIR="${POLICY_TEST_STATE_FILE}.decomm_result.d"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+TARGET_IMPL="lnd"
+K3S_TARGET_POD_NAME="lnd-0"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+MANAGED_K3S_TARGET_IP="10.42.1.7"
+MANAGED_K3S_TARGET_IMPL="lnd"
+MANAGED_K3S_POD_NAME="lnd-0"
+MANAGED_K3S_POD_NAMESPACE="lightning"
+MANAGED_K3S_POD_SELECTOR="app=lnd"
+K3S_POLICY_STATE_LOADED="true"
+persist_managed_k3s_policy_state
+
+CLEANUP_ARG="unset"
+NETPOL_REMOVED=0
+DETECT_CALLS=0
+
+iptables() { return 0; }
+ip6tables() { return 0; }
+ip() { return 0; }
+cleanup_dataplane() {
+    CLEANUP_ARG="${1:-full}"
+    return 0
+}
+detect_lightning_container() {
+    DETECT_CALLS=$((DETECT_CALLS + 1))
+    return 1
+}
+
+# 1. If emergency NetworkPolicy removal fails, decommission must fail closed,
+# preserve ownership, and report decommissioned=false.
+remove_k3s_emergency_network_policy() {
+    LAST_ERROR="k3s: Failed to remove emergency deny-egress NetworkPolicy"
+    return 1
+}
+ensure_decommission_dirs
+printf 'req-decomm-fail\n' > "${DECOMMISSION_TRIGGER_DIR}/req-decomm-fail.trigger"
+process_decommission_triggers
+
+[[ "${DECOMMISSIONED}" == "false" ]]
+[[ "${MANAGED_K3S_TARGET_IP}" == "10.42.1.7" ]]
+jq -e '.request_id == "req-decomm-fail" and .decommissioned == false and .state.decommissioned == false and (.state.last_error | contains("NetworkPolicy"))' \
+    "${DECOMMISSION_RESULT_DIR}/req-decomm-fail.json" >/dev/null
+
+# 2. When all guards are removed and verified, decommission succeeds.
+remove_k3s_emergency_network_policy() {
+    NETPOL_REMOVED=1
+    return 0
+}
+printf 'req-decomm-1\n' > "${DECOMMISSION_TRIGGER_DIR}/req-decomm-1.trigger"
+process_decommission_triggers
+
+[[ ! -f "${DECOMMISSION_TRIGGER_DIR}/req-decomm-1.trigger" ]]
+[[ "${NETPOL_REMOVED}" == "1" ]]
+[[ "${CLEANUP_ARG}" == "full" ]]
+[[ "${DECOMMISSIONED}" == "true" ]]
+[[ -z "${DOCKER_TARGET_IP}" ]]
+[[ -z "${MANAGED_K3S_TARGET_IP}" ]]
+[[ -f "${DECOMMISSION_STATE_FILE}" ]]
+
+jq -e '.decommissioned == true' "${DECOMMISSION_STATE_FILE}" >/dev/null
+jq -e '.decommissioned == true and .target_ip == ""' "${K3S_POLICY_STATE_FILE}" >/dev/null
+jq -e '.decommissioned == true and .rules_synced == false' "${STATE_FILE}" >/dev/null
+jq -e '.request_id == "req-decomm-1" and .decommissioned == true and .state.decommissioned == true' \
+    "${DECOMMISSION_RESULT_DIR}/req-decomm-1.json" >/dev/null
+
+# 3. Container restart in Docker/Secure Mode or k3s reboot must preserve disabled state
+# before startup installs guards or reconciles.
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    KILL_SWITCH_INSTALLED=0
+    ensure_source_blackhole_rule() {
+        KILL_SWITCH_INSTALLED=1
+        return 0
+    }
+    ensure_reconcile_kill_switch
+    [[ "${DECOMMISSIONED}" == "true" ]]
+    [[ "${KILL_SWITCH_INSTALLED}" == "0" ]]
+    reconcile_once "startup"
+    [[ "${KILL_SWITCH_INSTALLED}" == "0" ]]
+)
+
+# 4. In Docker Standard Mode (K3S_MODE=false, SECURE_MODE=false), decommission_dataplane
+# preserves DOCKER_TARGET_IP="10.9.9.9" so subsequent re-enable works without container restart.
+# Also verify that if IPv6 FORWARD deletion fails early, saved IPv6 ownership is preserved on disk.
+(
+    source "$1"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.docker_state.json"
+    K3S_MODE="false"
+    SECURE_MODE="false"
+    DOCKER_TARGET_IP="10.9.9.9"
+    IPV6_POLICY_STATE_LOADED="true"
+    MANAGED_TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+    IPV6_POLICY_TABLE_MANAGED="true"
+    persist_managed_ipv6_policy_state
+    iptables() { return 0; }
+    ip6tables() {
+        if [[ "$*" == "-S FORWARD" ]]; then
+            printf '%s\n' "-A FORWARD -s 2001:db8:42::7/128 -m comment --comment ${IPV6_RULE_MARKER} -j DROP"
+        fi
+        return 0
+    }
+    ip() {
+        if [[ "$*" == "-6 rule show pref ${IPV6_BLACKHOLE_RULE_PREF}" ]]; then
+            printf '%s\n' "${IPV6_BLACKHOLE_RULE_PREF}: from 2001:db8:42::7 blackhole"
+        fi
+        return 0
+    }
+    if decommission_dataplane; then
+        exit 1
+    fi
+    jq -e '.addresses == ["2001:db8:42::7"] and .table_managed == true' "${IPV6_POLICY_STATE_FILE}" >/dev/null
+
+    ip6tables() { return 0; }
+    ip() { return 0; }
+    decommission_dataplane
+    [[ "${DECOMMISSIONED}" == "true" ]]
+    [[ "${DOCKER_TARGET_IP}" == "10.9.9.9" ]]
+    jq -e '.addresses == [] and .table_managed == false' "${IPV6_POLICY_STATE_FILE}" >/dev/null
+)
+
+# Periodic reconcile must be skipped while decommissioned.
+reconcile_once "periodic"
+[[ "${DETECT_CALLS}" == "0" ]]
+[[ "${DECOMMISSIONED}" == "true" ]]
+
+# Manual reconcile clears decommissioned state and resumes normal protection.
+if reconcile_once "manual"; then
+    exit 1
+fi
+[[ "${DETECT_CALLS}" == "1" ]]
+[[ "${DECOMMISSIONED}" == "false" ]]
+jq -e '.decommissioned == false' "${DECOMMISSION_STATE_FILE}" >/dev/null
+jq -e '.decommissioned == false' "${K3S_POLICY_STATE_FILE}" >/dev/null
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
