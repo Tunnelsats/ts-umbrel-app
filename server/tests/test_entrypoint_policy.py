@@ -1390,9 +1390,16 @@ k8s_api_write_status() {
         printf '%s' "200"
         return 0
     fi
+    if [[ "$1" == "GET" && -f "${DELETE_FILE}" ]]; then
+        printf '%s' "404"
+        return 0
+    fi
     return 1
 }
 k8s_api() {
+    if [[ -f "${DELETE_FILE}" ]]; then
+        return 1
+    fi
     jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
 }
 
@@ -1406,6 +1413,26 @@ cat "${PAYLOAD_FILE}" | jq -e '
 
 remove_k3s_emergency_network_policy
 [[ -f "${DELETE_FILE}" ]]
+
+# If DELETE returns 202 (pending finalizer) and the owned policy remains present,
+# remove_k3s_emergency_network_policy must return non-zero rather than reporting success.
+rm -f "${DELETE_FILE}"
+K3S_NETPOL_DELETE_WAIT_ATTEMPTS=2
+K3S_NETPOL_DELETE_WAIT_INTERVAL=0
+k8s_api_write_status() {
+    if [[ "$1" == "DELETE" ]]; then
+        printf '%s' "202"
+        return 0
+    fi
+    return 1
+}
+k8s_api() {
+    jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
+}
+if remove_k3s_emergency_network_policy; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"still present after deletion"* ]]
 '''
     )
 
@@ -2712,15 +2739,27 @@ handle_restart_trigger
 [[ "${DECOMMISSIONED}" == "false" ]]
 [[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
 
-# If preserve_fail_closed_dataplane fails, handle_restart_trigger must return 1
-# and must NOT bring down WireGuard.
+# When emergency NetworkPolicy fails during restart (e.g. conflicting allow policy)
+# but verified pod-CIDR quarantine is in place to protect replacement pods,
+# handle_restart_trigger proceeds with WireGuard restart.
 EVENTS=""
 K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
 ensure_k3s_emergency_network_policy() {
     EVENTS+="netpol:fail;"
     return 1
 }
-delete_k3s_target_pod() { return 0; }
+delete_k3s_target_pod() {
+    EVENTS+="delete;"
+    return 0
+}
+handle_restart_trigger
+[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol:fail;quarantine:10.42.1.7;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+
+# If replacement-pod protection (both NetworkPolicy and pod-CIDR quarantine) fails
+# during restart, handle_restart_trigger must return 1 and must NOT bring down WireGuard
+# even when current-IP guards succeed.
+EVENTS=""
+ensure_k3s_subnet_quarantine() { return 1; }
 if handle_restart_trigger; then
     exit 1
 fi
@@ -3022,3 +3061,308 @@ exit 0
         assert "rm -f ts-route-lnd-" in calls
         assert "network rm ts-clear-" in calls
         assert "network rm ts-protected-" in calls
+
+
+def test_k3s_emergency_network_policy_rejects_conflicting_egress_allow_policies() -> None:
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
+K3S_SHUTDOWN_RETRY_INTERVAL=0
+PAYLOAD_FILE="${POLICY_TEST_STATE_FILE}.network-policy"
+
+k8s_api_write_status() {
+    if [[ "$1" == "POST" ]]; then
+        printf '%s' "$3" > "${PAYLOAD_FILE}"
+        printf '%s' "201"
+        return 0
+    fi
+    return 1
+}
+
+# 1. Non-overlapping egress policy (app=other) and Ingress-only policy on app=lnd do NOT conflict.
+k8s_api() {
+    if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]; then
+        jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
+        return 0
+    fi
+    if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies" ]]; then
+        jq -cn --slurpfile owned "${PAYLOAD_FILE}" '{
+            items: [
+                $owned[0],
+                {
+                    metadata: {name: "allow-other-egress"},
+                    spec: {
+                        podSelector: {matchLabels: {app: "other"}},
+                        policyTypes: ["Egress"],
+                        egress: [{to: [{ipBlock: {cidr: "0.0.0.0/0"}}]}]
+                    }
+                },
+                {
+                    metadata: {name: "allow-lnd-ingress"},
+                    spec: {
+                        podSelector: {matchLabels: {app: "lnd"}},
+                        policyTypes: ["Ingress"],
+                        ingress: [{}]
+                    }
+                },
+                {
+                    metadata: {name: "default-deny-egress-omitted"},
+                    spec: {
+                        podSelector: {},
+                        policyTypes: ["Egress"]
+                    }
+                }
+            ]
+        }'
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_emergency_network_policy
+k3s_emergency_network_policy_is_active "lightning" "app=lnd"
+
+# 2. Conflicting egress-allowing policy (podSelector: {} or matchLabels: {app: lnd})
+# causes ensure_k3s_emergency_network_policy to fail and preserve_fail_closed_dataplane
+# to install and retain pod-CIDR subnet quarantine and return 1.
+k8s_api() {
+    if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]; then
+        jq '.metadata.uid = "owned-policy-uid"' "${PAYLOAD_FILE}"
+        return 0
+    fi
+    if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies" ]]; then
+        jq -cn --slurpfile owned "${PAYLOAD_FILE}" '{
+            items: [
+                $owned[0],
+                {
+                    metadata: {name: "allow-all-egress"},
+                    spec: {
+                        podSelector: {},
+                        policyTypes: ["Egress"],
+                        egress: [{to: [{ipBlock: {cidr: "0.0.0.0/0"}}]}]
+                    }
+                }
+            ]
+        }'
+        return 0
+    fi
+    return 1
+}
+
+if ensure_k3s_emergency_network_policy; then
+    exit 1
+fi
+if k3s_emergency_network_policy_is_active "lightning" "app=lnd"; then
+    exit 1
+fi
+
+QUARANTINE_ENSURED=0
+ensure_k3s_egress_guard() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_subnet_quarantine() {
+    QUARANTINE_ENSURED=1
+    return 0
+}
+delete_k3s_target_pod() { return 0; }
+cleanup_dataplane() { return 0; }
+if preserve_fail_closed_dataplane; then
+    exit 1
+fi
+[[ "${QUARANTINE_ENSURED}" == "1" ]]
+
+# 3. In restart mode, failed NetworkPolicy installs pod-CIDR quarantine and proceeds
+# only when replacement pods are protected by that fallback quarantine.
+QUARANTINE_ENSURED=0
+preserve_fail_closed_dataplane "restart"
+[[ "${QUARANTINE_ENSURED}" == "1" ]]
+
+ensure_k3s_subnet_quarantine() { return 1; }
+if preserve_fail_closed_dataplane "restart"; then
+    exit 1
+fi
+
+# 4. Reactivation from decommissioned state aborts if persist_decommissioned_state fails.
+DECOMMISSIONED="true"
+persist_decommissioned_state() { return 1; }
+if reconcile_once "manual"; then
+    exit 1
+fi
+[[ "${DECOMMISSIONED}" == "true" ]]
+if handle_restart_trigger; then
+    exit 1
+fi
+[[ "${DECOMMISSIONED}" == "true" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_dual_stack_restart_requires_ipv6_subnet_quarantine_when_netpol_fails() -> None:
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
+K3S_SHUTDOWN_RETRY_INTERVAL=0
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+IPV6_POLICY_STATE_LOADED="true"
+IPV6_POLICY_TABLE_MANAGED="true"
+MANAGED_TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+
+V4_RULES=""
+V6_RULES=""
+V6_FILTER_INSTALLED="false"
+V4_DELETED=""
+V6_DELETED=""
+
+ensure_k3s_egress_guard() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_emergency_network_policy() { return 1; }
+cleanup_dataplane() { return 0; }
+
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "rule del "*)
+            V4_DELETED+="$*"$'\n'
+            V4_RULES=""
+            return 0
+            ;;
+        "-6 rule show pref 32763")
+            printf '%s' "${V6_RULES}"
+            return 0
+            ;;
+        "-6 rule add from 2001:db8:42::/64 blackhole protocol 200 pref 32763")
+            V6_RULES=$'32763:\tfrom 2001:db8:42::/64 blackhole proto 200\n'
+            return 0
+            ;;
+        "-6 rule del "*)
+            V6_DELETED+="$*"$'\n'
+            V6_RULES=""
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+ip6tables() {
+    if [[ "$*" == "-S FORWARD" ]]; then
+        if [[ "${V6_FILTER_INSTALLED}" == "true" ]]; then
+            printf '%s\n' "-A FORWARD -s 2001:db8:42::/64 ! -d fe80::/10 -m comment --comment ${K3S_IPV6_QUARANTINE_MARKER} -j DROP"
+        fi
+        printf '%s\n' "-A FORWARD -s 2001:db8:42::7/128 ! -d fe80::/10 -m comment --comment ${IPV6_RULE_MARKER} -j DROP"
+        return 0
+    fi
+    if [[ "$1" == "-C" && "$*" == *"-s 2001:db8:42::/64"* ]]; then
+        [[ "${V6_FILTER_INSTALLED}" == "true" ]]
+        return
+    fi
+    if [[ "$1" == "-I" && "$*" == *"-s 2001:db8:42::/64"* ]]; then
+        V6_FILTER_INSTALLED="true"
+        return 0
+    fi
+    if [[ "$1" == "-D" && "$*" == *"-s 2001:db8:42::/64"* ]]; then
+        V6_FILTER_INSTALLED="false"
+        return 0
+    fi
+    return 1
+}
+
+# 1. Without a covering IPv6 pod CIDR (< /128) in K3S_IPV6_POD_CIDRS or local node routes,
+# IPv4-only subnet quarantine is NOT sufficient to allow a restart when emergency NetworkPolicy
+# fails in dual-stack k3s.
+K3S_IPV6_POD_CIDRS=""
+if preserve_fail_closed_dataplane "restart"; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Cannot determine IPv6 pod CIDR"* ]]
+
+# A /128 IPv6 prefix covers only the old pod, not replacement pods, so it must also fail.
+K3S_IPV6_POD_CIDRS="2001:db8:42::7/128"
+if preserve_fail_closed_dataplane "restart"; then
+    exit 1
+fi
+
+# 2. When the local node IPv6 routing table exposes the CNI pod subnet route (without needing
+# Kubernetes Node API RBAC), ensure_k3s_ipv6_subnet_quarantine discovers and installs it even
+# when K3S_IPV6_POD_CIDRS is empty or uses the standard default range.
+K3S_IPV6_POD_CIDRS="2001:cafe:42::/56,fd00:10:42::/56"
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "rule del "*)
+            V4_DELETED+="$*"$'\n'
+            V4_RULES=""
+            return 0
+            ;;
+        "-6 route show")
+            printf '%s\n' "2001:db8:42::/64 dev cni0 proto kernel metric 256 pref medium"
+            return 0
+            ;;
+        "-6 rule show pref 32763")
+            printf '%s' "${V6_RULES}"
+            return 0
+            ;;
+        "-6 rule add from 2001:db8:42::/64 blackhole protocol 200 pref 32763")
+            V6_RULES=$'32763:\tfrom 2001:db8:42::/64 blackhole proto 200\n'
+            return 0
+            ;;
+        "-6 rule del "*)
+            V6_DELETED+="$*"$'\n'
+            V6_RULES=""
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+preserve_fail_closed_dataplane "restart"
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${K3S_IPV6_QUARANTINE_CIDR}" == "2001:db8:42::/64" ]]
+[[ "${V4_RULES}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
+[[ "${V6_RULES}" == *"from 2001:db8:42::/64 blackhole proto 200"* ]]
+[[ "${V6_FILTER_INSTALLED}" == "true" ]]
+
+# 3. Removing subnet quarantine removes both IPv4 and IPv6 pod-CIDR quarantine
+# rules while preserving per-pod IPv6 containment rules.
+remove_k3s_subnet_quarantine
+[[ -z "${V4_RULES}" ]]
+[[ -z "${V6_RULES}" ]]
+[[ "${V6_FILTER_INSTALLED}" == "false" ]]
+[[ -z "${K3S_IPV6_QUARANTINE_CIDR}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+

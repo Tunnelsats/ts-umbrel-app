@@ -243,6 +243,35 @@ ip netns exec "${ROUTER_NS}" env \
             echo "FAIL: routine SIGTERM preservation installed shared-subnet quarantine" >&2
             exit 1
         fi
+    '
+if ip netns exec "${POD_NS}" ping -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: IPv4 traffic escaped during fail-closed SIGTERM preservation" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: IPv6 traffic escaped during fail-closed SIGTERM preservation" >&2
+    exit 1
+fi
+
+# When emergency NetworkPolicy creation fails during SIGTERM, preserve_fail_closed_dataplane
+# must install and retain the pod-CIDR subnet quarantine and return non-zero.
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        STATE_FILE="'"${STATE_FILE_TMP}"'"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        DOCKER_TARGET_IP="10.42.1.7"
+        TARGET_IMPL="lnd"
+        K3S_TARGET_POD_NAME="lnd-0"
+        K3S_TARGET_POD_NAMESPACE="lightning"
+        K3S_TARGET_POD_SELECTOR="app=lnd"
         K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
         ensure_k3s_emergency_network_policy() { return 1; }
         delete_k3s_target_pod() { return 0; }
@@ -254,13 +283,17 @@ ip netns exec "${ROUTER_NS}" env \
             echo "FAIL: failed NetworkPolicy SIGTERM did not retain shared-subnet quarantine" >&2
             exit 1
         fi
+        if ! ip -6 rule show pref "${K3S_QUARANTINE_RULE_PREF}" | grep -Fq "from 2001:db8:42::/64"; then
+            echo "FAIL: failed NetworkPolicy SIGTERM did not retain IPv6 shared-subnet quarantine" >&2
+            exit 1
+        fi
     '
 if ip netns exec "${POD_NS}" ping -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
-    echo "FAIL: IPv4 traffic escaped during fail-closed SIGTERM preservation" >&2
+    echo "FAIL: IPv4 traffic escaped during failed-policy SIGTERM quarantine" >&2
     exit 1
 fi
 if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
-    echo "FAIL: IPv6 traffic escaped during fail-closed SIGTERM preservation" >&2
+    echo "FAIL: IPv6 traffic escaped during failed-policy SIGTERM quarantine" >&2
     exit 1
 fi
 
