@@ -2239,16 +2239,23 @@ import ipaddress
 import os
 
 raw_source = os.environ.get("SOURCE_IP", "").strip()
-if not raw_source:
-    raise SystemExit("missing target pod IP")
-source = ipaddress.ip_address(raw_source)
 networks = [
     ipaddress.ip_network(value)
     for value in os.environ["BYPASS_CIDRS"].split(",")
     if value
 ]
-matches = [network for network in networks if source in network]
-print(max(matches, key=lambda network: network.prefixlen) if matches else "")
+if not networks:
+    raise SystemExit("no bypass CIDRs")
+if not raw_source or raw_source == "10.9.9.9":
+    non_service = [
+        network for network in networks
+        if str(network) != "10.43.0.0/16"
+    ]
+    print((non_service or networks)[0])
+else:
+    source = ipaddress.ip_address(raw_source)
+    matches = [network for network in networks if source in network]
+    print(max(matches, key=lambda network: network.prefixlen) if matches else "")
 ' 2>/dev/null || true
     )"
     if [ -z "${pod_cidr}" ]; then
@@ -4735,35 +4742,24 @@ preserve_fail_closed_dataplane() {
                 "${K3S_RULE_PROTOCOL}"; then
                 blackhole_ok=true
             fi
-            if [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ]; then
-                if ensure_k3s_subnet_quarantine "${target_ip}"; then
-                    quarantine_ok=true
-                fi
-            fi
         else
             MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
             MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
             K3S_POLICY_STATE_LOADED="true"
             persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
         fi
+        # Always quarantine the pod CIDR in the kernel during shutdown so any
+        # replacement pod scheduled on this node is blocked at K3S_QUARANTINE_RULE_PREF
+        # regardless of CNI NetworkPolicy controller state.
+        if ensure_k3s_subnet_quarantine "${target_ip}"; then
+            quarantine_ok=true
+        fi
         # Always install selector-based emergency NetworkPolicy before exiting or
         # restarting so any controller-created replacement Lightning pod (with a
         # new IP) is also fail-closed while TunnelSats is stopped.
-        local quarantine_for_netpol=false
         if ensure_k3s_emergency_network_policy; then
             policy_ok=true
-        elif [ -n "${target_ip}" ] && [ "${quarantine_ok}" = false ]; then
-            # If the Kubernetes API is unavailable on the first attempt, immediately
-            # quarantine the pod CIDR in the kernel so replacement pods scheduled on
-            # this node cannot egress over clearnet while forwarding is removed and
-            # the cluster-wide emergency NetworkPolicy is retried.
-            if ensure_k3s_subnet_quarantine "${target_ip}"; then
-                quarantine_ok=true
-                quarantine_for_netpol=true
-            fi
-        fi
-        cleanup_dataplane "--keep-tunnel"
-        if [ "${policy_ok}" = false ]; then
+        else
             local max_attempts="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
             local attempt=1
             while [ "${attempt}" -lt "${max_attempts}" ]; do
@@ -4773,15 +4769,17 @@ preserve_fail_closed_dataplane() {
                 fi
                 if ensure_k3s_emergency_network_policy; then
                     policy_ok=true
-                    if [ "${quarantine_for_netpol}" = true ]; then
-                        remove_k3s_subnet_quarantine || true
-                    fi
                     break
                 fi
             done
         fi
-        if [ "${policy_ok}" = false ] || \
-           { [ -n "${target_ip}" ] && [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ] && [ "${quarantine_ok}" = false ]; }; then
+        if [ "${policy_ok}" = false ]; then
+            delete_k3s_target_pod || true
+        fi
+        if [ "${policy_ok}" = true ] || [ "${quarantine_ok}" = true ] || [ "${guard_ok}" = true ] || [ "${blackhole_ok}" = true ]; then
+            cleanup_dataplane "--keep-tunnel"
+        fi
+        if [ "${policy_ok}" = false ] || [ "${quarantine_ok}" = false ]; then
             LAST_ERROR="${LAST_ERROR:-k3s: Failed to establish replacement-pod fail-closed protection during shutdown}"
             RULES_SYNCED="false"
             IPV4_RULES_SYNCED="false"
@@ -5047,7 +5045,10 @@ handle_restart_trigger() {
     DECOMMISSIONED="false"
     persist_decommissioned_state || log WARN "${LAST_ERROR}"
     LAST_ERROR="Restart requested; dataplane remains fail-closed"
-    preserve_fail_closed_dataplane || log WARN "${LAST_ERROR}"
+    if ! preserve_fail_closed_dataplane; then
+        log ERROR "${LAST_ERROR:-Failed to preserve fail-closed dataplane before WireGuard restart}"
+        return 1
+    fi
     if wg show "${WG_IFACE}" >/dev/null 2>&1; then
         wg-quick down "${WG_CONF_PATH}" >/dev/null 2>&1 \
             || wg-quick down "${WG_IFACE}" >/dev/null 2>&1 \
@@ -5070,7 +5071,7 @@ main_loop() {
         ensure_decommission_dirs
 
         if [ -f "${RESTART_TRIGGER}" ]; then
-            handle_restart_trigger
+            handle_restart_trigger || true
         fi
 
         process_decommission_triggers

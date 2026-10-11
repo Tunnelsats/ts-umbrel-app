@@ -2429,12 +2429,20 @@ ip() {
         printf '%s' "${RULES}" | grep '^32500:' || true
         return 0
     fi
+    if [[ "$*" == "rule show pref 32763" ]]; then
+        printf '%s' "${RULES}" | grep '^32763:' || true
+        return 0
+    fi
     if [[ "$*" == "rule show pref 32764" ]]; then
         printf '%s' "${RULES}" | grep '^32764:' || true
         return 0
     fi
     if [[ "$*" == "rule show pref 32765" ]]; then
         printf '%s' "${RULES}" | grep '^32765:' || true
+        return 0
+    fi
+    if [[ "$*" == "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763" ]]; then
+        RULES+=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
         return 0
     fi
     if [[ "$1 $2" == "rule del" ]]; then
@@ -2453,6 +2461,8 @@ cleanup
 [[ "${EGRESS_GUARD_ENSURED}" == "1" ]]
 [[ "${BLACKHOLE_ENSURED}" == "1" ]]
 [[ "${NETPOL_ENSURED}" == "1" ]]
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${RULES}" == *"32763:"* ]]
 [[ "${DELETED_RULES}" == *"from 10.42.1.7 to 10.42.0.0/16 lookup main"* ]]
 [[ "${DELETED_RULES}" == *"from 10.42.1.7 lookup 51820"* ]]
 [[ "${DELETED_RULES}" != *"from 10.42.1.7 blackhole"* ]]
@@ -2462,6 +2472,21 @@ cleanup
 [[ "${REMOVED_IPTABLES}" != *"tunnelsats-k3s-egress-guard"* ]]
 [[ "${IPV6_CLEANED}" == "0" ]]
 [[ "${SUBNET_QUARANTINE_REMOVED}" == "0" ]]
+
+# When no target IP is known on exit, ensure_k3s_subnet_quarantine("") selects
+# the first non-service pod CIDR from K3S_BYPASS_CIDRS_NORMALIZED so node-local
+# replacement pods are still blocked in the kernel alongside emergency NetworkPolicy.
+K3S_BYPASS_CIDRS="10.43.0.0/16,10.42.0.0/16"
+K3S_QUARANTINE_CIDR=""
+RULES="${RULES//$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+DOCKER_TARGET_IP=""
+MANAGED_K3S_TARGET_IP=""
+K3S_POLICY_STATE_LOADED="true"
+NETPOL_ENSURED=0
+cleanup
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${RULES}" == *"32763:"* ]]
+[[ "${NETPOL_ENSURED}" == "1" ]]
 
 # When target IP is known (10.42.1.7) and per-pod guard/blackhole both fail,
 # preserve_fail_closed_dataplane falls back to subnet quarantine for that target IP
@@ -2482,26 +2507,15 @@ cleanup
 [[ "${QUARANTINE_ENSURED}" == "1" ]]
 [[ "${NETPOL_ENSURED}" == "1" ]]
 
-# When no target IP is known on exit, ensure_k3s_subnet_quarantine must NOT be
-# called (avoiding blocking unrelated pods across an arbitrary bypass CIDR) and
-# containment uses the Lightning selector via emergency NetworkPolicy instead.
-DOCKER_TARGET_IP=""
-MANAGED_K3S_TARGET_IP=""
-K3S_POLICY_STATE_LOADED="true"
-QUARANTINE_ENSURED=0
-NETPOL_ENSURED=0
-cleanup
-[[ "${QUARANTINE_ENSURED}" == "0" ]]
-[[ "${NETPOL_ENSURED}" == "1" ]]
-
 # When the Kubernetes API is unavailable during SIGTERM (emergency NetworkPolicy
 # creation fails) even though per-pod guard/blackhole succeed, shutdown must
-# install pod-CIDR subnet quarantine to protect replacement pods AND exit non-zero.
+# install pod-CIDR subnet quarantine, attempt delete_k3s_target_pod, AND exit non-zero.
 K3S_SHUTDOWN_NETPOL_ATTEMPTS=2
 K3S_SHUTDOWN_RETRY_INTERVAL=0
 DOCKER_TARGET_IP="10.42.1.7"
 QUARANTINE_ENSURED=0
 NETPOL_ATTEMPTS=0
+POD_DELETED=0
 ensure_k3s_egress_guard() { return 0; }
 ensure_fallback_blackhole_rule() { return 0; }
 ensure_k3s_subnet_quarantine() {
@@ -2515,6 +2529,10 @@ ensure_k3s_emergency_network_policy() {
     NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
     return 1
 }
+delete_k3s_target_pod() {
+    POD_DELETED=1
+    return 0
+}
 unset -f exit
 set +e
 ( cleanup )
@@ -2524,23 +2542,49 @@ set -e
 exit() { return 0; }
 QUARANTINE_ENSURED=0
 NETPOL_ATTEMPTS=0
+POD_DELETED=0
 ! preserve_fail_closed_dataplane
 [[ "${QUARANTINE_ENSURED}" == "1" ]]
 [[ "${NETPOL_ATTEMPTS}" == "2" ]]
+[[ "${POD_DELETED}" == "1" ]]
+
+# If every fail-closed control (guard, blackhole, subnet quarantine, and emergency
+# NetworkPolicy) fails, cleanup_dataplane --keep-tunnel must NOT be called.
+CLEANUP_DATAPLANE_CALLED=0
+cleanup_dataplane() {
+    CLEANUP_DATAPLANE_CALLED=1
+}
+ensure_k3s_egress_guard() { return 1; }
+ensure_fallback_blackhole_rule() { return 1; }
+ensure_k3s_subnet_quarantine() { return 1; }
+ensure_k3s_emergency_network_policy() { return 1; }
+! preserve_fail_closed_dataplane
+[[ "${CLEANUP_DATAPLANE_CALLED}" == "0" ]]
 
 # When the first emergency NetworkPolicy attempt fails transiently and the
-# second attempt succeeds, temporary pod-CIDR quarantine is installed during the
-# retry window and then released once the selector policy is active.
-QUARANTINE_ENSURED=0
+# second attempt succeeds, cleanup_dataplane runs AFTER the retry loop and
+# pod-CIDR quarantine remains installed unconditionally during shutdown.
+ORDER_LOG=""
 SUBNET_QUARANTINE_REMOVED=0
 NETPOL_ATTEMPTS=0
+ensure_k3s_egress_guard() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_k3s_subnet_quarantine() {
+    ORDER_LOG+="quarantine;"
+    return 0
+}
 ensure_k3s_emergency_network_policy() {
     NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
+    ORDER_LOG+="netpol:${NETPOL_ATTEMPTS};"
     [[ "${NETPOL_ATTEMPTS}" -ge 2 ]]
 }
+cleanup_dataplane() {
+    ORDER_LOG+="cleanup:${1:-full};"
+    return 0
+}
 preserve_fail_closed_dataplane
-[[ "${QUARANTINE_ENSURED}" == "1" ]]
-[[ "${SUBNET_QUARANTINE_REMOVED}" == "1" ]]
+[[ "${ORDER_LOG}" == "quarantine;netpol:1;netpol:2;cleanup:--keep-tunnel;" ]]
+[[ "${SUBNET_QUARANTINE_REMOVED}" == "0" ]]
 [[ "${NETPOL_ATTEMPTS}" == "2" ]]
 '''
     )
@@ -2628,6 +2672,10 @@ ensure_fallback_blackhole_rule() {
     EVENTS+="blackhole:$1;"
     return 0
 }
+ensure_k3s_subnet_quarantine() {
+    EVENTS+="quarantine:$1;"
+    return 0
+}
 ensure_k3s_emergency_network_policy() {
     EVENTS+="netpol;"
     return 0
@@ -2654,7 +2702,22 @@ reconcile_once() {
 handle_restart_trigger
 [[ ! -f "${RESTART_TRIGGER}" ]]
 [[ "${DECOMMISSIONED}" == "false" ]]
-[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;quarantine:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+
+# If preserve_fail_closed_dataplane fails, handle_restart_trigger must return 1
+# and must NOT bring down WireGuard.
+EVENTS=""
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
+ensure_k3s_emergency_network_policy() {
+    EVENTS+="netpol:fail;"
+    return 1
+}
+delete_k3s_target_pod() { return 0; }
+if handle_restart_trigger; then
+    exit 1
+fi
+[[ "${EVENTS}" != *"wg-quick:down"* ]]
+[[ "${EVENTS}" != *"reconcile:restart"* ]]
 '''
     )
 
@@ -2676,6 +2739,7 @@ def test_k3s_recreate_upgrade_persists_and_adopts_managed_target_state_across_re
     K3S_TARGET_POD_SELECTOR="app=lnd"
     ensure_k3s_egress_guard() { return 0; }
     ensure_fallback_blackhole_rule() { return 0; }
+    ensure_k3s_subnet_quarantine() { return 0; }
     ensure_k3s_emergency_network_policy() { return 0; }
     cleanup_dataplane() { return 0; }
     cleanup
