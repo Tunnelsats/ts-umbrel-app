@@ -2905,3 +2905,49 @@ jq -e '.decommissioned == false' "${K3S_POLICY_STATE_FILE}" >/dev/null
     assert result.returncode == 0, result.stderr
 
 
+def test_docker_protected_route_script_PreservesCleanupTrapAndTempStateFiles() -> None:
+    script_path = os.path.join(REPO_ROOT, "scripts", "test-docker-protected-route.sh")
+    with open(script_path, encoding="utf-8") as fh:
+        script = fh.read()
+    assert "cleanup_test_env()" in script
+    assert "trap cleanup_test_env EXIT" in script
+    assert 'export DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_TMP}"' in script
+    assert 'export IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_TMP}"' in script
+    assert 'export DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_TMP}"' in script
+    assert 'STATE_FILE="${STATE_FILE_TMP}"' in script
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        docker_log = os.path.join(temp_dir, "docker.log")
+        docker_bin = os.path.join(temp_dir, "docker")
+        with open(docker_bin, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"""#!/usr/bin/env bash
+echo "$*" >> "{docker_log}"
+if [[ "$1" == "version" ]]; then
+    echo "1.48"
+    exit 0
+fi
+if [[ "$1" == "inspect" ]]; then
+    exit 42
+fi
+exit 0
+"""
+            )
+        os.chmod(docker_bin, 0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{temp_dir}:{env.get('PATH', '')}"
+        res = subprocess.run(
+            ["bash", script_path],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert res.returncode == 42
+        assert "Permission denied" not in res.stderr
+        assert "/data" not in res.stderr
+        with open(docker_log, encoding="utf-8") as fh:
+            calls = fh.read()
+        assert "rm -f ts-route-lnd-" in calls
+        assert "network rm ts-clear-" in calls
+        assert "network rm ts-protected-" in calls

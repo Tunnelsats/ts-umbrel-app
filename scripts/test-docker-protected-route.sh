@@ -11,13 +11,22 @@ CLEAR_SUBNET="10.121.120.0/24"
 PROTECTED_SUBNET="10.121.121.0/24"
 CLEAR_IP="10.121.120.9"
 PROTECTED_IP="10.121.121.9"
+DOCKER_POLICY_STATE_TMP="/tmp/tunnelsats-docker-policy-${TEST_SUFFIX}.json"
+IPV6_POLICY_STATE_TMP="/tmp/tunnelsats-ipv6-policy-${TEST_SUFFIX}.json"
+DECOMMISSION_STATE_TMP="/tmp/tunnelsats-decommissioned-${TEST_SUFFIX}.json"
+STATE_FILE_TMP="/tmp/tunnelsats-state-${TEST_SUFFIX}.json"
 
-cleanup() {
+cleanup_test_env() {
     docker rm -f "${TARGET_CONTAINER}" >/dev/null 2>&1 || true
     docker network rm "${CLEAR_NETWORK}" >/dev/null 2>&1 || true
     docker network rm "${PROTECTED_NETWORK}" >/dev/null 2>&1 || true
+    rm -f \
+        "${DOCKER_POLICY_STATE_TMP}" "${DOCKER_POLICY_STATE_TMP}.tmp."* \
+        "${IPV6_POLICY_STATE_TMP}" "${IPV6_POLICY_STATE_TMP}.tmp."* \
+        "${DECOMMISSION_STATE_TMP}" "${DECOMMISSION_STATE_TMP}.tmp."* \
+        "${STATE_FILE_TMP}" "${STATE_FILE_TMP}.tmp."*
 }
-trap cleanup EXIT
+trap cleanup_test_env EXIT
 
 api_version="$(docker version --format '{{.Server.APIVersion}}')"
 if ! python3 -c '
@@ -38,8 +47,12 @@ docker create \
     alpine:latest sh -c 'while true; do sleep 3600; done' >/dev/null
 docker start "${TARGET_CONTAINER}" >/dev/null
 
+export DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_TMP}"
+export IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_TMP}"
+export DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_TMP}"
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/scripts/entrypoint.sh"
+STATE_FILE="${STATE_FILE_TMP}"
 K3S_MODE="false"
 SECURE_MODE="false"
 DOCKER_NETWORK_NAME="${PROTECTED_NETWORK}"
