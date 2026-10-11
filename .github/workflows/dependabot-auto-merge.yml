@@ -2,12 +2,22 @@
 #
 # Note: In ts-umbrel-app, merging to master updates Docker images (latest) and tests,
 # but does NOT create a GitHub release (v*) unless tunnelsats/umbrel-app.yml version is bumped.
+# Auto-merges enabled by this workflow are performed with GITHUB_TOKEN, which does not trigger
+# other workflows, so Dependabot merges build and publish nothing. This is intended: users only
+# receive new images through versioned releases.
 #
 # How it works:
 # 1. Triggers on pull_request_target for Dependabot PRs
 # 2. Uses dependabot/fetch-metadata (pinned to commit SHA) to inspect semver update types (minor/patch)
-# 3. Auto-approves the PR and enables native GitHub auto-merge (--auto --squash)
-# 4. GitHub automatically executes the merge ONLY AFTER 'TDD Docker Tests' pass 100%
+# 3. Checks that the PR changes nothing but npm manifests (root or web/) or workflow files
+# 4. Auto-approves the PR and marks the required 'TunnelSentinel / Code Review' check as
+#    "Not reviewed": Dependabot minor/patch updates are exempt from the TunnelSentinel review
+# 5. Enables native GitHub auto-merge (--auto --squash); branch protection merges only after the
+#    required test-compose, backend-tests, frontend-tests and docker checks pass on an
+#    up-to-date branch
+#
+# Still need a real TunnelSentinel review: major updates, Docker base image updates
+# (Dockerfile / compose files), and Dependabot PRs that someone else pushed to.
 
 name: Dependabot Auto-Merge
 
@@ -18,17 +28,34 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write # post the 'TunnelSentinel / Code Review' exemption status
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check that only dependency files changed
+        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+          printf 'Changed files:\n%s\n' "$files"
+          other=$(printf '%s\n' "$files" | grep -Ev '^((web/)?package(-lock)?\.json|\.github/workflows/[^/]+\.ya?ml)$' || true)
+          if [ -n "$other" ]; then
+            echo "::error::Not auto-merging: this PR changes files outside the dependency allow-list."
+            printf '%s\n' "$other"
+            exit 1
+          fi
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Auto-approve minor and patch updates
         if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
@@ -41,6 +68,18 @@ jobs:
           fi
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark the TunnelSentinel review as not required
+        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=success \
+            -f context='TunnelSentinel / Code Review' \
+            -f description='Not reviewed: Dependabot minor/patch update, gated on CI' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable native auto-merge for minor and patch updates

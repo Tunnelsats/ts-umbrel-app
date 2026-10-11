@@ -104,6 +104,11 @@ Upon merging to `master`:
 - GitHub Actions automatically verifies version parity via `test_version_sync.py`.
 - If `version` is new, CI builds `tunnelsats/ts-umbrel-app:X.Y.Z` on Docker Hub and creates GitHub Release `vX.Y.Z`.
 
+Dependabot PRs:
+- Minor and patch updates for npm (root and `web/`) and GitHub Actions are approved and auto-merged by `.github/workflows/dependabot-auto-merge.yml` once the required checks pass. They are exempt from the TunnelSentinel review: the workflow marks the required `TunnelSentinel / Code Review` check as "Not reviewed".
+- These merges do not build or publish images. Users only receive dependency updates with the next versioned release.
+- Major updates, Docker base image updates and Dependabot PRs with commits from anyone else still need a TunnelSentinel review.
+
 ### 5. Multi-Repo Release Automation (`promote`)
 We utilize an automated release promotion workflow to maintain total parity between our local repository and the official `umbrel-apps` GitHub fork.
 
