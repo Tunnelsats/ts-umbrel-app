@@ -189,11 +189,12 @@ drop for non-link-local egress. IPv6 cluster/ULA ranges are not bypassed by
 `K3S_BYPASS_CIDRS`; that setting remains IPv4-only. For emergency node-level
 subnet quarantine when Kubernetes `NetworkPolicy` enforcement is unavailable on
 a dual-stack cluster, `K3S_IPV6_POD_CIDRS` supplies the cluster IPv6 pod CIDRs
-(defaulting to `2001:cafe:42::/56,fd00:10:42::/56`, with automatic fallback to
-the node's local IPv6 pod subnet route). Update `K3S_IPV6_POD_CIDRS` in
-`deployment.yaml` if your dual-stack cluster uses a custom IPv6 `--cluster-cidr`.
-A missing IPv6 control sets `ipv6_rules_synced: false` and prevents aggregate
-`rules_synced` protection.
+(left empty by default in `deployment.yaml` for IPv4-only clusters, with
+automatic detection of the node's local IPv6 pod subnet route and the standard
+k3s `2001:cafe:42::/56,fd00:10:42::/56` ranges). On dual-stack clusters, set
+`K3S_IPV6_POD_CIDRS` in `deployment.yaml` to your IPv6 `--cluster-cidr` (for
+example `2001:cafe:42::/56,fd00:10:42::/56`). A missing IPv6 control sets
+`ipv6_rules_synced: false` and prevents aggregate `rules_synced` protection.
 
 Cluster-internal destinations must be listed explicitly in
 `K3S_BYPASS_CIDRS`. The shipped Deployment uses the standard k3s ranges:

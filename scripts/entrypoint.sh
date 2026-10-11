@@ -71,8 +71,9 @@ export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 # These are the default k3s pod/service CIDRs; custom clusters must override
 # this with their exact internal CIDRs.
 export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
+export K3S_POD_CIDRS="${K3S_POD_CIDRS:-}"
 export K3S_IPV6_BYPASS_CIDRS="${K3S_IPV6_BYPASS_CIDRS:-}"
-export K3S_IPV6_POD_CIDRS="${K3S_IPV6_POD_CIDRS:-2001:cafe:42::/56,fd00:10:42::/56}"
+export K3S_IPV6_POD_CIDRS="${K3S_IPV6_POD_CIDRS:-}"
 # Persist a compound, boot-scoped policy-rule owner tag. Linux exposes only an
 # 8-bit protocol field, so ownership also includes a randomly allocated block
 # of four rule preferences. A component that later reuses our protocol cannot
@@ -707,7 +708,27 @@ persist_decommissioned_state() {
 
 load_managed_k3s_policy_state() {
     load_decommissioned_state || return 1
-    [ "${K3S_POLICY_STATE_LOADED}" = "false" ] || return 0
+    if [ "${K3S_POLICY_STATE_LOADED}" != "false" ]; then
+        if [ -z "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ]; then
+            K3S_TARGET_POD_NAMESPACE="${MANAGED_K3S_POD_NAMESPACE}"
+        fi
+        if [ -z "${K3S_TARGET_POD_SELECTOR:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ]; then
+            K3S_TARGET_POD_SELECTOR="${MANAGED_K3S_POD_SELECTOR}"
+        fi
+        if [ -n "${MANAGED_K3S_TARGET_IP:-}" ] && [ "${MANAGED_K3S_TARGET_IP}" != "10.9.9.9" ] && \
+           { [ -z "${DOCKER_TARGET_IP:-}" ] || [ "${DOCKER_TARGET_IP}" = "10.9.9.9" ]; }; then
+            DOCKER_TARGET_IP="${MANAGED_K3S_TARGET_IP}"
+            TARGET_IMPL="${TARGET_IMPL:-${MANAGED_K3S_TARGET_IMPL:-}}"
+            K3S_TARGET_POD_NAME="${K3S_TARGET_POD_NAME:-${MANAGED_K3S_POD_NAME:-}}"
+            K3S_TARGET_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            K3S_TARGET_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
+        fi
+        if [ "${#MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] && [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ]; then
+            TARGET_IPV6_ADDRESSES=("${MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}")
+            TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        fi
+        return 0
+    fi
 
     local current_boot state saved_boot target_ip target_impl pod_name pod_namespace pod_selector decommissioned parsed_ipv6 ipv6_addr
     current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
@@ -2444,7 +2465,65 @@ remove_k3s_egress_guards() {
     return 0
 }
 
+k3s_node_has_ipv6_pod_route() {
+    local route_lines
+    route_lines="$(ip -6 route show 2>/dev/null || true)"
+    [ -n "${route_lines}" ] || return 1
+    ROUTE_LINES="${route_lines}" python3 -c '
+import ipaddress
+import os
+
+default_pod_nets = (
+    ipaddress.ip_network("2001:cafe:42::/56"),
+    ipaddress.ip_network("fd00:10:42::/56"),
+)
+cni_prefixes = ("cni", "flannel", "cilium", "cali", "kube", "ovn", "weave", "antrea", "pod-r")
+
+for line in os.environ.get("ROUTE_LINES", "").splitlines():
+    parts = line.split()
+    if not parts:
+        continue
+    if parts[0] in {
+        "local",
+        "broadcast",
+        "multicast",
+        "throw",
+        "unreachable",
+        "prohibit",
+        "blackhole",
+        "nat",
+        "anycast",
+    }:
+        continue
+    idx = 1 if parts[0] == "unicast" else 0
+    if idx >= len(parts):
+        continue
+    prefix_token = parts[idx]
+    if prefix_token == "default" or "/" not in prefix_token:
+        continue
+    try:
+        net = ipaddress.ip_network(prefix_token, strict=False)
+    except ValueError:
+        continue
+    if net.version != 6 or net.prefixlen <= 0 or net.prefixlen >= 128:
+        continue
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        continue
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or any(net.subnet_of(pod_net) for pod_net in default_pod_nets):
+        raise SystemExit(0)
+raise SystemExit(1)
+' >/dev/null 2>&1
+}
+
 k3s_ipv6_is_active() {
+    if [ "${K3S_MODE}" != "true" ]; then
+        return 1
+    fi
     if ! load_managed_ipv6_policy_state; then
         return 0
     fi
@@ -2453,8 +2532,10 @@ k3s_ipv6_is_active() {
        [ "${#MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] || \
        [ "${IPV6_POLICY_TABLE_MANAGED}" = "true" ] || \
        [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" = "true" ] || \
+       [ -n "${K3S_IPV6_POD_CIDRS:-}" ] || \
        [ -n "${K3S_IPV6_BYPASS_CIDRS:-}" ] || \
-       [ -n "${K3S_IPV6_QUARANTINE_CIDR:-}" ]; then
+       [ -n "${K3S_IPV6_QUARANTINE_CIDR:-}" ] || \
+       k3s_node_has_ipv6_pod_route; then
         return 0
     fi
     return 1
@@ -2503,6 +2584,11 @@ import os
 raw_cidrs = [item.strip() for item in os.environ.get("RAW_IPV6_CIDRS", "").split(",") if item.strip()]
 raw_targets = [item.strip() for item in os.environ.get("TARGET_IPV6_CSV", "").split(",") if item.strip()]
 route_lines = os.environ.get("ROUTE_LINES", "").splitlines()
+default_pod_nets = [
+    ipaddress.ip_network("2001:cafe:42::/56"),
+    ipaddress.ip_network("fd00:10:42::/56"),
+]
+cni_prefixes = ("cni", "flannel", "cilium", "cali", "kube", "ovn", "weave", "antrea", "pod-r")
 
 configured_networks = []
 for value in raw_cidrs:
@@ -2520,6 +2606,7 @@ for value in raw_cidrs:
         configured_networks.append(net)
 
 route_networks = []
+cni_route_networks = []
 for line in route_lines:
     parts = line.split()
     if not parts:
@@ -2552,6 +2639,14 @@ for line in route_lines:
         continue
     if net not in route_networks:
         route_networks.append(net)
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or any(net.subnet_of(pod_net) for pod_net in default_pod_nets):
+        if net not in cni_route_networks:
+            cni_route_networks.append(net)
 
 targets = []
 for value in raw_targets:
@@ -2568,15 +2663,24 @@ if targets:
         matches = [net for net in configured_networks if addr in net]
         if not matches:
             matches = [net for net in route_networks if addr in net]
+        if not matches and not configured_networks:
+            matches = [net for net in default_pod_nets if addr in net]
         if not matches:
             raise SystemExit(f"no IPv6 pod CIDR covers {addr}")
         best = max(matches, key=lambda item: item.prefixlen)
         if best not in selected:
             selected.append(best)
 else:
-    if not configured_networks:
+    if cni_route_networks:
+        for route_net in cni_route_networks:
+            matches = [net for net in configured_networks if route_net.subnet_of(net)]
+            best = max(matches, key=lambda item: item.prefixlen) if matches else route_net
+            if best not in selected:
+                selected.append(best)
+    elif configured_networks:
+        selected = list(configured_networks)
+    else:
         raise SystemExit("missing IPv6 pod CIDR")
-    selected = list(configured_networks)
 
 for net in selected:
     print(net)
@@ -2694,61 +2798,209 @@ remove_k3s_ipv6_subnet_quarantine() {
 
 ensure_k3s_subnet_quarantine() {
     local source_ip="${1:-}"
+    local matched_cidrs
     local pod_cidr
     local escaped_cidr
     local exact_pattern
     local quarantine_rule
+    local route_lines=""
 
     if ! normalize_k3s_bypass_cidrs; then
         return 1
     fi
-    pod_cidr="$(
+    if [ -z "${source_ip}" ] || [ "${source_ip}" = "10.9.9.9" ]; then
+        route_lines="$(ip -4 route show 2>/dev/null || ip route show 2>/dev/null || true)"
+    fi
+    if ! matched_cidrs="$(
         SOURCE_IP="${source_ip}" \
         BYPASS_CIDRS="${K3S_BYPASS_CIDRS_NORMALIZED}" \
+        CONFIGURED_POD_CIDRS="${K3S_POD_CIDRS:-}" \
+        K8S_SERVICE_HOST="${KUBERNETES_SERVICE_HOST:-}" \
+        ROUTE_LINES="${route_lines}" \
         python3 -c '
 import ipaddress
 import os
 
 raw_source = os.environ.get("SOURCE_IP", "").strip()
-if not raw_source:
-    raise SystemExit("missing target pod IP")
-source = ipaddress.ip_address(raw_source)
+raw_configured = [
+    value.strip()
+    for value in os.environ.get("CONFIGURED_POD_CIDRS", "").split(",")
+    if value.strip()
+]
+k8s_service_host = os.environ.get("K8S_SERVICE_HOST", "").strip()
+route_lines = os.environ.get("ROUTE_LINES", "").splitlines()
+cni_prefixes = (
+    "cni",
+    "flannel",
+    "cali",
+    "cilium",
+    "cbr",
+    "lxc",
+    "vxlan.calico",
+    "ovn",
+    "kube-bridge",
+    "weave",
+)
+default_pod_net = ipaddress.ip_network("10.42.0.0/16")
+
+configured_pod_networks = []
+for value in raw_configured:
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SystemExit(f"invalid IPv4 pod CIDR {value!r}: {exc}")
+    if net.version != 4:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} is not an IPv4 network")
+    if net.prefixlen <= 0 or net.prefixlen >= 32:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} must be a subnet prefix between /1 and /31")
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} is not a routable pod subnet")
+    if net not in configured_pod_networks:
+        configured_pod_networks.append(net)
+
 networks = [
     ipaddress.ip_network(value)
     for value in os.environ["BYPASS_CIDRS"].split(",")
     if value
 ]
-matches = [network for network in networks if source in network]
-print(max(matches, key=lambda network: network.prefixlen) if matches else "")
-' 2>/dev/null || true
-    )"
-    if [ -z "${pod_cidr}" ]; then
+if not networks and not configured_pod_networks:
+    raise SystemExit("no bypass CIDRs")
+
+service_host_ip = None
+if k8s_service_host:
+    try:
+        addr = ipaddress.ip_address(k8s_service_host)
+        if addr.version == 4:
+            service_host_ip = addr
+    except ValueError:
+        pass
+
+cni_route_networks = []
+host_route_networks = []
+for line in route_lines:
+    parts = line.split()
+    if not parts:
+        continue
+    if parts[0] in {
+        "local",
+        "broadcast",
+        "multicast",
+        "throw",
+        "unreachable",
+        "prohibit",
+        "blackhole",
+        "nat",
+        "anycast",
+    }:
+        continue
+    idx = 1 if parts[0] == "unicast" else 0
+    if idx >= len(parts):
+        continue
+    prefix_token = parts[idx]
+    if prefix_token == "default" or "/" not in prefix_token:
+        continue
+    try:
+        net = ipaddress.ip_network(prefix_token, strict=False)
+    except ValueError:
+        continue
+    if net.version != 4 or net.prefixlen <= 0 or net.prefixlen >= 32:
+        continue
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        continue
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or net.subnet_of(default_pod_net):
+        if net not in cni_route_networks:
+            cni_route_networks.append(net)
+    elif dev:
+        if net not in host_route_networks:
+            host_route_networks.append(net)
+
+selected = []
+if not raw_source or raw_source == "10.9.9.9":
+    if configured_pod_networks:
+        if cni_route_networks:
+            for route_net in cni_route_networks:
+                matches = [net for net in configured_pod_networks if route_net.subnet_of(net)]
+                if matches:
+                    best = max(matches, key=lambda item: item.prefixlen)
+                    if best not in selected:
+                        selected.append(best)
+        if not selected:
+            selected = list(configured_pod_networks)
+    else:
+        cni_matches = []
+        for route_net in cni_route_networks:
+            matches = [net for net in networks if route_net.subnet_of(net)]
+            if matches:
+                best = max(matches, key=lambda item: item.prefixlen)
+                if best not in cni_matches:
+                    cni_matches.append(best)
+        if cni_matches:
+            selected = cni_matches
+        else:
+            selected = [
+                network for network in networks
+                if str(network) != "10.43.0.0/16"
+                and network.prefixlen < 32
+                and (service_host_ip is None or service_host_ip not in network)
+                and not any(
+                    host_net == network or host_net.subnet_of(network) or network.subnet_of(host_net)
+                    for host_net in host_route_networks
+                )
+            ]
+else:
+    source = ipaddress.ip_address(raw_source)
+    candidate_pool = configured_pod_networks + [
+        net for net in networks if net not in configured_pod_networks
+    ]
+    matches = [network for network in candidate_pool if source in network]
+    if matches:
+        selected.append(max(matches, key=lambda network: network.prefixlen))
+
+for net in selected:
+    print(net)
+' 2>/dev/null
+    )"; then
         LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
         return 1
     fi
-    K3S_QUARANTINE_CIDR="${pod_cidr}"
-
-    # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
-    escaped_cidr="${pod_cidr%/32}"
-    escaped_cidr="${escaped_cidr//./\\.}"
-    exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
-    if [ -n "${quarantine_rule}" ]; then
-        if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
-            LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
-            return 1
-        fi
-    else
-        if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
-            LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
-            return 1
-        fi
-        quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
-        if [ -z "${quarantine_rule}" ] || ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
-            LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
-            return 1
-        fi
+    if [ -z "${matched_cidrs}" ]; then
+        LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
+        return 1
     fi
+
+    local -a quarantined_list=()
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
+        escaped_cidr="${pod_cidr%/32}"
+        escaped_cidr="${escaped_cidr//./\\.}"
+        exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+        if [ -n "${quarantine_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
+                return 1
+            fi
+        else
+            if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
+                return 1
+            fi
+            quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+            if [ -z "${quarantine_rule}" ] || ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+                return 1
+            fi
+        fi
+        quarantined_list+=("${pod_cidr}")
+    done <<< "${matched_cidrs}"
+
+    K3S_QUARANTINE_CIDR="$(IFS=,; printf '%s' "${quarantined_list[*]}")"
     if ! ensure_k3s_ipv6_subnet_quarantine; then
         return 1
     fi
@@ -5220,6 +5472,15 @@ preserve_fail_closed_dataplane() {
         if [ "${target_ip}" = "10.9.9.9" ]; then
             target_ip=""
         fi
+        if [ -z "${target_ip}" ] && [ "${MANAGED_K3S_TARGET_IP:-}" != "10.9.9.9" ]; then
+            target_ip="${MANAGED_K3S_TARGET_IP:-}"
+        fi
+        if [ -n "${target_ip}" ]; then
+            DOCKER_TARGET_IP="${target_ip}"
+        fi
+        if [ -z "${K3S_TARGET_POD_NAME:-}" ] && [ -n "${MANAGED_K3S_POD_NAME:-}" ]; then
+            K3S_TARGET_POD_NAME="${MANAGED_K3S_POD_NAME}"
+        fi
         local guard_ok=false
         local blackhole_ok=false
         local quarantine_ok=false
@@ -5262,7 +5523,7 @@ preserve_fail_closed_dataplane() {
         if ensure_k3s_emergency_network_policy; then
             policy_ok=true
         else
-            if [ -n "${target_ip}" ] && [ "${quarantine_ok}" = false ]; then
+            if [ "${quarantine_ok}" = false ]; then
                 # If the Kubernetes API is unavailable on the first attempt, immediately
                 # quarantine the pod CIDR in the kernel so replacement pods scheduled on
                 # this node cannot egress over clearnet while the cluster-wide emergency
@@ -5283,6 +5544,7 @@ preserve_fail_closed_dataplane() {
                     policy_ok=true
                     if [ "${quarantine_for_netpol}" = true ]; then
                         remove_k3s_subnet_quarantine || true
+                        remove_k3s_ipv6_subnet_quarantine || true
                         quarantine_ok=false
                     fi
                     break
@@ -5418,6 +5680,15 @@ _verify_dataplane_decommissioned_inner() {
                 fi
             done
         fi
+    fi
+
+    if iptables -t nat -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-dnat" || \
+       iptables -t nat -S POSTROUTING 2>/dev/null | grep -Fq -- "tunnelsats-masq" || \
+       iptables -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(forward-in|forward-out|k3s-egress-guard)" || \
+       iptables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-conn-restore" || \
+       iptables -t mangle -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(wg-mark|conn-save)"; then
+        LAST_ERROR="Failed to remove tagged IPv4 dataplane iptables rules"
+        return 1
     fi
 
     if ip6tables -S FORWARD 2>/dev/null | grep -Eq -- "--comment (${IPV6_RULE_MARKER}|${K3S_IPV6_QUARANTINE_MARKER})"; then
@@ -5567,11 +5838,35 @@ decommission_dataplane() {
     IPV6_RULES_SYNCED="false"
     LAST_ERROR=""
     write_state
+    discard_pending_activation_triggers
     if [ -n "${request_id}" ]; then
         write_decommission_result "${request_id}" true
     fi
     log INFO "decommission_done request_id=${request_id:-none}"
     return 0
+}
+
+discard_pending_activation_triggers() {
+    ensure_reconcile_dirs
+    rm -f "${RESTART_TRIGGER}"
+    if [ -f "${RECONCILE_TRIGGER_LEGACY}" ]; then
+        local legacy_req
+        legacy_req="$(cat "${RECONCILE_TRIGGER_LEGACY}" 2>/dev/null || true)"
+        rm -f "${RECONCILE_TRIGGER_LEGACY}"
+        if is_valid_request_id "${legacy_req}"; then
+            write_reconcile_result "${legacy_req}" false
+        fi
+    fi
+    local trigger_path
+    local req
+    while IFS= read -r trigger_path; do
+        [ -n "${trigger_path}" ] || continue
+        req="$(basename "${trigger_path}" .trigger)"
+        rm -f "${trigger_path}"
+        if is_valid_request_id "${req}"; then
+            write_reconcile_result "${req}" false
+        fi
+    done < <(find "${RECONCILE_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' | sort)
 }
 
 process_decommission_triggers() {
@@ -5656,7 +5951,11 @@ main_loop() {
         ensure_decommission_dirs
 
         if [ -f "${RESTART_TRIGGER}" ]; then
-            handle_restart_trigger || true
+            if [ -n "$(find "${DECOMMISSION_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' -print -quit 2>/dev/null)" ]; then
+                rm -f "${RESTART_TRIGGER}"
+            else
+                handle_restart_trigger || true
+            fi
         fi
 
         process_decommission_triggers

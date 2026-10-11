@@ -2870,6 +2870,10 @@ source "$1"
 STATE_FILE="${POLICY_TEST_STATE_FILE}.state.json"
 DECOMMISSION_TRIGGER_DIR="${POLICY_TEST_STATE_FILE}.decomm_trigger.d"
 DECOMMISSION_RESULT_DIR="${POLICY_TEST_STATE_FILE}.decomm_result.d"
+RECONCILE_TRIGGER_DIR="${POLICY_TEST_STATE_FILE}.reconcile_trigger.d"
+RECONCILE_RESULT_DIR="${POLICY_TEST_STATE_FILE}.reconcile_result.d"
+RECONCILE_TRIGGER_LEGACY="${POLICY_TEST_STATE_FILE}.reconcile_trigger_legacy"
+RECONCILE_RESULT_LEGACY="${POLICY_TEST_STATE_FILE}.reconcile_result_legacy.json"
 
 K3S_MODE="true"
 SECURE_MODE="false"
@@ -2917,15 +2921,25 @@ process_decommission_triggers
 jq -e '.request_id == "req-decomm-fail" and .decommissioned == false and .state.decommissioned == false and (.state.last_error | contains("NetworkPolicy"))' \
     "${DECOMMISSION_RESULT_DIR}/req-decomm-fail.json" >/dev/null
 
-# 2. When all guards are removed and verified, decommission succeeds.
+# 2. When all guards are removed and verified, decommission succeeds and
+# discards any already-queued manual reconcile or restart triggers so an older
+# waiting activation request cannot undo the restore.
 remove_k3s_emergency_network_policy() {
     NETPOL_REMOVED=1
     return 0
 }
+ensure_reconcile_dirs
+RESTART_TRIGGER="${POLICY_TEST_STATE_FILE}.restart"
+printf 'restart\n' > "${RESTART_TRIGGER}"
+printf 'req-legacy-stale\n' > "${RECONCILE_TRIGGER_LEGACY}"
+printf 'req-manual-stale\n' > "${RECONCILE_TRIGGER_DIR}/req-manual-stale.trigger"
 printf 'req-decomm-1\n' > "${DECOMMISSION_TRIGGER_DIR}/req-decomm-1.trigger"
 process_decommission_triggers
 
 [[ ! -f "${DECOMMISSION_TRIGGER_DIR}/req-decomm-1.trigger" ]]
+[[ ! -f "${RESTART_TRIGGER}" ]]
+[[ ! -f "${RECONCILE_TRIGGER_LEGACY}" ]]
+[[ ! -f "${RECONCILE_TRIGGER_DIR}/req-manual-stale.trigger" ]]
 [[ "${NETPOL_REMOVED}" == "1" ]]
 [[ "${CLEANUP_ARG}" == "full" ]]
 [[ "${DECOMMISSIONED}" == "true" ]]
@@ -2938,6 +2952,10 @@ jq -e '.decommissioned == true and .target_ip == ""' "${K3S_POLICY_STATE_FILE}" 
 jq -e '.decommissioned == true and .rules_synced == false' "${STATE_FILE}" >/dev/null
 jq -e '.request_id == "req-decomm-1" and .decommissioned == true and .state.decommissioned == true' \
     "${DECOMMISSION_RESULT_DIR}/req-decomm-1.json" >/dev/null
+jq -e '.request_id == "req-manual-stale" and .changed == false and .state.rules_synced == false and .state.decommissioned == true' \
+    "${RECONCILE_RESULT_DIR}/req-manual-stale.json" >/dev/null
+jq -e '.request_id == "req-legacy-stale" and .changed == false and .state.rules_synced == false and .state.decommissioned == true' \
+    "${RECONCILE_RESULT_DIR}/req-legacy-stale.json" >/dev/null
 
 # 3. Container restart in Docker/Secure Mode or k3s reboot must preserve disabled state
 # before startup installs guards or reconciles.
@@ -2990,6 +3008,18 @@ jq -e '.request_id == "req-decomm-1" and .decommissioned == true and .state.deco
 
     ip6tables() { return 0; }
     ip() { return 0; }
+    iptables() {
+        if [[ "$*" == "-t nat -S POSTROUTING" ]]; then
+            printf '%s\n' "-A POSTROUTING -m comment --comment tunnelsats-masq -j MASQUERADE"
+        fi
+        return 0
+    }
+    if decommission_dataplane; then
+        exit 1
+    fi
+    [[ "${DECOMMISSIONED}" == "false" ]]
+
+    iptables() { return 0; }
     decommission_dataplane
     [[ "${DECOMMISSIONED}" == "true" ]]
     [[ "${DOCKER_TARGET_IP}" == "10.9.9.9" ]]
@@ -3360,6 +3390,289 @@ remove_k3s_subnet_quarantine
 [[ -z "${V6_RULES}" ]]
 [[ "${V6_FILTER_INSTALLED}" == "false" ]]
 [[ -z "${K3S_IPV6_QUARANTINE_CIDR}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_shutdown_uses_managed_target_and_cold_pod_cidr_fallback_when_discovery_failed() -> None:
+    result = run_bash(
+        r'''
+source "$1"
+
+API_PID=""
+exit() { return 0; }
+K3S_MODE="true"
+SECURE_MODE="false"
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
+K3S_SHUTDOWN_RETRY_INTERVAL=0
+K3S_BYPASS_CIDRS="10.43.0.0/16,10.42.0.0/16"
+
+# (a) After an earlier successful reconcile, a failed detect_k3s_target clears
+# DOCKER_TARGET_IP and K3S_TARGET_POD_NAME while K3S_POLICY_STATE_LOADED is
+# already "true" and MANAGED_K3S_TARGET_IP is still set in memory. When SIGTERM
+# arrives while the k8s API is still unavailable, cleanup must backfill from
+# MANAGED_K3S_*, install per-pod guards for 10.42.1.7, and install pod-CIDR
+# subnet quarantine.
+K3S_POLICY_STATE_LOADED="true"
+MANAGED_K3S_TARGET_IP="10.42.1.7"
+MANAGED_K3S_TARGET_IMPL="lnd"
+MANAGED_K3S_POD_NAME="lnd-0"
+MANAGED_K3S_POD_NAMESPACE="lightning"
+MANAGED_K3S_POD_SELECTOR="app=lnd"
+DOCKER_TARGET_IP=""
+K3S_TARGET_POD_NAME=""
+
+GUARD_IP=""
+BLACKHOLE_IP=""
+DELETED_POD=""
+V4_RULES=""
+
+ensure_k3s_egress_guard() {
+    GUARD_IP="$1"
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    BLACKHOLE_IP="$1"
+    return 0
+}
+ensure_k3s_emergency_network_policy() {
+    return 1
+}
+delete_k3s_target_pod() {
+    DELETED_POD="${K3S_TARGET_POD_NAMESPACE}/${K3S_TARGET_POD_NAME}"
+    return 0
+}
+cleanup_dataplane() {
+    return 0
+}
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+cleanup
+[[ "${DOCKER_TARGET_IP}" == "10.42.1.7" ]]
+[[ "${GUARD_IP}" == "10.42.1.7" ]]
+[[ "${BLACKHOLE_IP}" == "10.42.1.7" ]]
+[[ "${DELETED_POD}" == "lightning/lnd-0" ]]
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${V4_RULES}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
+
+# (b) Cold shutdown where both DOCKER_TARGET_IP and MANAGED_K3S_TARGET_IP are
+# empty and emergency NetworkPolicy fails: ensure_k3s_subnet_quarantine must
+# still install the fallback 10.42.0.0/16 blackhole rule.
+DOCKER_TARGET_IP=""
+MANAGED_K3S_TARGET_IP=""
+K3S_TARGET_POD_NAME=""
+MANAGED_K3S_POD_NAME=""
+K3S_QUARANTINE_CIDR=""
+V4_RULES=""
+GUARD_IP=""
+BLACKHOLE_IP=""
+
+cleanup
+[[ -z "${GUARD_IP}" ]]
+[[ -z "${BLACKHOLE_IP}" ]]
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${V4_RULES}" == *"from 10.42.0.0/16 blackhole proto 200"* ]]
+
+# (c) Cold shutdown in dual-stack k3s before pod discovery succeeds (no saved IPv6
+# state, empty TARGET_IPV6_ADDRESSES): both configured K3S_IPV6_POD_CIDRS and
+# node CNI IPv6 pod routes trigger IPv6 pod-CIDR quarantine alongside IPv4.
+IPV6_POLICY_STATE_LOADED="true"
+IPV6_POLICY_TABLE_MANAGED="false"
+TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
+TARGET_IPV6_ADDRESSES=()
+MANAGED_TARGET_IPV6_ADDRESSES=()
+MANAGED_K3S_TARGET_IPV6_ADDRESSES=()
+K3S_IPV6_POD_CIDRS="2001:db8:42::/64"
+K3S_QUARANTINE_CIDR=""
+K3S_IPV6_QUARANTINE_CIDR=""
+V4_RULES=""
+V6_RULES=""
+V6_FILTER_INSTALLED="false"
+
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "-6 rule show pref 32763")
+            printf '%s' "${V6_RULES}"
+            return 0
+            ;;
+        "-6 rule add from 2001:db8:42::/64 blackhole protocol 200 pref 32763")
+            V6_RULES=$'32763:\tfrom 2001:db8:42::/64 blackhole proto 200\n'
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+ip6tables() {
+    if [[ "$1" == "-C" && "$*" == *"-s 2001:db8:42::/64"* ]]; then
+        [[ "${V6_FILTER_INSTALLED}" == "true" ]]
+        return
+    fi
+    if [[ "$1" == "-I" && "$*" == *"-s 2001:db8:42::/64"* ]]; then
+        V6_FILTER_INSTALLED="true"
+        return 0
+    fi
+    return 1
+}
+
+cleanup
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${K3S_IPV6_QUARANTINE_CIDR}" == "2001:db8:42::/64" ]]
+[[ "${V6_RULES}" == *"from 2001:db8:42::/64 blackhole proto 200"* ]]
+[[ "${V6_FILTER_INSTALLED}" == "true" ]]
+
+# Even if K3S_IPV6_POD_CIDRS retains the shipped defaults while the cluster uses
+# a custom local pod route on cni0, cold shutdown must quarantine the local pod route.
+K3S_IPV6_POD_CIDRS="2001:cafe:42::/56,fd00:10:42::/56"
+K3S_QUARANTINE_CIDR=""
+K3S_IPV6_QUARANTINE_CIDR=""
+V4_RULES=""
+V6_RULES=""
+V6_FILTER_INSTALLED="false"
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES=$'32763:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "-6 route show")
+            printf '%s\n' \
+                "2001:db8:1::/64 dev eth0 proto kernel metric 256 pref medium" \
+                "2001:db8:42::/64 dev cni0 proto kernel metric 256 pref medium"
+            return 0
+            ;;
+        "-6 rule show pref 32763")
+            printf '%s' "${V6_RULES}"
+            return 0
+            ;;
+        "-6 rule add from 2001:db8:42::/64 blackhole protocol 200 pref 32763")
+            V6_RULES=$'32763:\tfrom 2001:db8:42::/64 blackhole proto 200\n'
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+cleanup
+[[ "${K3S_QUARANTINE_CIDR}" == "10.42.0.0/16" ]]
+[[ "${K3S_IPV6_QUARANTINE_CIDR}" == "2001:db8:42::/64" ]]
+[[ "${V6_RULES}" == *"from 2001:db8:42::/64 blackhole proto 200"* ]]
+[[ "${V6_FILTER_INSTALLED}" == "true" ]]
+
+# (d) Custom cluster where service CIDR (10.0.0.0/16) sorts before pod CIDR
+# (10.244.0.0/16): CNI route discovery and KUBERNETES_SERVICE_HOST select
+# 10.244.0.0/16, and when neither is available all candidate subnets are
+# quarantined so 10.244.0.0/16 is never left unblocked.
+K3S_BYPASS_CIDRS="10.0.0.0/16,10.244.0.0/16"
+K3S_IPV6_POD_CIDRS=""
+K3S_QUARANTINE_CIDR=""
+K3S_IPV6_QUARANTINE_CIDR=""
+V4_RULES=""
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "-4 route show")
+            printf '%s\n' "10.244.0.0/24 dev cni0 proto kernel scope link src 10.244.0.1"
+            return 0
+            ;;
+        "rule add from 10.244.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES+=$'32763:\tfrom 10.244.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "rule add from 10.0.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES+=$'32763:\tfrom 10.0.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+cleanup
+[[ "${K3S_QUARANTINE_CIDR}" == "10.244.0.0/16" ]]
+[[ "${V4_RULES}" == *"from 10.244.0.0/16 blackhole proto 200"* ]]
+[[ "${V4_RULES}" != *"from 10.0.0.0/16"* ]]
+
+# Without CNI routes or KUBERNETES_SERVICE_HOST, all candidate non-service
+# bypass subnets are quarantined so 10.244.0.0/16 is still protected.
+KUBERNETES_SERVICE_HOST=""
+K3S_QUARANTINE_CIDR=""
+V4_RULES=""
+ip() {
+    case "$*" in
+        "rule show pref 32763")
+            printf '%s' "${V4_RULES}"
+            return 0
+            ;;
+        "rule add from 10.244.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES+=$'32763:\tfrom 10.244.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        "rule add from 10.0.0.0/16 blackhole protocol 200 pref 32763")
+            V4_RULES+=$'32763:\tfrom 10.0.0.0/16 blackhole proto 200\n'
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+cleanup
+[[ "${K3S_QUARANTINE_CIDR}" == "10.0.0.0/16,10.244.0.0/16" ]]
+[[ "${V4_RULES}" == *"from 10.244.0.0/16 blackhole proto 200"* ]]
+
+# If all bypass CIDRs are excluded as host LAN or service ranges, cold shutdown
+# must fail closed without re-adding host LAN or service source blackholes.
+K3S_BYPASS_CIDRS="192.168.1.0/24,10.43.0.0/16"
+K3S_QUARANTINE_CIDR=""
+V4_RULES=""
+ip() {
+    case "$*" in
+        "-4 route show")
+            printf '%s\n' "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.10"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+if ensure_k3s_subnet_quarantine ""; then
+    exit 1
+fi
+[[ -z "${K3S_QUARANTINE_CIDR}" ]]
 '''
     )
     assert result.returncode == 0, result.stderr

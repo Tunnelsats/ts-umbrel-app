@@ -3800,13 +3800,22 @@ def test_restore_node_rejects_restore_when_node_running_state_lookup_fails(
         empty_k8s_resp = MagicMock()
         empty_k8s_resp.status_code = 200
         empty_k8s_resp.json.return_value = {"items": []}
-        with patch("app.DATA_DIR", tmp_dir), \
+
+        def k8s_get_only_lnd_ns(url, **_kwargs):
+            if "/namespaces/bitcoin-lab/" in url:
+                return empty_k8s_resp
+            raise requests.HTTPError("403 Client Error: Forbidden for unused CLN namespace")
+
+        with patch.dict(os.environ, {"LND_K8S_SERVICE": "lnd", "CLN_K8S_SERVICE": ""}), \
+                patch("app.DATA_DIR", tmp_dir), \
                 patch("app.K3S_MODE", True), \
                 patch("app.SECURE_MODE", False), \
                 patch("app.LND_CONFIG_PATH", lnd_path), \
                 patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.LND_K8S_NAMESPACE", "bitcoin-lab"), \
+                patch("app.CLN_K8S_NAMESPACE", "default"), \
                 patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
-                patch("app._k8s_session.get", return_value=empty_k8s_resp), \
+                patch("app._k8s_session.get", side_effect=k8s_get_only_lnd_ns), \
                 patch("app.restart_container_by_pattern") as mock_restart:
             res_stopped = client.post("/api/local/restore-node")
 

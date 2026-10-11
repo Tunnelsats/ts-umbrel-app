@@ -3938,14 +3938,6 @@ def restore_node():
 
     lnd_processed, lnd_changed, cln_processed, cln_changed = False, False, False, False
     errors = []
-    lnd_lookup_ok, lnd_detected = detect_node_running_state("lnd")
-    cln_lookup_ok, cln_detected = detect_node_running_state("cln")
-    if not lnd_lookup_ok:
-        errors.append("Failed to determine LND running state.")
-    if not cln_lookup_ok:
-        errors.append("Failed to determine CLN running state.")
-    if errors:
-        return jsonify({"success": False, "error": " ".join(errors)}), 500
 
     meta_path = os.path.join(DATA_DIR, META_FILE)
     meta: Dict[str, Any] = {}
@@ -3965,6 +3957,52 @@ def restore_node():
 
     lnd_config_exists = os.path.exists(LND_CONFIG_PATH)
     lnd_backup = _backup_lines_from_meta(meta, "lnd")
+    cln_container_config, _ = resolve_node_config("cln")
+    cln_config_exists = bool(cln_container_config and os.path.exists(cln_container_config))
+    cln_backup = _backup_lines_from_meta(meta, "cln")
+
+    meta_target = str(meta.get("nodeType") or "").strip().lower()
+    dataplane_target = str(read_dataplane_state().get("target_impl") or "").strip().lower()
+    lnd_service_configured = bool(K3S_MODE and os.getenv("LND_K8S_SERVICE", "").strip())
+    cln_service_configured = bool(K3S_MODE and os.getenv("CLN_K8S_SERVICE", "").strip())
+
+    lnd_relevant = bool(
+        lnd_config_exists
+        or lnd_backup is not None
+        or meta_target == "lnd"
+        or dataplane_target == "lnd"
+        or lnd_service_configured
+        or lnd_exists is not _DEFAULT_LND_EXISTS
+    )
+    cln_relevant = bool(
+        cln_config_exists
+        or cln_backup is not None
+        or meta_target == "cln"
+        or dataplane_target == "cln"
+        or cln_service_configured
+        or cln_exists is not _DEFAULT_CLN_EXISTS
+    )
+    if not lnd_relevant and not cln_relevant:
+        lnd_relevant = True
+        cln_relevant = True
+
+    if lnd_relevant:
+        lnd_lookup_ok, lnd_detected = detect_node_running_state("lnd")
+        if not lnd_lookup_ok:
+            errors.append("Failed to determine LND running state.")
+    else:
+        lnd_lookup_ok, lnd_detected = True, False
+
+    if cln_relevant:
+        cln_lookup_ok, cln_detected = detect_node_running_state("cln")
+        if not cln_lookup_ok:
+            errors.append("Failed to determine CLN running state.")
+    else:
+        cln_lookup_ok, cln_detected = True, False
+
+    if errors:
+        return jsonify({"success": False, "error": " ".join(errors)}), 500
+
     if lnd_backup is None:
         lnd_processed, lnd_changed = comment_out_config_lines(
             LND_CONFIG_PATH,
@@ -3982,9 +4020,6 @@ def restore_node():
     elif lnd_processed and not lnd_detected:
         app.logger.info("LND config restored, but no running LND container detected. Skipping restart.")
 
-    cln_container_config, _ = resolve_node_config("cln")
-    cln_config_exists = bool(cln_container_config and os.path.exists(cln_container_config))
-    cln_backup = _backup_lines_from_meta(meta, "cln")
     if cln_backup is None:
         cln_processed, cln_changed = comment_out_config_lines(
             cln_container_config,
