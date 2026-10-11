@@ -4742,24 +4742,34 @@ preserve_fail_closed_dataplane() {
                 "${K3S_RULE_PROTOCOL}"; then
                 blackhole_ok=true
             fi
+            if [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ]; then
+                if ensure_k3s_subnet_quarantine "${target_ip}"; then
+                    quarantine_ok=true
+                fi
+            fi
         else
             MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
             MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
             K3S_POLICY_STATE_LOADED="true"
             persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
         fi
-        # Always quarantine the pod CIDR in the kernel during shutdown so any
-        # replacement pod scheduled on this node is blocked at K3S_QUARANTINE_RULE_PREF
-        # regardless of CNI NetworkPolicy controller state.
-        if ensure_k3s_subnet_quarantine "${target_ip}"; then
-            quarantine_ok=true
-        fi
         # Always install selector-based emergency NetworkPolicy before exiting or
         # restarting so any controller-created replacement Lightning pod (with a
         # new IP) is also fail-closed while TunnelSats is stopped.
+        local quarantine_for_netpol=false
         if ensure_k3s_emergency_network_policy; then
             policy_ok=true
         else
+            if [ "${quarantine_ok}" = false ]; then
+                # If the Kubernetes API is unavailable on the first attempt, immediately
+                # quarantine the pod CIDR in the kernel so replacement pods scheduled on
+                # this node cannot egress over clearnet while the cluster-wide emergency
+                # NetworkPolicy is retried.
+                if ensure_k3s_subnet_quarantine "${target_ip}"; then
+                    quarantine_ok=true
+                    quarantine_for_netpol=true
+                fi
+            fi
             local max_attempts="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
             local attempt=1
             while [ "${attempt}" -lt "${max_attempts}" ]; do
@@ -4769,6 +4779,10 @@ preserve_fail_closed_dataplane() {
                 fi
                 if ensure_k3s_emergency_network_policy; then
                     policy_ok=true
+                    if [ "${quarantine_for_netpol}" = true ]; then
+                        remove_k3s_subnet_quarantine || true
+                        quarantine_ok=false
+                    fi
                     break
                 fi
             done
@@ -4779,7 +4793,8 @@ preserve_fail_closed_dataplane() {
         if [ "${policy_ok}" = true ] || [ "${quarantine_ok}" = true ] || [ "${guard_ok}" = true ] || [ "${blackhole_ok}" = true ]; then
             cleanup_dataplane "--keep-tunnel"
         fi
-        if [ "${policy_ok}" = false ] || [ "${quarantine_ok}" = false ]; then
+        if [ "${policy_ok}" = false ] || \
+           { [ -n "${target_ip}" ] && [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ] && [ "${quarantine_ok}" = false ]; }; then
             LAST_ERROR="${LAST_ERROR:-k3s: Failed to establish replacement-pod fail-closed protection during shutdown}"
             RULES_SYNCED="false"
             IPV4_RULES_SYNCED="false"

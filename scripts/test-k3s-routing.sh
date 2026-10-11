@@ -229,6 +229,7 @@ ip netns exec "${ROUTER_NS}" env \
     DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
     bash -c '
         source "${ENTRYPOINT_PATH}"
+        STATE_FILE="'"${STATE_FILE_TMP}"'"
         K3S_MODE="true"
         SECURE_MODE="false"
         DOCKER_TARGET_IP="10.42.1.7"
@@ -238,6 +239,21 @@ ip netns exec "${ROUTER_NS}" env \
         K3S_TARGET_POD_SELECTOR="app=lnd"
         ensure_k3s_emergency_network_policy() { return 0; }
         preserve_fail_closed_dataplane
+        if ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" | grep -Fq "from 10.42.0.0/16"; then
+            echo "FAIL: routine SIGTERM preservation installed shared-subnet quarantine" >&2
+            exit 1
+        fi
+        K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
+        ensure_k3s_emergency_network_policy() { return 1; }
+        delete_k3s_target_pod() { return 0; }
+        if preserve_fail_closed_dataplane; then
+            echo "FAIL: preserve_fail_closed_dataplane succeeded when emergency NetworkPolicy failed" >&2
+            exit 1
+        fi
+        if ! ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" | grep -Fq "from 10.42.0.0/16"; then
+            echo "FAIL: failed NetworkPolicy SIGTERM did not retain shared-subnet quarantine" >&2
+            exit 1
+        fi
     '
 if ip netns exec "${POD_NS}" ping -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
     echo "FAIL: IPv4 traffic escaped during fail-closed SIGTERM preservation" >&2
