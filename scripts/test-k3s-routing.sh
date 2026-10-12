@@ -145,6 +145,17 @@ ip netns exec "${ROUTER_NS}" env \
         TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
         ensure_ipv6_containment
         ipv6_containment_is_synced
+        verify_k3s_target_routes
+
+        # A higher-priority unowned rule matching the pod CIDR must fail verification.
+        ip rule add from 10.42.1.0/24 table main pref 100
+        if verify_k3s_target_routes; then
+            ip rule del from 10.42.1.0/24 table main pref 100 >/dev/null 2>&1 || true
+            echo "FAIL: verify_k3s_target_routes accepted a shadowing rule at pref 100" >&2
+            exit 1
+        fi
+        ip rule del from 10.42.1.0/24 table main pref 100
+        verify_k3s_target_routes
 
         external_route="$(ip route get 198.51.100.2 from 10.42.1.7 iif pod-r)"
         if [[ "${external_route}" != *"dev tunnelsatsv2"* ]]; then
@@ -184,6 +195,154 @@ if ! ip netns exec "${POD_NS}" ping -c 1 -W 2 10.42.1.1 >/dev/null; then
     echo "FAIL: cluster-local bypass is unreachable" >&2
     exit 1
 fi
+
+# Simulate an unready co-located replacement pod (10.42.1.8 / 2001:db8:42::8).
+# Pre-guarding must block clearnet egress for the replacement pod before Ready=True
+# while preserving WireGuard routing for the active pod (10.42.1.7).
+ip -n "${POD_NS}" addr add 10.42.1.8/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::8/64 dev pod0 nodad
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        TUNNELSATS_K8S_NODE_NAME="worker-a"
+        DOCKER_TARGET_IP="10.42.1.7"
+        WG_IFACE="tunnelsatsv2"
+        pod_list='\''{"items":[{"metadata":{"name":"lnd-0"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","podIPs":[{"ip":"10.42.1.7"},{"ip":"2001:db8:42::7"}],"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-replacement"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"},{"ip":"2001:db8:42::8"}],"conditions":[{"type":"Ready","status":"False"}]}}]}'\''
+        pre_guard_colocated_k3s_candidate_pods "${pod_list}"
+    '
+if ip netns exec "${POD_NS}" ping -I 10.42.1.8 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: unready replacement pod IP 10.42.1.8 escaped to clearnet" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::8 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: unready replacement pod IPv6 2001:db8:42::8 escaped to clearnet" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.7 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: active pod IP 10.42.1.7 lost VPN routing while replacement was pre-guarded" >&2
+    exit 1
+fi
+
+# Simulate pre-discovery containment when target discovery fails and a new
+# replacement pod IP (10.42.1.9) appears on the shared pod CIDR before discovery.
+ip -n "${POD_NS}" addr add 10.42.1.9/24 dev pod0
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+        LND_K8S_SERVICE="lnd"
+        LND_K8S_NAMESPACE="lightning"
+        LND_K8S_POD_SELECTOR="app=lnd"
+        ensure_k3s_emergency_network_policy() { return 0; }
+        ensure_k3s_pre_discovery_containment "10.42.1.7"
+    '
+if ip netns exec "${POD_NS}" ping -I 10.42.1.9 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: unseen replacement pod IP 10.42.1.9 escaped during pre-discovery containment" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.9/24 dev pod0
+ip -n "${POD_NS}" addr del 10.42.1.8/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::8/64 dev pod0
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
+# Clean up the pre-guarded candidate rules for 10.42.1.8 / 2001:db8:42::8 and
+# restore clean 10.42.1.7 state for the subsequent kill-switch and SIGTERM tests.
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        DOCKER_TARGET_IP="10.42.1.7"
+        WG_IFACE="tunnelsatsv2"
+        K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="true" verify_k3s_target_routes
+        remove_k3s_subnet_quarantine
+        verify_k3s_target_routes
+        K3S_POD_API_QUERY_OK="true"
+        K3S_ALL_MATCHING_LOCAL_POD_IPS="10.42.1.7"
+        K3S_CANDIDATE_POD_IPS="10.42.1.7"
+        retire_stale_k3s_unmatched_ip_guards
+        remove_k3s_egress_guards
+        TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+        TARGET_IPV6_MACS=()
+        TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        ensure_ipv6_containment
+        K3S_NON_TARGET_POD_IPS="10.42.1.50"
+        K3S_NON_TARGET_POD_IPV6_ADDRESSES="2001:db8:42::50"
+        ensure_k3s_unknown_pod_containment "10.42.1.7"
+    '
+
+# Even after emergency pod-CIDR quarantine (32763) and egress guards are released,
+# a fast replacement pod IP (10.42.1.11 / 2001:db8:42::11) that finishes CNI setup
+# before its IP appears in the Kubernetes watch stream must remain blocked from
+# clearnet egress by the persistent kernel pod-CIDR fallback blackhole (32765)
+# while retaining cluster-local bypass access (32500), known non-target pod
+# outbound access (10.42.1.50 / 2001:db8:42::50), and active pod VPN routing.
+ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::11/64 dev pod0 nodad
+if ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: unseen post-CNI replacement pod IP 10.42.1.11 escaped to clearnet" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::11 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: unseen post-CNI replacement pod IPv6 2001:db8:42::11 escaped to clearnet" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: known non-target pod IP 10.42.1.50 lost outbound Internet access" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
+    echo "FAIL: known non-target pod IPv6 2001:db8:42::50 lost outbound Internet access" >&2
+    exit 1
+fi
+# Simulate a replacement Lightning pod reusing the terminated non-target pod's
+# IP (10.42.1.50 / 2001:db8:42::50) on a new CNI veth with a new MAC address
+# before the Kubernetes watch sees it. Because the 32500 exemption requires the
+# original pod's MAC-bound fwmark (0xca6d), the reused IP must be blocked by 32765.
+ORIG_POD0_MAC="$(ip -n "${POD_NS}" link show dev pod0 | awk '/link\/ether/ {print $2; exit}')"
+ip -n "${POD_NS}" link set dev pod0 address 02:42:0a:2a:01:fe
+if ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: replacement pod reusing non-target pod IP 10.42.1.50 with new MAC escaped to clearnet" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: replacement pod reusing non-target pod IPv6 2001:db8:42::50 with new MAC escaped to clearnet" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" link set dev pod0 address "${ORIG_POD0_MAC}"
+ip -n "${ROUTER_NS}" neigh replace 10.42.1.50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+ip -n "${ROUTER_NS}" -6 neigh replace 2001:db8:42::50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 2 10.42.1.1 >/dev/null; then
+    echo "FAIL: unseen replacement pod IP 10.42.1.11 lost cluster-local bypass" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.7 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: active pod IP 10.42.1.7 lost VPN routing under unknown-pod containment" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::50/64 dev pod0
+ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::11/64 dev pod0
 
 # Removing the WireGuard default leaves the table blackhole in place. External
 # traffic must fail instead of falling back to the clear interface.
@@ -252,6 +411,18 @@ if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; 
     echo "FAIL: IPv6 traffic escaped during fail-closed SIGTERM preservation" >&2
     exit 1
 fi
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: non-target pod IP 10.42.1.50 lost Internet access during SIGTERM preservation" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
+    echo "FAIL: non-target pod IPv6 2001:db8:42::50 lost Internet access during SIGTERM preservation" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::50/64 dev pod0
 
 # When emergency NetworkPolicy creation fails during SIGTERM, preserve_fail_closed_dataplane
 # must install and retain the pod-CIDR subnet quarantine and return non-zero.

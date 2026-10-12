@@ -931,11 +931,14 @@ LND_K8S_NAMESPACE="lightning"
 LND_K8S_POD_SELECTOR="app=lnd"
 CLN_K8S_SERVICE=""
 
+ensure_k3s_egress_guard_additive() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
+ensure_ipv6_source_blackhole_rule() { return 0; }
 resolve_svc_ip() {
     printf '%s\n' "10.43.0.10"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-unready"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-local"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","podIPs":[{"ip":"10.42.1.7"},{"ip":"2001:db8:42::7"}],"conditions":[{"type":"Ready","status":"True"}]}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-remote","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.9","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-unready","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.5","conditions":[{"type":"Ready","status":"False"}]}},{"metadata":{"name":"lnd-terminating","labels":{"app":"lnd"},"deletionTimestamp":"2026-07-31T08:00:00Z"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.6","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"lnd-local","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.7","podIPs":[{"ip":"10.42.1.7"},{"ip":"2001:db8:42::7"}],"conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 detect_k3s_target
@@ -964,11 +967,13 @@ CLN_K8S_SERVICE="cln"
 CLN_K8S_NAMESPACE="lightning"
 CLN_K8S_POD_SELECTOR="app=cln"
 
+ensure_k3s_egress_guard_additive() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
 resolve_svc_ip() {
     printf '%s\n' "10.43.0.11"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"cln-0"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.8","conditions":[{"type":"Ready","status":"True"}]}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"cln-0","labels":{"app":"cln"}},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.8","conditions":[{"type":"Ready","status":"True"}]}}]}'
 }
 
 detect_k3s_target
@@ -1004,7 +1009,7 @@ resolve_svc_ip() {
     printf '%s\n' "10.43.0.10"
 }
 k8s_api() {
-    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-0"},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.7"}}]}'
+    printf '%s\n' '{"items":[{"metadata":{"name":"lnd-0","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-b"},"status":{"phase":"Running","podIP":"10.42.2.7"}}]}'
 }
 cleanup_dataplane() {
     [[ "${1:-}" == "--keep-tunnel" ]]
@@ -1658,6 +1663,8 @@ source "$1"
 
 TUNNELSATS_K8S_NODE_NAME="worker-a"
 POLICY_ACTIVE=0
+ensure_k3s_egress_guard_additive() { return 0; }
+ensure_fallback_blackhole_rule() { return 0; }
 k8s_api() {
     if [[ "$1" == "/apis/networking.k8s.io/v1/namespaces/lightning/networkpolicies/tunnelsats-emergency-egress-deny" ]]; then
         if [[ "${POLICY_ACTIVE}" == "1" ]]; then
@@ -3678,4 +3685,1359 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_configured_selector_metadata_retained_when_service_or_pod_discovery_fails():
+    result = run_bash(
+        r'''
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+source "$1"
+
+K3S_MODE="true"
+LND_K8S_SERVICE="lnd"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app.kubernetes.io/name=lnd"
+PRE_GUARD_SELECTOR_CALLS=""
+resolve_svc_ip() { return 1; }
+pre_guard_colocated_k3s_candidate_pods_for_selector() {
+    PRE_GUARD_SELECTOR_CALLS+="$1|$2;"
+    return 0
+}
+
+if detect_k3s_target; then
+    exit 1
+fi
+[[ "${K3S_TARGET_POD_NAMESPACE}" == "lightning" ]]
+[[ "${K3S_TARGET_POD_SELECTOR}" == "app.kubernetes.io/name=lnd" ]]
+[[ "${PRE_GUARD_SELECTOR_CALLS}" == *"lightning|app.kubernetes.io/name=lnd;"* ]]
+[[ "${LAST_ERROR}" == *"No LND/CLN service resolved"* ]]
+
+PAYLOAD_FILE="${POLICY_TEST_STATE_FILE}.np"
+k8s_api_write_status() {
+    printf '%s' "$3" > "${PAYLOAD_FILE}"
+    printf '201'
+}
+k8s_api() {
+    if [[ "$1" == *"/networkpolicies/tunnelsats-emergency-egress-deny" ]]; then
+        cat "${PAYLOAD_FILE}"
+        return 0
+    fi
+    if [[ "$1" == *"/networkpolicies" ]]; then
+        printf '{"items":[]}'
+        return 0
+    fi
+    return 1
+}
+
+ensure_k3s_emergency_network_policy
+jq -e '.spec.podSelector.matchLabels["app.kubernetes.io/name"] == "lnd"' "${PAYLOAD_FILE}" >/dev/null
+
+# Also retain namespace and selector when service resolves but pod lookup fails.
+resolve_svc_ip() { printf '10.43.0.10\n'; return 0; }
+resolve_k3s_target_pod() {
+    LAST_ERROR="k3s: No Running LND pod found"
+    return 1
+}
+if detect_k3s_target; then
+    exit 1
+fi
+[[ "${K3S_TARGET_POD_NAMESPACE}" == "lightning" ]]
+[[ "${K3S_TARGET_POD_SELECTOR}" == "app.kubernetes.io/name=lnd" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_unready_colocated_replacement_pod_is_pre_guarded_before_ready():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+PRE_GUARDED_IPS=""
+BLACKHOLED_IPS=""
+V6_FILTER_RULES=""
+V6_BLACKHOLE_RULES=""
+
+k8s_api() {
+    printf '%s\n' '{
+        "items": [
+            {
+                "metadata": {"name": "lnd-pending"},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Pending",
+                    "podIP": "10.42.1.8",
+                    "podIPs": [{"ip": "10.42.1.8"}, {"ip": "2001:db8:42::8"}],
+                    "conditions": [{"type": "Ready", "status": "False"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-terminating", "deletionTimestamp": "2026-04-12T00:00:00Z"},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "podIPs": [{"ip": "10.42.1.7"}]
+                }
+            }
+        ]
+    }'
+}
+ensure_k3s_egress_guard_additive() {
+    PRE_GUARDED_IPS+="$1,"
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    BLACKHOLED_IPS+="$1,"
+    return 0
+}
+ip6tables() {
+    if [[ "$1" == "-C" ]]; then
+        return 1
+    fi
+    if [[ "$1" == "-I" ]]; then
+        V6_FILTER_RULES+="$*"$'\n'
+        return 0
+    fi
+    return 0
+}
+ip() {
+    if [[ "$*" == "-6 rule show pref ${IPV6_BLACKHOLE_RULE_PREF}" ]]; then
+        printf '%s' "${V6_BLACKHOLE_RULES}"
+        return 0
+    fi
+    if [[ "$1 $2 $3" == "-6 rule add" ]]; then
+        V6_BLACKHOLE_RULES+="${IPV6_BLACKHOLE_RULE_PREF}: from 2001:db8:42::8 blackhole"$'\n'
+        return 0
+    fi
+    return 0
+}
+
+if resolve_k3s_target_pod "lnd" "lightning" "app=lnd"; then
+    exit 1
+fi
+[[ "${K3S_POD_API_QUERY_OK}" == "true" ]]
+[[ "${PRE_GUARDED_IPS}" == *"10.42.1.8,"* ]]
+[[ "${PRE_GUARDED_IPS}" == *"10.42.1.7,"* ]]
+[[ "${BLACKHOLED_IPS}" == *"10.42.1.8,"* ]]
+[[ "${BLACKHOLED_IPS}" == *"10.42.1.7,"* ]]
+[[ "${V6_FILTER_RULES}" == *"2001:db8:42::8"* ]]
+[[ "${V6_BLACKHOLE_RULES}" == *"from 2001:db8:42::8 blackhole"* ]]
+[[ ",${K3S_CANDIDATE_POD_IPS}," == *",10.42.1.8,"* ]]
+[[ ",${K3S_CANDIDATE_POD_IPS}," == *",10.42.1.7,"* ]]
+[[ ",${K3S_ALL_MATCHING_LOCAL_POD_IPS}," == *",10.42.1.8,"* ]]
+[[ ",${K3S_ALL_MATCHING_LOCAL_POD_IPS}," == *",10.42.1.7,"* ]]
+
+# Verify retire_stale_k3s_unmatched_ip_guards removes recycled IP 10.42.1.6
+# (not in K3S_ALL_MATCHING_LOCAL_POD_IPS) while keeping 10.42.1.7 and 10.42.1.8.
+FORWARD_RULES=$'-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.7/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n-A FORWARD -s 10.42.1.8/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n'
+RULE_32765=$'32765:\tfrom 10.42.1.6 blackhole proto 200\n32765:\tfrom 10.42.1.7 blackhole proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+iptables() {
+    if [[ "$*" == "-S FORWARD" ]]; then
+        printf '%s' "${FORWARD_RULES}"
+        return 0
+    fi
+    if [[ "$1 $2" == "-D FORWARD" ]]; then
+        if [[ "$*" == *"10.42.1.6"* ]]; then
+            FORWARD_RULES="${FORWARD_RULES//$'-A FORWARD -s 10.42.1.6/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n'/}"
+        fi
+        if [[ "$*" == *"10.42.1.7"* ]]; then
+            FORWARD_RULES="${FORWARD_RULES//$'-A FORWARD -s 10.42.1.7/32 -m comment --comment tunnelsats-k3s-egress-guard -j DROP\n'/}"
+        fi
+        return 0
+    fi
+    return 0
+}
+ip() {
+    if [[ "$*" == "rule show pref 32765" ]]; then
+        printf '%s' "${RULE_32765}"
+        return 0
+    fi
+    if [[ "$1 $2" == "rule del" ]]; then
+        if [[ "$*" == *"10.42.1.6"* ]]; then
+            RULE_32765="${RULE_32765//$'32765:\tfrom 10.42.1.6 blackhole proto 200\n'/}"
+        fi
+        if [[ "$*" == *"10.42.1.7"* ]]; then
+            RULE_32765="${RULE_32765//$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'/}"
+        fi
+        return 0
+    fi
+    return 0
+}
+
+# When K3S_POD_API_QUERY_OK is false, nothing may be retired.
+K3S_POD_API_QUERY_OK="false"
+retire_stale_k3s_unmatched_ip_guards
+[[ "${FORWARD_RULES}" == *"10.42.1.6/32"* ]]
+[[ "${RULE_32765}" == *"from 10.42.1.6 blackhole"* ]]
+
+# When K3S_POD_API_QUERY_OK is true, 10.42.1.6 is retired while 10.42.1.7 and 10.42.1.8 remain.
+K3S_POD_API_QUERY_OK="true"
+retire_stale_k3s_unmatched_ip_guards
+[[ "${FORWARD_RULES}" != *"10.42.1.6/32"* ]]
+[[ "${RULE_32765}" != *"from 10.42.1.6 blackhole"* ]]
+[[ "${FORWARD_RULES}" == *"10.42.1.7/32"* ]]
+[[ "${FORWARD_RULES}" == *"10.42.1.8/32"* ]]
+[[ "${RULE_32765}" == *"from 10.42.1.7 blackhole"* ]]
+[[ "${RULE_32765}" == *"from 10.42.1.8 blackhole"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_reconcile_quarantines_pod_cidr_and_network_policy_when_target_discovery_fails():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+DECOMMISSION_STATE_FILE="${TEST_TMP}/decommissioned.json"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy-rules.json"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy-rules.json"
+STATE_FILE="${TEST_TMP}/state.json"
+RECONCILE_TRIGGER_DIR="${TEST_TMP}/triggers"
+RECONCILE_RESULT_DIR="${TEST_TMP}/results"
+TUNNELSATS_META_PATH="${TEST_TMP}/meta.json"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+LND_K8S_SERVICE="umbrel-lnd"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app.kubernetes.io/name=lnd"
+MANAGED_K3S_TARGET_IP="10.42.1.6"
+K3S_POLICY_STATE_LOADED="true"
+
+NETPOL_ENSURED=0
+SUBNET_QUARANTINED=""
+RETIRED_STALE=0
+CLEANED_DATAPLANE=0
+
+ensure_reconcile_kill_switch() { return 0; }
+resolve_svc_ip() { printf '10.43.0.10\n'; }
+k8s_api() {
+    printf '%s\n' '{"items": []}'
+}
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ENSURED=$((NETPOL_ENSURED + 1))
+    return 0
+}
+ensure_k3s_subnet_quarantine() {
+    SUBNET_QUARANTINED="${1:-cidr}"
+    K3S_QUARANTINE_CIDR="10.42.1.0/24"
+    return 0
+}
+retire_stale_k3s_unmatched_ip_guards() {
+    RETIRED_STALE=$((RETIRED_STALE + 1))
+    return 0
+}
+cleanup_dataplane() {
+    CLEANED_DATAPLANE=$((CLEANED_DATAPLANE + 1))
+    return 0
+}
+write_state() { :; }
+
+if reconcile_once "periodic"; then
+    exit 1
+fi
+[[ "${NETPOL_ENSURED}" -ge 1 ]]
+[[ -n "${SUBNET_QUARANTINED}" ]]
+[[ "${RETIRED_STALE}" -ge 1 ]]
+[[ "${CLEANED_DATAPLANE}" -ge 1 ]]
+[[ "${K3S_TARGET_POD_NAMESPACE}" == "lightning" ]]
+[[ "${K3S_TARGET_POD_SELECTOR}" == "app.kubernetes.io/name=lnd" ]]
+[[ "${LAST_ERROR}" == *"No Running LND pod found"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_verify_target_routes_rejects_shadowing_rule_and_unsafe_route_get():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.8"
+WG_IFACE="tunnelsatsv2"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+normalize_k3s_bypass_cidrs
+
+RULE_LIST=$'0:\tfrom all lookup local\n32500:\tfrom 10.42.1.8 to 10.42.0.0/16 lookup main proto 200\n32500:\tfrom 10.42.1.8 to 10.43.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+ROUTE_GET_OUT="1.1.1.1 dev tunnelsatsv2 table 51820 src 10.42.1.8 uid 0"
+
+ip() {
+    if [[ "$*" == "rule show" ]] || [[ "$*" == "-4 rule show" ]]; then
+        printf '%s' "${RULE_LIST}"
+        return 0
+    fi
+    if [[ "$1 $2 $3" == "-4 route get" ]] || [[ "$1 $2" == "route get" ]]; then
+        printf '%s\n' "${ROUTE_GET_OUT}"
+        return 0
+    fi
+    return 0
+}
+
+# Clean owned rules + WireGuard route get must pass.
+verify_k3s_target_routes
+
+# Unrelated rules (e.g. non-zero fwmark or LAN destination not covering public probes) must not block a healthy tunnel.
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tfrom all to 192.168.1.0/24 lookup main\n101:\tfrom all fwmark 0x4000/0x4000 lookup main\n32500:\tfrom 10.42.1.8 to 10.42.0.0/16 lookup main proto 200\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+verify_k3s_target_routes
+
+# A port/protocol-qualified rule matching Lightning traffic at pref 100 must fail.
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tfrom 10.42.1.0/24 ipproto tcp dport 9735 lookup main\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+if verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"shadows target pod routing"* ]]
+
+# An unowned higher-priority rule matching 10.42.1.0/24 at pref 100 must fail.
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tfrom 10.42.1.0/24 lookup main\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+if verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"shadows target pod routing"* ]]
+
+# Inverted rule `not from 10.42.1.8 lookup main` (no extra selectors, to all)
+# never matches target_ip 10.42.1.8 and must pass, whereas `not from all to 0.0.0.0/4`
+# or `not from 10.42.1.8 fwmark 0x1` matches target traffic and must fail.
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tnot from 10.42.1.8 lookup main\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+verify_k3s_target_routes
+
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tnot from all to 0.0.0.0/4 lookup main\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+if verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"shadows target pod routing"* ]]
+
+RULE_LIST=$'0:\tfrom all lookup local\n100:\tnot from 10.42.1.8 fwmark 0x1 lookup main\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+if verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"shadows target pod routing"* ]]
+
+# Restore clean rule list, but make route get resolve via clear0 instead of tunnelsatsv2.
+RULE_LIST=$'0:\tfrom all lookup local\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+ROUTE_GET_OUT="1.1.1.1 via 192.0.2.2 dev clear0 src 10.42.1.8 uid 0"
+if verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Unsafe k3s route"* ]]
+
+# When owned pod-CIDR quarantine is active at pref 32763, kernel ip route get
+# returns RTNETLINK answers: Invalid argument. Pre-release sync check must pass
+# with K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC=true and fail once false.
+RULE_LIST=$'0:\tfrom all lookup local\n32500:\tfrom 10.42.1.8 to 10.42.0.0/16 lookup main proto 200\n32763:\tfrom 10.42.0.0/16 blackhole proto 200\n32764:\tfrom 10.42.1.8 lookup 51820 proto 200\n32765:\tfrom 10.42.1.8 blackhole proto 200\n'
+ROUTE_GET_OUT="RTNETLINK answers: Invalid argument"
+K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="true" verify_k3s_target_routes
+if K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false" verify_k3s_target_routes; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Emergency quarantine rule"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_pod_watch_event_immediately_pre_guards_pod_and_writes_reconcile_trigger():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+LND_K8S_SERVICE="umbrel-lnd"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app.kubernetes.io/name=lnd"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app.kubernetes.io/name=lnd"
+RECONCILE_TRIGGER_DIR="${TEST_TMP}/triggers"
+RECONCILE_RESULT_DIR="${TEST_TMP}/results"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy.json"
+WATCH_URL_FILE="${TEST_TMP}/watch_url"
+PRE_GUARDED=""
+BLACKHOLED=""
+
+k8s_watch_api() {
+    printf '%s' "$1" > "${WATCH_URL_FILE}"
+    printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"umbrel-lnd-0","labels":{"app.kubernetes.io/name":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.9","podIPs":[{"ip":"10.42.1.9"},{"ip":"2001:db8:42::9"}]}}}'
+}
+ensure_k3s_egress_guard_additive() {
+    PRE_GUARDED+="$1,"
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    BLACKHOLED+="$1,"
+    return 0
+}
+ensure_ipv6_source_blackhole_rule() {
+    return 0
+}
+ip6tables() {
+    return 0
+}
+
+watch_k3s_target_pods_once "lightning" "app.kubernetes.io/name=lnd"
+[[ "${PRE_GUARDED}" == *"10.42.1.9,"* ]]
+[[ "${BLACKHOLED}" == *"10.42.1.9,"* ]]
+[[ "${K3S_WATCHED_CANDIDATE_POD_IPS}" == *"10.42.1.9"* ]]
+[[ "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES}" == *"2001:db8:42::9"* ]]
+[[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+# A successful full pod list during detect_k3s_target replaces stale watched
+# candidates (10.42.1.9) with the fresh pod list (10.42.1.10), records
+# resourceVersion, and a subsequent watch resumes from resourceVersion.
+resolve_svc_ip() { printf '10.43.0.10\n'; }
+k8s_api() {
+    printf '%s\n' '{
+        "metadata": {"resourceVersion": "420"},
+        "items": [
+            {
+                "metadata": {"name": "umbrel-lnd-1", "resourceVersion": "419", "labels": {"app.kubernetes.io/name": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.10",
+                    "podIPs": [{"ip": "10.42.1.10"}, {"ip": "2001:db8:42::10"}],
+                    "conditions": [{"type": "Ready", "status": "True"}]
+                }
+            }
+        ]
+    }'
+}
+detect_k3s_target
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "420" ]]
+[[ "${K3S_CANDIDATE_POD_IPS}" == "10.42.1.10" ]]
+[[ "${K3S_ALL_MATCHING_LOCAL_POD_IPS}" == "10.42.1.10" ]]
+[[ "${K3S_WATCHED_CANDIDATE_POD_IPS}" == "10.42.1.10" ]]
+[[ "${K3S_CANDIDATE_POD_IPV6_ADDRESSES}" == "2001:db8:42::10" ]]
+[[ "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES}" == "2001:db8:42::10" ]]
+
+# Unchanged replay of the already-synced active pod updates resourceVersion
+# without writing a reconcile trigger.
+rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
+RULES_SYNCED="true"
+k8s_watch_api() {
+    printf '%s' "$1" > "${WATCH_URL_FILE}"
+    printf '%s\n' '{"type":"ADDED","object":{"metadata":{"name":"umbrel-lnd-1","resourceVersion":"421","labels":{"app.kubernetes.io/name":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.10","podIPs":[{"ip":"10.42.1.10"},{"ip":"2001:db8:42::10"}],"conditions":[{"type":"Ready","status":"True"}]}}}'
+}
+watch_k3s_target_pods_once "lightning" "app.kubernetes.io/name=lnd"
+[[ "$(cat "${WATCH_URL_FILE}")" == *"resourceVersion=420"* ]]
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "421" ]]
+[[ ! -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+# Explicit DELETED watch event removes the deleted pod address immediately and triggers reconcile.
+k8s_watch_api() {
+    printf '%s' "$1" > "${WATCH_URL_FILE}"
+    printf '%s\n' '{"type":"DELETED","object":{"metadata":{"name":"umbrel-lnd-1","resourceVersion":"422","labels":{"app.kubernetes.io/name":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.10","podIPs":[{"ip":"10.42.1.10"},{"ip":"2001:db8:42::10"}]}}}'
+}
+watch_k3s_target_pods_once "lightning" "app.kubernetes.io/name=lnd"
+[[ "$(cat "${WATCH_URL_FILE}")" == *"resourceVersion=421"* ]]
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "422" ]]
+[[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+[[ -z "${K3S_CANDIDATE_POD_IPS}" ]]
+[[ -z "${K3S_ALL_MATCHING_LOCAL_POD_IPS}" ]]
+[[ -z "${K3S_WATCHED_CANDIDATE_POD_IPS}" ]]
+[[ -z "${K3S_CANDIDATE_POD_IPV6_ADDRESSES}" ]]
+[[ -z "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES}" ]]
+
+# Watch ERROR event (e.g. 410 Gone) resets K3S_WATCH_RESOURCE_VERSION and returns non-zero.
+k8s_watch_api() {
+    printf '%s\n' '{"type":"ERROR","object":{"kind":"Status","code":410}}'
+}
+if watch_k3s_target_pods_once "lightning" "app.kubernetes.io/name=lnd"; then
+    exit 1
+fi
+[[ -z "${K3S_WATCH_RESOURCE_VERSION}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_failed_replacement_pod_pre_guard_stops_reconcile_and_retains_quarantine():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+SECURE_MODE="false"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+LND_K8S_SERVICE="umbrel-lnd"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app=lnd"
+DECOMMISSION_STATE_FILE="${TEST_TMP}/decommissioned.json"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy.json"
+STATE_FILE="${TEST_TMP}/state.json"
+QUARANTINED=0
+NETPOL_COUNT=0
+WG_UP_COUNT=0
+
+resolve_svc_ip() { printf '10.43.0.10\n'; }
+k8s_api() {
+    printf '%s\n' '{
+        "items": [
+            {
+                "metadata": {"name": "lnd-ready", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "conditions": [{"type": "Ready", "status": "True"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-replacement", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Pending",
+                    "podIP": "10.42.1.8",
+                    "conditions": [{"type": "Ready", "status": "False"}]
+                }
+            }
+        ]
+    }'
+}
+# Replacement pod 10.42.1.8 fails both iptables DROP and source blackhole.
+ensure_k3s_egress_guard_additive() {
+    [[ "$1" == "10.42.1.7" ]]
+}
+ensure_fallback_blackhole_rule() {
+    [[ "$1" == "10.42.1.7" ]]
+}
+ensure_k3s_emergency_network_policy() {
+    NETPOL_COUNT=$((NETPOL_COUNT + 1))
+    return 0
+}
+ensure_k3s_subnet_quarantine() {
+    QUARANTINED=$((QUARANTINED + 1))
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
+    return 0
+}
+cleanup_dataplane() { return 0; }
+ensure_wg_up() {
+    WG_UP_COUNT=$((WG_UP_COUNT + 1))
+    return 0
+}
+write_state() { :; }
+
+if reconcile_once "periodic"; then
+    exit 1
+fi
+[[ "${WG_UP_COUNT}" == "0" ]]
+[[ "${QUARANTINED}" -ge 1 ]]
+[[ "${NETPOL_COUNT}" -ge 1 ]]
+[[ "${K3S_CANDIDATE_PODS_GUARDED}" == "false" ]]
+[[ "${LAST_ERROR}" == *"Failed to pre-guard co-located candidate pod 10.42.1.8"* ]]
+
+# Also verify k3s_candidate_pod_guards_are_synced rejects missing per-pod guards
+# for any non-selected candidate pod before shared quarantine can be released.
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_CANDIDATE_POD_IPS="10.42.1.7,10.42.1.8"
+K3S_CANDIDATE_PODS_GUARDED="true"
+ip() { return 1; }
+iptables() { return 1; }
+if k3s_candidate_pod_guards_are_synced; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"10.42.1.8 is missing per-pod isolation guard"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_pending_unassigned_replacement_and_pre_release_discovery_refresh():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'stop_k3s_pod_watcher; rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+SECURE_MODE="false"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_POD_API_QUERY_OK="true"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy.json"
+RECONCILE_TRIGGER_DIR="${TEST_TMP}/triggers"
+
+EVENTS=""
+ensure_k3s_egress_guard_additive() {
+    EVENTS+="guard:$1;"
+    return 0
+}
+ensure_fallback_blackhole_rule() {
+    EVENTS+="blackhole:$1;"
+    return 0
+}
+ensure_k3s_emergency_network_policy() {
+    EVENTS+="netpol:ensure;"
+    return 0
+}
+ensure_k3s_subnet_quarantine() {
+    EVENTS+="quarantine:ensure;"
+    K3S_QUARANTINE_CIDR="10.42.0.0/16"
+    return 0
+}
+remove_k3s_subnet_quarantine() {
+    EVENTS+="quarantine:remove;"
+    return 0
+}
+remove_k3s_egress_guards() {
+    EVENTS+="guards:remove;"
+    return 0
+}
+remove_k3s_emergency_network_policy() {
+    EVENTS+="netpol:remove;"
+    return 0
+}
+rules_are_synced() {
+    return 0
+}
+
+# 1. While replacement pod lnd-replacement has no assigned podIP yet,
+# release_k3s_reconcile_guards must keep pre-discovery containment and refuse
+# to remove subnet quarantine or emergency NetworkPolicy.
+k8s_api() {
+    printf '%s\n' '{
+        "metadata": {"resourceVersion": "500"},
+        "items": [
+            {
+                "metadata": {"name": "lnd-0", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "conditions": [{"type": "Ready", "status": "True"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-replacement", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Pending",
+                    "podIP": ""
+                }
+            }
+        ]
+    }'
+}
+if release_k3s_reconcile_guards; then
+    exit 1
+fi
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "true" ]]
+[[ "${LAST_ERROR}" == *"pending IP assignment"* ]]
+[[ "${EVENTS}" != *"quarantine:remove"* ]]
+[[ "${EVENTS}" != *"netpol:remove"* ]]
+[[ "${EVENTS}" == *"quarantine:ensure"* ]]
+
+# 2. Once CNI assigns podIP 10.42.1.8 to lnd-replacement during guard release,
+# refresh_k3s_discovery_before_guard_release pre-guards 10.42.1.8 BEFORE
+# subnet quarantine and emergency NetworkPolicy are removed.
+EVENTS=""
+k8s_api() {
+    printf '%s\n' '{
+        "metadata": {"resourceVersion": "501"},
+        "items": [
+            {
+                "metadata": {"name": "lnd-0", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "conditions": [{"type": "Ready", "status": "True"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-replacement", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Pending",
+                    "podIP": "10.42.1.8",
+                    "conditions": [{"type": "Ready", "status": "False"}]
+                }
+            }
+        ]
+    }'
+}
+release_k3s_reconcile_guards
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "false" ]]
+[[ ",${K3S_CANDIDATE_POD_IPS}," == *",10.42.1.8,"* ]]
+[[ "${EVENTS}" == *"guard:10.42.1.8;blackhole:10.42.1.8;quarantine:remove;"* ]]
+[[ "${EVENTS}" == *"netpol:remove;"* ]]
+[[ "${EVENTS}" == *"guards:remove;" ]]
+
+# 3. Background watcher starts, persists watch state across subshell boundary,
+# refreshes promoted replacement pod state from disk without re-blocking the
+# healthy promoted pod, and stops cleanly via stop_k3s_pod_watcher.
+BG_GUARD_LOG="${TEST_TMP}/bg-guards.log"
+: > "${BG_GUARD_LOG}"
+ensure_k3s_egress_guard_additive() {
+    printf '%s\n' "$1" >> "${BG_GUARD_LOG}"
+    return 0
+}
+iptables() {
+    if [[ "$1" == "-S" && "$2" == "FORWARD" ]]; then
+        return 0
+    fi
+    return 0
+}
+ip() {
+    if [[ "$1" == "rule" && "$2" == "show" && "${3:-}" == "pref" && "${4:-}" == "${K3S_TUNNEL_RULE_PREF}" ]]; then
+        printf '%s\n' "${K3S_TUNNEL_RULE_PREF}: from 10.42.1.8 lookup 51820 proto ${K3S_RULE_PROTOCOL}"
+        return 0
+    fi
+    if [[ "$1" == "route" && "$2" == "show" && "${3:-}" == "table" && "${4:-}" == "51820" ]]; then
+        printf 'default dev %s metric 2\n' "${WG_IFACE}"
+        return 0
+    fi
+    return 0
+}
+WATCH_EVENT_FILE="${TEST_TMP}/watch-event.json"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-bg","resourceVersion":"555","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.11","podIPs":[{"ip":"10.42.1.11"}]}}}' > "${WATCH_EVENT_FILE}"
+k8s_watch_api() {
+    cat "${WATCH_EVENT_FILE}"
+    sleep 0.2
+}
+ensure_k3s_pod_watcher_running
+[[ -n "${K3S_WATCHER_PID}" ]]
+kill -0 "${K3S_WATCHER_PID}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    load_k3s_pod_watch_state
+    if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "555" ]]; then
+        break
+    fi
+    sleep 0.1
+done
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "555" ]]
+[[ ",${K3S_WATCHED_CANDIDATE_POD_IPS}," == *",10.42.1.11,"* ]]
+grep -Fxq "10.42.1.11" "${BG_GUARD_LOG}"
+
+# Simulate promotion of replacement pod lnd-replacement (10.42.1.8) in the
+# parent process while the background watcher stays running.
+MANAGED_K3S_TARGET_IP="10.42.1.8"
+MANAGED_K3S_TARGET_IMPL="lnd"
+MANAGED_K3S_POD_NAME="lnd-replacement"
+MANAGED_K3S_POD_NAMESPACE="lightning"
+MANAGED_K3S_POD_SELECTOR="app=lnd"
+K3S_POLICY_STATE_LOADED="true"
+persist_managed_k3s_policy_state
+jq -n '{target_ip:"10.42.1.8", rules_synced:true}' > "${STATE_FILE}"
+: > "${BG_GUARD_LOG}"
+rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"556","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    load_k3s_pod_watch_state
+    if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]; then
+        break
+    fi
+    sleep 0.1
+done
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]
+! grep -Fxq "10.42.1.8" "${BG_GUARD_LOG}"
+[[ ! -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+stop_k3s_pod_watcher
+[[ -z "${K3S_WATCHER_PID}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_pod_watch_state_locking_and_error_propagation():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+K3S_WATCH_SCOPE="lightning|app=lnd"
+K3S_WATCH_RESOURCE_VERSION="700"
+K3S_WATCHED_CANDIDATE_POD_IPS="10.42.1.8"
+K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES="2001:db8:42::8"
+K3S_UNSEEN_REPLACEMENT_PENDING="true"
+
+# 1. persist_k3s_pod_watch_state must fail closed (non-zero) when the target
+# path cannot be written, rather than silently returning 0.
+K3S_WATCH_STATE_FILE="/dev/null/impossible/watch.json"
+if persist_k3s_pod_watch_state; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"watch state"* ]]
+
+# 2. Concurrent parent and background subshell writers sharing $$ must use
+# unique temp files and lock serialization without colliding on .$$.
+K3S_WATCH_STATE_FILE="${TEST_TMP}/watch-state.json"
+for idx in $(seq 1 15); do
+    (
+        K3S_WATCH_RESOURCE_VERSION="bg-${idx}"
+        K3S_WATCHED_CANDIDATE_POD_IPS="10.42.1.${idx}"
+        persist_k3s_pod_watch_state
+    ) &
+    K3S_WATCH_RESOURCE_VERSION="fg-${idx}"
+    K3S_WATCHED_CANDIDATE_POD_IPS="10.42.2.${idx}"
+    persist_k3s_pod_watch_state
+done
+wait
+
+[[ ! -e "${K3S_WATCH_STATE_FILE}.$$" ]]
+jq -e '.scope == "lightning|app=lnd" and (.resource_version | length > 0)' "${K3S_WATCH_STATE_FILE}" >/dev/null
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_ipv6_containment_preserves_watcher_guarded_replacement_pod_ipv6():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+SECURE_MODE="false"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy.json"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+K3S_WATCH_STATE_FILE="${TEST_TMP}/watch-state.json"
+
+# Parent took its pod snapshot with only 2001:db8:42::7
+DOCKER_TARGET_IP="10.42.1.7"
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+TARGET_IPV6_MACS=()
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+K3S_CANDIDATE_POD_IPS="10.42.1.7"
+K3S_CANDIDATE_POD_IPV6_ADDRESSES="2001:db8:42::7"
+
+V6_FILTER_RULES=$'-A FORWARD -s 2001:db8:42::7/128 ! -d fe80::/10 -m comment --comment tunnelsats-ipv6-deny -j DROP\n-A FORWARD -s 2001:db8:42::8/128 ! -d fe80::/10 -m comment --comment tunnelsats-ipv6-deny -j DROP\n'
+V6_BLACKHOLE_RULES=$'32765:\tfrom 2001:db8:42::7 blackhole\n32765:\tfrom 2001:db8:42::8 blackhole\n'
+V6_POLICY_RULES=$'32764:\tfrom 2001:db8:42::7 lookup 51821\n'
+V6_TABLE_ROUTES=$'blackhole default dev lo metric 42760\n'
+DELETED_V6_FILTER=""
+DELETED_V6_BLACKHOLE=""
+
+ip6tables() {
+    case "$1" in
+        -S)
+            printf '%s' "${V6_FILTER_RULES}"
+            return 0
+            ;;
+        -C)
+            [[ "${V6_FILTER_RULES}" == *" -s $3/128 "* || "${V6_FILTER_RULES}" == *" -s $3 "* ]]
+            return
+            ;;
+        -I)
+            V6_FILTER_RULES+="-A FORWARD -s $4/128 ! -d fe80::/10 -m comment --comment tunnelsats-ipv6-deny -j DROP"$'\n'
+            return 0
+            ;;
+        -D)
+            DELETED_V6_FILTER+="$*"$'\n'
+            return 0
+            ;;
+    esac
+    return 0
+}
+ip() {
+    if [[ "$1" == "-6" && "$2" == "rule" && "$3" == "show" && "$4" == "pref" && "$5" == "32765" ]]; then
+        printf '%s' "${V6_BLACKHOLE_RULES}"
+        return 0
+    fi
+    if [[ "$1" == "-6" && "$2" == "rule" && "$3" == "show" && "$4" == "pref" && "$5" == "32764" ]]; then
+        printf '%s' "${V6_POLICY_RULES}"
+        return 0
+    fi
+    if [[ "$1" == "-6" && "$2" == "route" && "$3" == "show" && "$4" == "table" && "$5" == "51821" ]]; then
+        printf '%s' "${V6_TABLE_ROUTES}"
+        return 0
+    fi
+    if [[ "$1" == "-6" && "$2" == "rule" && "$3" == "add" && "$4" == "from" && "$6" == "table" ]]; then
+        V6_POLICY_RULES+="32764:	from $5 lookup 51821"$'\n'
+        return 0
+    fi
+    if [[ "$1" == "-6" && "$2" == "rule" && "$3" == "add" && "$4" == "from" && "$6" == "blackhole" ]]; then
+        V6_BLACKHOLE_RULES+="32765:	from $5 blackhole"$'\n'
+        return 0
+    fi
+    if [[ "$1" == "-6" && "$2" == "rule" && "$3" == "del" && "$4" == "from" && "$6" == "blackhole" ]]; then
+        DELETED_V6_BLACKHOLE+="$5,"
+        return 1
+    fi
+    return 0
+}
+
+# Simulate background watcher having guarded replacement pod 2001:db8:42::8
+# after the parent took its snapshot.
+IPV6_POLICY_STATE_LOADED="true"
+IPV6_POLICY_TABLE_MANAGED="true"
+MANAGED_TARGET_IPV6_ADDRESSES=("2001:db8:42::7" "2001:db8:42::8")
+persist_managed_ipv6_policy_state
+
+K3S_WATCH_SCOPE="lightning|app=lnd"
+K3S_WATCH_RESOURCE_VERSION="600"
+K3S_WATCHED_CANDIDATE_POD_IPS="10.42.1.7,10.42.1.8"
+K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES="2001:db8:42::7,2001:db8:42::8"
+K3S_UNSEEN_REPLACEMENT_PENDING="false"
+persist_k3s_pod_watch_state
+
+# Reset parent's in-memory watched state to simulate stale parent snapshot
+K3S_WATCHED_CANDIDATE_POD_IPS="10.42.1.7"
+K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES="2001:db8:42::7"
+MANAGED_TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+
+ensure_ipv6_containment
+ipv6_containment_is_synced
+[[ "${DELETED_V6_FILTER}" != *"2001:db8:42::8"* ]]
+[[ "${DELETED_V6_BLACKHOLE}" != *"2001:db8:42::8"* ]]
+[[ " ${TARGET_IPV6_ADDRESSES[*]} " == *" 2001:db8:42::8 "* ]]
+[[ " ${MANAGED_TARGET_IPV6_ADDRESSES[*]} " == *" 2001:db8:42::8 "* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_unknown_pod_containment_and_watch_failure_fail_closed():
+    result = run_bash(
+        r'''
+source "$1"
+
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+K3S_MODE="true"
+SECURE_MODE="false"
+K3S_ENFORCE_UNKNOWN_POD_CONTAINMENT="true"
+TUNNELSATS_K8S_NODE_NAME="worker-a"
+K3S_TARGET_POD_NAMESPACE="lightning"
+K3S_TARGET_POD_SELECTOR="app=lnd"
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16"
+K3S_IPV6_POD_CIDRS="2001:cafe:42::/56"
+TARGET_IPV6_ADDRESSES=("2001:cafe:42::7")
+TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+WG_IFACE="tunnelsatsv2"
+K3S_POLICY_STATE_FILE="${TEST_TMP}/k3s-policy.json"
+IPV6_POLICY_STATE_FILE="${TEST_TMP}/ipv6-policy.json"
+RECONCILE_TRIGGER_DIR="${TEST_TMP}/triggers"
+
+RULES=""
+V6_RULES=""
+MANGLE_RULES=""
+V6_MANGLE_RULES=""
+ROUTES=$'default dev tunnelsatsv2 metric 2\nblackhole default metric 3\n'
+iptables() {
+    if [[ "${1:-} ${2:-}" == "-t mangle" ]]; then
+        shift 2
+        if [[ "${1:-} ${2:-}" == "-S PREROUTING" ]]; then
+            printf '%s' "${MANGLE_RULES}"
+            return 0
+        fi
+        if [[ "${1:-} ${2:-}" == "-C PREROUTING" ]]; then
+            [[ "${MANGLE_RULES}" == *"-A PREROUTING -i cni0 -s 10.42.1.50/32 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff"* ]]
+            return
+        fi
+        if [[ "${1:-} ${2:-}" == "-I PREROUTING" ]]; then
+            if [[ "$*" == *"-i cni0 -s 10.42.1.50"* && "$*" == *"--mac-source 02:42:0a:2a:01:32"* && "$*" == *"--set-xmark 0xca6d/0xffffffff"* ]]; then
+                MANGLE_RULES+=$'-A PREROUTING -i cni0 -s 10.42.1.50/32 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff\n'
+                return 0
+            fi
+            return 1
+        fi
+        if [[ "${1:-} ${2:-}" == "-D PREROUTING" ]]; then
+            if [[ "$*" == *"10.42.1.50"* ]]; then
+                MANGLE_RULES=""
+            fi
+            return 0
+        fi
+    fi
+    return 0
+}
+ip6tables() {
+    if [[ "${1:-} ${2:-}" == "-t mangle" ]]; then
+        shift 2
+        if [[ "${1:-} ${2:-}" == "-S PREROUTING" ]]; then
+            printf '%s' "${V6_MANGLE_RULES}"
+            return 0
+        fi
+        if [[ "${1:-} ${2:-}" == "-C PREROUTING" ]]; then
+            [[ "${V6_MANGLE_RULES}" == *"-A PREROUTING -i cni0 -s 2001:cafe:42::50/128 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff"* ]]
+            return
+        fi
+        if [[ "${1:-} ${2:-}" == "-I PREROUTING" ]]; then
+            if [[ "$*" == *"-i cni0 -s 2001:cafe:42::50"* && "$*" == *"--mac-source 02:42:0a:2a:01:32"* && "$*" == *"--set-xmark 0xca6d/0xffffffff"* ]]; then
+                V6_MANGLE_RULES+=$'-A PREROUTING -i cni0 -s 2001:cafe:42::50/128 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff\n'
+                return 0
+            fi
+            return 1
+        fi
+        if [[ "${1:-} ${2:-}" == "-D PREROUTING" ]]; then
+            if [[ "$*" == *"2001:cafe:42::50"* ]]; then
+                V6_MANGLE_RULES=""
+            fi
+            return 0
+        fi
+    fi
+    return 0
+}
+ip() {
+    if [[ "${1:-}" == "-6" ]]; then
+        if [[ "${2:-} ${3:-} ${4:-}" == "rule show pref" ]]; then
+            printf '%s' "${V6_RULES}" | grep "^${5:-}:" || true
+            return 0
+        fi
+        if [[ "${2:-} ${3:-}" == "rule show" ]]; then
+            printf '%s' "${V6_RULES}"
+            return 0
+        fi
+        if [[ "${2:-} ${3:-}" == "rule add" ]]; then
+            case "$*" in
+                "-6 rule add from 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 table main protocol 200 pref 32500")
+                    V6_RULES+=$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'
+                    return 0
+                    ;;
+                "-6 rule add from 2001:cafe:42::/56 blackhole protocol 200 pref 32765")
+                    V6_RULES+=$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200\n'
+                    return 0
+                    ;;
+            esac
+            return 1
+        fi
+        if [[ "${2:-} ${3:-}" == "rule del" ]]; then
+            if [[ "$*" == *"from 2001:cafe:42::50 "* && "$*" == *"pref 32500"* ]]; then
+                V6_RULES="${V6_RULES//$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'/}"
+            fi
+            if [[ "$*" == *"from 2001:cafe:42::/56 blackhole proto 200 pref 32765"* ]]; then
+                V6_RULES="${V6_RULES//$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200\n'/}"
+            fi
+            return 0
+        fi
+        if [[ "$*" == "-6 route get 2001:cafe:42::50" ]]; then
+            printf '2001:cafe:42::50 dev cni0 src 2001:cafe:42::1 metric 256\n'
+            return 0
+        fi
+        if [[ "$*" == "-6 neigh show to 2001:cafe:42::50 dev cni0" ]]; then
+            printf '2001:cafe:42::50 lladdr 02:42:0a:2a:01:32 REACHABLE\n'
+            return 0
+        fi
+        if [[ "${2:-} ${3:-}" == "route show" ]]; then
+            printf '2001:cafe:42::/56 dev cni0 metric 256\n'
+            return 0
+        fi
+        return 0
+    fi
+    if [[ "$*" == "-4 route get 10.42.1.50" ]]; then
+        printf '10.42.1.50 dev cni0 src 10.42.0.1 uid 0\n'
+        return 0
+    fi
+    if [[ "$*" == "-4 neigh show to 10.42.1.50 dev cni0" ]]; then
+        printf '10.42.1.50 lladdr 02:42:0a:2a:01:32 REACHABLE\n'
+        return 0
+    fi
+    if [[ "${1:-} ${2:-} ${3:-}" == "rule show pref" ]]; then
+        printf '%s' "${RULES}" | grep "^${4:-}:" || true
+        return 0
+    fi
+    if [[ "${1:-} ${2:-}" == "rule show" ]]; then
+        printf '%s' "${RULES}"
+        return 0
+    fi
+    if [[ "${1:-} ${2:-}" == "rule add" ]]; then
+        case "$*" in
+            "rule add from 10.42.1.7 to 10.42.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 to 10.43.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.0.0/16 to 10.42.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.0.0/16 to 10.43.0.0/16 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 table 51820 protocol 200 pref 32764")
+                RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
+                ;;
+            "rule add from 10.42.1.7 blackhole protocol 200 pref 32765")
+                RULES+=$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'
+                ;;
+            "rule add from 10.42.0.0/16 blackhole protocol 200 pref 32765")
+                RULES+=$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        return 0
+    fi
+    if [[ "${1:-} ${2:-}" == "rule del" ]]; then
+        if [[ "$*" == *"from 10.42.1.7 to 10.42.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 to 10.43.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 to 10.42.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 to 10.43.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.50 "* && "$*" == *"pref 32500"* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 lookup 51820 "* || "$*" == *"from 10.42.1.7 table 51820 "* ]]; then
+            RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 blackhole proto 200 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 blackhole proto 200 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        fi
+        return 0
+    fi
+    if [[ "${1:-} ${2:-}" == "route replace" || "$*" == "route del 10.9.0.0/24 table 51820" ]]; then
+        return 0
+    fi
+    if [[ "$*" == "route show table 51820" ]]; then
+        printf '%s' "${ROUTES}"
+        return 0
+    fi
+    if [[ "$*" == "-4 addr show dev tunnelsatsv2" ]]; then
+        printf '%s\n' "7: tunnelsatsv2    inet 10.9.0.2/24 scope global tunnelsatsv2"
+        return 0
+    fi
+    return 0
+}
+
+k8s_api() {
+    printf '%s\n' '{
+        "items": [
+            {
+                "metadata": {"name": "lnd-0", "namespace": "lightning", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "podIPs": [{"ip": "10.42.1.7"}, {"ip": "2001:cafe:42::7"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-replacement", "namespace": "lightning", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.8",
+                    "podIPs": [{"ip": "10.42.1.8"}, {"ip": "2001:cafe:42::8"}]
+                }
+            },
+            {
+                "metadata": {"name": "bitcoind-0", "namespace": "lightning", "labels": {"app": "bitcoind"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.50",
+                    "podIPs": [{"ip": "10.42.1.50"}, {"ip": "2001:cafe:42::50"}]
+                }
+            },
+            {
+                "metadata": {"name": "hostnet-helper", "namespace": "lightning"},
+                "spec": {"nodeName": "worker-a", "hostNetwork": true},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "192.168.1.10",
+                    "podIPs": [{"ip": "192.168.1.10"}]
+                }
+            }
+        ]
+    }'
+    return 0
+}
+
+# 1. ensure_policy_routing installs pod-CIDR cluster-local bypasses at 32500,
+# attachment-bound (fwmark + iif + MAC) table-main outbound rules at 32500 for
+# known non-target pods on the same node (10.42.1.50 / 2001:cafe:42::50), and
+# pod-CIDR fallback blackholes at 32765 (IPv4 and IPv6).
+ensure_policy_routing
+[[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
+[[ "${RULES}" != *$'32500:\tfrom 10.42.1.7 lookup main'* ]]
+[[ "${RULES}" != *$'32500:\tfrom 10.42.1.8 lookup main'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.0.0/16 blackhole proto 200'* ]]
+[[ "${V6_RULES}" == *$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
+[[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::7 lookup main'* ]]
+[[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::8 lookup main'* ]]
+[[ "${V6_RULES}" == *$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200'* ]]
+[[ "${MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
+[[ "${V6_MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
+verify_k3s_target_routes
+
+# 1a. Unlabeled pods and hostNetwork pods in the watched namespace must NOT be
+# pre-guarded as Lightning candidates during watch events, and unlabeled Running
+# pods in the namespace must be recognized as non-target pods in resolve_k3s_non_target_pod_addresses.
+GUARDED_IPS=""
+ensure_k3s_egress_guard_additive() {
+    GUARDED_IPS+="$1,"
+    return 0
+}
+k8s_watch_api() {
+    printf '%s\n' '{"type":"ADDED","object":{"metadata":{"name":"unlabeled-job","namespace":"lightning","resourceVersion":"775"},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.51","podIPs":[{"ip":"10.42.1.51"}]}}}'
+    printf '%s\n' '{"type":"ADDED","object":{"metadata":{"name":"hostnet-helper","namespace":"lightning","resourceVersion":"775"},"spec":{"nodeName":"worker-a","hostNetwork":true},"status":{"phase":"Running","podIP":"192.168.1.10","podIPs":[{"ip":"192.168.1.10"}]}}}'
+    return 0
+}
+watch_k3s_target_pods_once "lightning" "app=lnd"
+[[ -z "${GUARDED_IPS}" ]]
+[[ ",${K3S_CANDIDATE_POD_IPS}," != *",10.42.1.51,"* ]]
+[[ ",${K3S_CANDIDATE_POD_IPS}," != *",192.168.1.10,"* ]]
+
+# Also verify resolve_k3s_non_target_pod_addresses includes an unlabeled Running pod in the namespace.
+orig_k8s_api="$(declare -f k8s_api)"
+k8s_api() {
+    printf '%s\n' '{
+        "items": [
+            {
+                "metadata": {"name": "unlabeled-job", "namespace": "lightning"},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.51",
+                    "podIPs": [{"ip": "10.42.1.51"}, {"ip": "2001:cafe:42::51"}]
+                }
+            }
+        ]
+    }'
+    return 0
+}
+resolve_k3s_non_target_pod_addresses "10.42.0.0/16" "2001:cafe:42::/56"
+[[ ",${K3S_KNOWN_NON_TARGET_POD_IPS}," == *",10.42.1.51,"* ]]
+[[ ",${K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES}," == *",2001:cafe:42::51,"* ]]
+eval "${orig_k8s_api}"
+
+# 1b. When a non-target pod (bitcoind-0 at 10.42.1.50 / 2001:cafe:42::50) terminates,
+# watch_k3s_target_pods_once observes the event and immediately revokes its 32500
+# policy rules and mangle mark rules without falsely marking an unseen target replacement.
+WATCHED_PATH=""
+k8s_watch_api() {
+    WATCHED_PATH="$1"
+    printf '%s\n' '{"type":"DELETED","object":{"metadata":{"name":"bitcoind-0","namespace":"lightning","resourceVersion":"776","labels":{"app":"bitcoind"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.50","podIPs":[{"ip":"10.42.1.50"},{"ip":"2001:cafe:42::50"}]}}}'
+    return 0
+}
+watch_k3s_target_pods_once "lightning" "app=lnd"
+[[ "${WATCHED_PATH}" != *"labelSelector="* ]]
+[[ "${RULES}" != *"from 10.42.1.50"* ]]
+[[ "${V6_RULES}" != *"from 2001:cafe:42::50"* ]]
+[[ -z "${MANGLE_RULES}" ]]
+[[ -z "${V6_MANGLE_RULES}" ]]
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" == "false" ]]
+
+# 1c. If a known Running non-target pod's network attachment (MAC/iif) cannot be
+# resolved, ensure_k3s_unknown_pod_containment must fail closed (non-zero) with a
+# descriptive LAST_ERROR rather than silently succeeding while leaving the pod blackholed.
+orig_resolve_attachment="$(declare -f resolve_k3s_non_target_pod_attachment)"
+resolve_k3s_non_target_pod_attachment() {
+    return 1
+}
+if ensure_k3s_unknown_pod_containment "10.42.1.7"; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Cannot resolve live network attachment for non-target pod"* ]]
+eval "${orig_resolve_attachment}"
+
+# Re-establish policy routing before testing watch failure and cleanup modes.
+ensure_policy_routing
+[[ "${RULES}" == *"from 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0"* ]]
+[[ "${V6_RULES}" == *"from 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0"* ]]
+
+# 2. When k8s_watch_api fails (non-zero exit) or emits an ERROR event,
+# watch_k3s_target_pods_once must NOT swallow the failure: it must reset
+# K3S_WATCH_RESOURCE_VERSION, mark K3S_UNSEEN_REPLACEMENT_PENDING="true",
+# restore pre-discovery containment, write a reconcile trigger, and return non-zero.
+CONTAINMENT_CALLS=0
+ensure_k3s_pre_discovery_containment() {
+    CONTAINMENT_CALLS=$((CONTAINMENT_CALLS + 1))
+    return 0
+}
+K3S_WATCH_SCOPE="lightning|app=lnd"
+K3S_WATCH_RESOURCE_VERSION="777"
+K3S_UNSEEN_REPLACEMENT_PENDING="false"
+persist_k3s_pod_watch_state
+
+k8s_watch_api() {
+    return 22
+}
+if watch_k3s_target_pods_once "lightning" "app=lnd"; then
+    exit 1
+fi
+load_k3s_pod_watch_state
+[[ -z "${K3S_WATCH_RESOURCE_VERSION}" ]]
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "true" ]]
+[[ "${CONTAINMENT_CALLS}" -ge 1 ]]
+[[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
+CONTAINMENT_CALLS=0
+K3S_WATCH_RESOURCE_VERSION="778"
+K3S_UNSEEN_REPLACEMENT_PENDING="false"
+persist_k3s_pod_watch_state
+k8s_watch_api() {
+    printf '%s\n' '{"type":"ERROR","object":{"kind":"Status","code":410}}'
+    return 0
+}
+if watch_k3s_target_pods_once "lightning" "app=lnd"; then
+    exit 1
+fi
+load_k3s_pod_watch_state
+[[ -z "${K3S_WATCH_RESOURCE_VERSION}" ]]
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "true" ]]
+[[ "${CONTAINMENT_CALLS}" -ge 1 ]]
+[[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+# 3. cleanup_k3s_policy_rules "true" (shutdown/restart) must remove 32764 tunnel
+# rules while preserving ALL 32765 blackholes AND preserving attachment-bound
+# 32500 non-target exemptions + mangle rules + pod-CIDR local bypasses so
+# unrelated pods keep Internet and cluster-local access while TunnelSats is stopped.
+cleanup_k3s_policy_rules "true"
+[[ "${RULES}" != *"32764:"* ]]
+[[ "${RULES}" != *"from 10.42.1.7 to "* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.1.7 blackhole proto 200'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.0.0/16 blackhole proto 200'* ]]
+[[ "${V6_RULES}" == *$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
+[[ "${V6_RULES}" == *$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200'* ]]
+[[ "${MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
+[[ "${V6_MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
+
+# 4. cleanup_k3s_policy_rules "false" (decommission) removes all remaining
+# owned IPv4 and IPv6 policy rules (32500 and 32765) and non-target mangle rules.
+cleanup_k3s_policy_rules "false"
+[[ -z "${RULES}" ]]
+[[ -z "${V6_RULES}" ]]
+[[ -z "${MANGLE_RULES}" ]]
+[[ -z "${V6_MANGLE_RULES}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
 

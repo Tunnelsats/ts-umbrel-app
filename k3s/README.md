@@ -24,13 +24,15 @@ kubectl delete -k k3s/
 
 ## 1. Namespace & RBAC
 
-TunnelSats discovers and restarts your LND/CLN pod through the Kubernetes API.
-Its ServiceAccount needs `get`/`list`/`delete` on `pods` and
-`get`/`create`/`delete` on `networkpolicies` **in the namespace where LND/CLN
-run** (`role.yaml` + `rolebinding.yaml`). The NetworkPolicy permission is a
-last-resort fail-closed boundary: if every node-level isolation mechanism
-fails, it denies egress for the selected Lightning workload and also covers a
-controller-created replacement pod until routing recovers.
+TunnelSats discovers, watches, and restarts your LND/CLN pod through the
+Kubernetes API. Its ServiceAccount needs `get`/`list`/`watch`/`delete` on
+`pods` and `get`/`list`/`create`/`delete` on `networkpolicies` **in the
+namespace where LND/CLN run** (`role.yaml` + `rolebinding.yaml`). The pod watch
+stream and reconciliation loop pre-guard newly scheduled co-located replacement
+pods (via per-pod `ip rule` blackholes and `iptables`/`ip6tables` egress drops)
+before `Ready=True`, while the `NetworkPolicy` permission and node-level
+pod-CIDR quarantine keep replacement pods isolated across discovery failures,
+rollouts, and restarts.
 
 These are **namespaced** Role/RoleBinding objects, so pay attention to *where*
 they land:
@@ -232,14 +234,30 @@ An invalid setting or a missing WireGuard route fails closed and reports
 `rules_synced: false`. The effective normalized list is available as
 `k3s_bypass_cidrs` at `/api/local/status`.
 
+While a Lightning pod is starting (`Ready=False`) or when service/pod discovery
+temporarily fails, TunnelSats keeps replacement pods isolated before discovery
+completes:
+- Co-located matching pods are pre-guarded immediately via Kubernetes Pod Watch
+  events (`watch=true`) and reconciliation scans using per-pod `ip rule`
+  blackholes and `iptables`/`ip6tables` drop rules before `Ready=True`.
+- If discovery fails, TunnelSats applies both selector-based emergency
+  `NetworkPolicy` containment and kernel pod-CIDR quarantine (`K3S_POD_CIDRS`,
+  or the pod CIDR derived from `K3S_BYPASS_CIDRS` / local CNI routes) because
+  default k3s Flannel does not enforce `NetworkPolicy`
+  (`K3S_CNI_ENFORCES_NETWORK_POLICY=false` by default; set `true` only on
+  clusters with an enforcing CNI such as Calico or Cilium).
+- Health checks (`verify_k3s_target_routes`) verify both that no higher-priority
+  unowned `ip rule` shadows the target pod and that `ip -4 route get` from the
+  pod IP resolves via the TunnelSats WireGuard interface.
+
 Useful route checks on the node are:
 
 ```sh
 # Must select table 51820 / the TunnelSats WireGuard interface:
-ip route get <public-peer-ip> from <lightning-pod-ip>
+ip route get <public-peer-ip> from <lightning-pod-ip> iif <cni-iface>
 
 # Must remain on the cluster route:
-ip route get <cluster-pod-ip> from <lightning-pod-ip>
+ip route get <cluster-pod-ip> from <lightning-pod-ip> iif <cni-iface>
 ```
 
 ## 4. PVC mount paths (do not move them)
