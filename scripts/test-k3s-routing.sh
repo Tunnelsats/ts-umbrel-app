@@ -257,6 +257,8 @@ fi
 ip -n "${POD_NS}" addr del 10.42.1.9/24 dev pod0
 ip -n "${POD_NS}" addr del 10.42.1.8/24 dev pod0
 ip -n "${POD_NS}" -6 addr del 2001:db8:42::8/64 dev pod0
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
 # Clean up the pre-guarded candidate rules for 10.42.1.8 / 2001:db8:42::8 and
 # restore clean 10.42.1.7 state for the subsequent kill-switch and SIGTERM tests.
 # shellcheck disable=SC2016
@@ -296,8 +298,6 @@ ip netns exec "${ROUTER_NS}" env \
 # outbound access (10.42.1.50 / 2001:db8:42::50), and active pod VPN routing.
 ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
 ip -n "${POD_NS}" -6 addr add 2001:db8:42::11/64 dev pod0 nodad
-ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
-ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
 if ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
     echo "FAIL: unseen post-CNI replacement pod IP 10.42.1.11 escaped to clearnet" >&2
     exit 1
@@ -314,6 +314,21 @@ if ! ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 2 2001:db8:100
     echo "FAIL: known non-target pod IPv6 2001:db8:42::50 lost outbound Internet access" >&2
     exit 1
 fi
+# Simulate a replacement Lightning pod reusing the terminated non-target pod's
+# IP (10.42.1.50 / 2001:db8:42::50) on a new CNI veth with a new MAC address
+# before the Kubernetes watch sees it. Because the 32500 exemption requires the
+# original pod's MAC-bound fwmark (0xca6d), the reused IP must be blocked by 32765.
+ORIG_POD0_MAC="$(ip -n "${POD_NS}" link show dev pod0 | awk '/link\/ether/ {print $2; exit}')"
+ip -n "${POD_NS}" link set dev pod0 address 02:42:0a:2a:01:fe
+if ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: replacement pod reusing non-target pod IP 10.42.1.50 with new MAC escaped to clearnet" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: replacement pod reusing non-target pod IPv6 2001:db8:42::50 with new MAC escaped to clearnet" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" link set dev pod0 address "${ORIG_POD0_MAC}"
 if ! ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 2 10.42.1.1 >/dev/null; then
     echo "FAIL: unseen replacement pod IP 10.42.1.11 lost cluster-local bypass" >&2
     exit 1

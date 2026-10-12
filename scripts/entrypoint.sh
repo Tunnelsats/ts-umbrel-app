@@ -29,6 +29,9 @@ IPV6_BLACKHOLE_RULE_PREF="${IPV6_BLACKHOLE_RULE_PREF:-32765}"
 IPV6_BLACKHOLE_METRIC="${IPV6_BLACKHOLE_METRIC:-42760}"
 IPV6_RULE_MARKER="tunnelsats-ipv6-deny"
 K3S_IPV6_QUARANTINE_MARKER="tunnelsats-k3s-ipv6-quarantine"
+K3S_NON_TARGET_RULE_MARKER="tunnelsats-k3s-non-target"
+K3S_NON_TARGET_FWMARK="0xca6d"
+K3S_NON_TARGET_FWMARK_MASK="0xffffffff"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 KILL_SWITCH_PREF=32762
@@ -262,6 +265,9 @@ K3S_CANDIDATE_POD_IPV6_ADDRESSES=""
 K3S_ALL_MATCHING_LOCAL_POD_IPS=""
 K3S_WATCHED_CANDIDATE_POD_IPS=""
 K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES=""
+K3S_KNOWN_NON_TARGET_POD_IPS=""
+K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES=""
+K3S_KNOWN_NON_TARGET_POD_V6_PEERS=""
 K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
 
 log() {
@@ -2110,93 +2116,167 @@ pre_guard_colocated_k3s_candidate_pods() {
         K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES=""
     fi
 
-    unassigned_state="$(
-        printf '%s' "${pod_list}" | jq -r --arg node "${TUNNELSATS_K8S_NODE_NAME}" --arg replace "${replace_existing}" '
-            if any(
-                .items[]?;
-                ((._watchEventType // "") != "DELETED")
-                and ((.status.phase // "") != "Succeeded")
-                and ((.status.phase // "") != "Failed")
-                and (((.spec.nodeName // "") == $node) or ((.spec.nodeName // "") == ""))
-                and (
-                    [(.status.podIPs[]?.ip // empty), (.status.podIP // empty)]
-                    | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")))
-                    | length == 0
-                )
-            ) then
-                "unassigned"
-            elif ($replace != "true") and any(
-                .items[]?;
-                ((.spec.nodeName // "") == $node)
-                and (((._watchEventType // "") == "DELETED") or ((.metadata.deletionTimestamp // null) != null))
-            ) then
-                "replacing"
-            else
-                "none"
-            end
-        ' 2>/dev/null || printf 'none\n'
-    )"
-    if [ "${unassigned_state}" = "unassigned" ] || [ "${unassigned_state}" = "replacing" ]; then
-        K3S_UNSEEN_REPLACEMENT_PENDING="true"
+    local target_selector_json=""
+    if [ -n "${K3S_TARGET_POD_SELECTOR:-}" ]; then
+        target_selector_json="$(k3s_network_policy_selector 2>/dev/null || true)"
     fi
 
     parsed_candidates="$(
-        printf '%s' "${pod_list}" | jq -r --arg node "${TUNNELSATS_K8S_NODE_NAME}" '
-            .items[]?
-            | select(.spec.nodeName == $node)
-            | (
-                if (._watchEventType // "") == "DELETED"
-                   or (.status.phase // "") == "Succeeded"
-                   or (.status.phase // "") == "Failed" then
-                    "deleted"
-                else
-                    "active"
-                end
-            ) as $state
-            | [(.status.podIPs[]?.ip // empty), (.status.podIP // empty)]
-            | unique[]
-            | select(length > 0)
-            | "\($state)|\(.)"
-        ' 2>/dev/null | python3 -c '
+        POD_LIST_JSON="${pod_list}" \
+        NODE_NAME="${TUNNELSATS_K8S_NODE_NAME}" \
+        REPLACE_MODE="${replace_existing}" \
+        TARGET_SELECTOR_JSON="${target_selector_json}" \
+        python3 -c '
 import ipaddress
-import sys
+import json
+import os
+import re
 
-order = {"deleted": 0, "active": 1}
+node_name = os.environ.get("NODE_NAME", "").strip()
+replace_mode = os.environ.get("REPLACE_MODE", "false") == "true"
+target_selector = None
+raw_selector = os.environ.get("TARGET_SELECTOR_JSON", "").strip()
+if raw_selector:
+    try:
+        parsed_sel = json.loads(raw_selector)
+        if isinstance(parsed_sel, dict):
+            target_selector = parsed_sel
+    except Exception:
+        target_selector = None
+
+def matches_selector(labels, selector):
+    if not isinstance(labels, dict) or not labels or not isinstance(selector, dict):
+        return True
+    match_labels = selector.get("matchLabels") or {}
+    if isinstance(match_labels, dict):
+        for k, v in match_labels.items():
+            if str(k) not in labels or str(labels.get(str(k), "")) != str(v):
+                return False
+    match_exprs = selector.get("matchExpressions") or []
+    if isinstance(match_exprs, list):
+        for expr in match_exprs:
+            if not isinstance(expr, dict):
+                continue
+            k = str(expr.get("key", ""))
+            op = expr.get("operator", "")
+            vals = {str(v) for v in (expr.get("values") or [])}
+            if op == "In":
+                if k not in labels or str(labels.get(k, "")) not in vals:
+                    return False
+            elif op == "NotIn":
+                if k in labels and str(labels.get(k, "")) in vals:
+                    return False
+            elif op == "Exists":
+                if k not in labels:
+                    return False
+            elif op == "DoesNotExist":
+                if k in labels:
+                    return False
+    return True
+
+try:
+    doc = json.loads(os.environ.get("POD_LIST_JSON", ""))
+    items = doc.get("items") if isinstance(doc, dict) else []
+except Exception:
+    items = []
+if not isinstance(items, list):
+    items = []
+
+ipv4_re = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
+has_unassigned = False
+has_replacing = False
+order = {"non_target_deleted": 0, "deleted": 1, "non_target_active": 2, "active": 3}
 entries = []
 seen = set()
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw or "|" not in raw:
-        continue
-    state, ip_str = raw.split("|", 1)
-    try:
-        addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
-    except ValueError:
-        continue
-    if addr.is_unspecified or addr.is_loopback or addr.is_link_local or addr.is_multicast:
-        continue
-    key = (state, addr.version, str(addr))
-    if key in seen:
-        continue
-    seen.add(key)
-    entries.append((order.get(state, 2), state, addr.version, str(addr)))
 
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    meta = item.get("metadata") or {}
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    ev_type = str(item.get("_watchEventType") or "")
+    phase = str(status.get("phase") or "")
+    pod_node = str(spec.get("nodeName") or "")
+    del_ts = meta.get("deletionTimestamp")
+    labels = meta.get("labels")
+    is_target = matches_selector(labels, target_selector)
+
+    raw_ips = []
+    for entry in status.get("podIPs") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("ip"), str) and entry["ip"]:
+            raw_ips.append(entry["ip"])
+    if isinstance(status.get("podIP"), str) and status["podIP"]:
+        raw_ips.append(status["podIP"])
+
+    if is_target:
+        v4_ips = [ip for ip in raw_ips if ipv4_re.match(ip)]
+        if (
+            ev_type != "DELETED"
+            and phase not in ("Succeeded", "Failed")
+            and (pod_node == node_name or pod_node == "")
+            and len(v4_ips) == 0
+        ):
+            has_unassigned = True
+        if (
+            not replace_mode
+            and pod_node == node_name
+            and (ev_type == "DELETED" or del_ts is not None)
+        ):
+            has_replacing = True
+
+    if pod_node != node_name:
+        continue
+
+    if is_target:
+        state = "deleted" if (ev_type == "DELETED" or phase in ("Succeeded", "Failed")) else "active"
+    else:
+        state = "non_target_deleted" if (ev_type == "DELETED" or del_ts is not None or phase != "Running") else "non_target_active"
+
+    for ip_str in raw_ips:
+        try:
+            addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
+        except ValueError:
+            continue
+        if addr.is_unspecified or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            continue
+        key = (state, addr.version, str(addr))
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((order.get(state, 9), state, addr.version, str(addr)))
+
+unassigned_state = "unassigned" if has_unassigned else ("replacing" if has_replacing else "none")
+print(f"UNASSIGNED|{unassigned_state}|")
 for _, state, version, addr_str in sorted(entries):
     print(f"{state}|{version}|{addr_str}")
-' 2>/dev/null || true
+' 2>/dev/null || printf 'UNASSIGNED|none|\n'
     )"
 
+    unassigned_state="none"
     while IFS='|' read -r state family address; do
+        if [ "${state}" = "UNASSIGNED" ]; then
+            unassigned_state="${family:-none}"
+            if [ "${unassigned_state}" = "unassigned" ] || [ "${unassigned_state}" = "replacing" ]; then
+                K3S_UNSEEN_REPLACEMENT_PENDING="true"
+            fi
+            continue
+        fi
         [ -n "${address}" ] || continue
         if [ "${family}" = "4" ]; then
-            if [ "${state}" = "deleted" ]; then
+            if [ "${state}" = "non_target_deleted" ]; then
+                k3s_remove_from_csv K3S_KNOWN_NON_TARGET_POD_IPS "${address}"
+                revoke_k3s_non_target_pod_exemption "4" "${address}"
+            elif [ "${state}" = "non_target_active" ]; then
+                :
+            elif [ "${state}" = "deleted" ]; then
                 k3s_remove_from_csv K3S_ALL_MATCHING_LOCAL_POD_IPS "${address}"
                 k3s_remove_from_csv K3S_CANDIDATE_POD_IPS "${address}"
                 k3s_remove_from_csv K3S_WATCHED_CANDIDATE_POD_IPS "${address}"
             else
                 k3s_remove_from_csv K3S_KNOWN_NON_TARGET_POD_IPS "${address}"
                 if [ "${address}" != "${DOCKER_TARGET_IP:-}" ]; then
-                    ip rule del from "${address}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1 || true
+                    revoke_k3s_non_target_pod_exemption "4" "${address}"
                 fi
                 k3s_append_unique_csv K3S_ALL_MATCHING_LOCAL_POD_IPS "${address}"
                 k3s_append_unique_csv K3S_CANDIDATE_POD_IPS "${address}"
@@ -2225,12 +2305,17 @@ for _, state, version, addr_str in sorted(entries):
                 fi
             fi
         elif [ "${family}" = "6" ]; then
-            if [ "${state}" = "deleted" ]; then
+            if [ "${state}" = "non_target_deleted" ]; then
+                k3s_remove_from_csv K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES "${address}"
+                revoke_k3s_non_target_pod_exemption "6" "${address}"
+            elif [ "${state}" = "non_target_active" ]; then
+                :
+            elif [ "${state}" = "deleted" ]; then
                 k3s_remove_from_csv K3S_CANDIDATE_POD_IPV6_ADDRESSES "${address}"
                 k3s_remove_from_csv K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES "${address}"
             else
                 k3s_remove_from_csv K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES "${address}"
-                ip -6 rule del from "${address}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1 || true
+                revoke_k3s_non_target_pod_exemption "6" "${address}"
                 k3s_append_unique_csv K3S_CANDIDATE_POD_IPV6_ADDRESSES "${address}"
                 k3s_append_unique_csv K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES "${address}"
                 load_managed_ipv6_policy_state >/dev/null 2>&1 || true
@@ -3806,6 +3891,7 @@ resolve_k3s_non_target_pod_addresses() {
 
     K3S_KNOWN_NON_TARGET_POD_IPS=""
     K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES=""
+    K3S_KNOWN_NON_TARGET_POD_V6_PEERS=""
 
     if [ -n "${K3S_TARGET_POD_SELECTOR:-}" ]; then
         target_selector_json="$(k3s_network_policy_selector 2>/dev/null || true)"
@@ -3962,35 +4048,47 @@ def matches_selector(labels, selector):
 
 allowed_v4 = set()
 allowed_v6 = set()
+v6_peer_v4 = {}
 
 def consider_ip(raw_ip, host_ips):
     raw_ip = (raw_ip or "").strip().split("%", 1)[0].split("/", 1)[0]
     if not raw_ip or raw_ip in host_ips:
-        return
+        return None
     try:
         addr = ipaddress.ip_address(raw_ip)
     except ValueError:
-        return
+        return None
     if addr.is_unspecified or addr.is_loopback or addr.is_link_local or addr.is_multicast:
-        return
+        return None
     s = str(addr)
     if addr.version == 4:
         if s in excluded_v4:
-            return
+            return None
         if v4_nets and not any(addr in net for net in v4_nets):
-            return
+            return None
         allowed_v4.add(s)
+        return (4, s)
     elif addr.version == 6:
         if s in excluded_v6:
-            return
+            return None
         if v6_nets and not any(addr in net for net in v6_nets):
-            return
+            return None
         allowed_v6.add(s)
+        return (6, s)
+    return None
 
+explicit_v4_list = []
 for raw in os.environ.get("EXPLICIT_V4", "").split(","):
-    consider_ip(raw, set())
+    res = consider_ip(raw, set())
+    if res and res[0] == 4:
+        explicit_v4_list.append(res[1])
+explicit_v6_list = []
 for raw in os.environ.get("EXPLICIT_V6", "").split(","):
-    consider_ip(raw, set())
+    res = consider_ip(raw, set())
+    if res and res[0] == 6:
+        explicit_v6_list.append(res[1])
+if len(explicit_v4_list) == 1 and len(explicit_v6_list) == 1:
+    v6_peer_v4[explicit_v6_list[0]] = explicit_v4_list[0]
 
 raw_pod_list = os.environ.get("POD_LIST_JSON", "").strip()
 if raw_pod_list:
@@ -4030,16 +4128,27 @@ if raw_pod_list:
             for entry in status.get("hostIPs") or []:
                 if isinstance(entry, dict) and isinstance(entry.get("ip"), str) and entry["ip"].strip():
                     host_ips.add(entry["ip"].strip())
+            pod_v4 = []
+            pod_v6 = []
             if isinstance(status.get("podIP"), str):
-                consider_ip(status["podIP"], host_ips)
+                res = consider_ip(status["podIP"], host_ips)
+                if res:
+                    (pod_v4 if res[0] == 4 else pod_v6).append(res[1])
             for entry in status.get("podIPs") or []:
                 if isinstance(entry, dict) and isinstance(entry.get("ip"), str):
-                    consider_ip(entry["ip"], host_ips)
+                    res = consider_ip(entry["ip"], host_ips)
+                    if res:
+                        (pod_v4 if res[0] == 4 else pod_v6).append(res[1])
+            if pod_v4 and pod_v6:
+                for v6_item in pod_v6:
+                    v6_peer_v4[v6_item] = pod_v4[0]
 
 for addr in sorted(allowed_v4, key=lambda x: ipaddress.IPv4Address(x)):
     print(f"4|{addr}")
 for addr in sorted(allowed_v6, key=lambda x: ipaddress.IPv6Address(x)):
     print(f"6|{addr}")
+for v6_addr, v4_addr in sorted(v6_peer_v4.items()):
+    print(f"P|{v6_addr}={v4_addr}")
 ' 2>/dev/null || true
     )"
 
@@ -4049,8 +4158,390 @@ for addr in sorted(allowed_v6, key=lambda x: ipaddress.IPv6Address(x)):
             k3s_append_unique_csv K3S_KNOWN_NON_TARGET_POD_IPS "${addr}"
         elif [ "${family}" = "6" ]; then
             k3s_append_unique_csv K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES "${addr}"
+        elif [ "${family}" = "P" ]; then
+            k3s_append_unique_csv K3S_KNOWN_NON_TARGET_POD_V6_PEERS "${addr}"
         fi
     done <<< "${parsed_output}"
+    return 0
+}
+
+k3s_lookup_non_target_v6_peer_v4() {
+    local v6_addr="${1%/128}"
+    local entry
+    local -a entries=()
+    [ -n "${v6_addr}" ] && [ -n "${K3S_KNOWN_NON_TARGET_POD_V6_PEERS:-}" ] || return 1
+    IFS=',' read -r -a entries <<< "${K3S_KNOWN_NON_TARGET_POD_V6_PEERS}"
+    for entry in "${entries[@]}"; do
+        if [[ "${entry}" == "${v6_addr}="* ]]; then
+            printf '%s\n' "${entry#*=}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_k3s_non_target_pod_attachment() {
+    local family="$1"
+    local address="${2%/*}"
+    local peer_v4="${3%/*}"
+    local route_info=""
+    local route_table=""
+    local pod_dev=""
+    local neigh_info=""
+    local pod_mac=""
+    local host_ll=""
+
+    [ -n "${address}" ] || return 1
+    if [ "${family}" = "6" ]; then
+        route_info="$(ip -6 route get "${address}" 2>/dev/null | head -n 1 || true)"
+        if [ -z "${route_info}" ] || [[ "${route_info}" == blackhole* ]] || [[ "${route_info}" == unreachable* ]] || [[ "${route_info}" == prohibit* ]]; then
+            route_table="$(ip -6 route show 2>/dev/null || true)"
+            route_info="$(
+                TARGET_ADDR="${address}" ROUTE_TABLE="${route_table}" python3 -c '
+import ipaddress, os
+target = ipaddress.ip_address(os.environ["TARGET_ADDR"])
+best_prefix = -1
+best_line = ""
+for raw in os.environ.get("ROUTE_TABLE", "").splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    parts = line.split()
+    if parts[0] in ("blackhole", "unreachable", "prohibit"):
+        continue
+    prefix_tok = parts[0]
+    try:
+        net = ipaddress.ip_network(prefix_tok, strict=False) if "/" in prefix_tok else ipaddress.ip_network(f"{prefix_tok}/128", strict=False)
+    except ValueError:
+        continue
+    if net.version == 6 and target in net and net.prefixlen > best_prefix:
+        best_prefix = net.prefixlen
+        best_line = line
+if best_line:
+    print(best_line)
+' 2>/dev/null || true
+            )"
+        fi
+    else
+        route_info="$(ip -4 route get "${address}" 2>/dev/null | head -n 1 || true)"
+        if [ -z "${route_info}" ] || [[ "${route_info}" == blackhole* ]] || [[ "${route_info}" == unreachable* ]] || [[ "${route_info}" == prohibit* ]]; then
+            route_table="$(ip -4 route show 2>/dev/null || true)"
+            route_info="$(
+                TARGET_ADDR="${address}" ROUTE_TABLE="${route_table}" python3 -c '
+import ipaddress, os
+target = ipaddress.ip_address(os.environ["TARGET_ADDR"])
+best_prefix = -1
+best_line = ""
+for raw in os.environ.get("ROUTE_TABLE", "").splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    parts = line.split()
+    if parts[0] in ("blackhole", "unreachable", "prohibit"):
+        continue
+    prefix_tok = parts[0]
+    try:
+        net = ipaddress.ip_network(prefix_tok, strict=False) if "/" in prefix_tok else ipaddress.ip_network(f"{prefix_tok}/32", strict=False)
+    except ValueError:
+        continue
+    if net.version == 4 and target in net and net.prefixlen > best_prefix:
+        best_prefix = net.prefixlen
+        best_line = line
+if best_line:
+    print(best_line)
+' 2>/dev/null || true
+            )"
+        fi
+    fi
+
+    [ -n "${route_info}" ] || return 1
+    if [[ " ${route_info} " == *" via "* ]]; then
+        return 1
+    fi
+    pod_dev="$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<< "${route_info}")"
+    if [ -z "${pod_dev}" ] || [ "${pod_dev}" = "lo" ] || [ "${pod_dev}" = "${WG_IFACE}" ]; then
+        return 1
+    fi
+
+    if [ "${family}" = "6" ]; then
+        neigh_info="$(ip -6 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+        if [ -z "${neigh_info}" ]; then
+            neigh_info="$(ip -6 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+        fi
+        pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1 && command -v ping >/dev/null 2>&1; then
+            ping -6 -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
+            host_ll="$(ip -6 -o addr show dev "${pod_dev}" scope link 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "inet6") {split($(i + 1), a, "/"); print a[1]; exit}}' || true)"
+            if [ -n "${host_ll}" ]; then
+                ping -6 -c 1 -W 1 -I "${host_ll}%${pod_dev}" "${address}" >/dev/null 2>&1 || true
+            fi
+            neigh_info="$(ip -6 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            if [ -z "${neigh_info}" ]; then
+                neigh_info="$(ip -6 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            fi
+            pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        fi
+        if [ -z "${pod_mac}" ] && [ -n "${peer_v4}" ]; then
+            neigh_info="$(ip -4 neigh show to "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            if [ -z "${neigh_info}" ]; then
+                neigh_info="$(ip -4 neigh show "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            fi
+            pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        fi
+    else
+        neigh_info="$(ip -4 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+        if [ -z "${neigh_info}" ]; then
+            neigh_info="$(ip -4 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+        fi
+        pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1 && command -v ping >/dev/null 2>&1; then
+            ping -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
+            neigh_info="$(ip -4 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            if [ -z "${neigh_info}" ]; then
+                neigh_info="$(ip -4 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+            fi
+            pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        fi
+    fi
+
+    if [[ ! "${pod_mac}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
+        return 1
+    fi
+    printf '%s|%s\n' "${pod_dev}" "${pod_mac}"
+    return 0
+}
+
+revoke_k3s_non_target_pod_exemption() {
+    local family="$1"
+    local address="${2%/*}"
+    local rule_line rule_spec rule_source mangle_rule
+    local -a parts
+
+    [ -n "${address}" ] || return 0
+    if [ "${family}" = "6" ]; then
+        while IFS= read -r mangle_rule; do
+            [ -n "${mangle_rule}" ] || continue
+            [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+            if [[ "${mangle_rule}" == *" -s ${address}/128 "* ]] || [[ "${mangle_rule}" == *" -s ${address} "* ]]; then
+                read -r -a parts <<< "${mangle_rule}"
+                parts[0]="-D"
+                ip6tables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip6tables -t mangle -S PREROUTING 2>/dev/null || true)
+
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                continue
+            fi
+            [[ "${rule_spec}" != *" to "* ]] || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${rule_source%/128}" = "${address}" ]; then
+                delete_ipv6_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+    else
+        while IFS= read -r mangle_rule; do
+            [ -n "${mangle_rule}" ] || continue
+            [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+            if [[ "${mangle_rule}" == *" -s ${address}/32 "* ]] || [[ "${mangle_rule}" == *" -s ${address} "* ]]; then
+                read -r -a parts <<< "${mangle_rule}"
+                parts[0]="-D"
+                iptables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+                POLICY_CHANGED="1"
+            fi
+        done < <(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                continue
+            fi
+            [[ "${rule_spec}" != *" to "* ]] || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ "${rule_source%/32}" = "${address}" ]; then
+                delete_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+    fi
+    return 0
+}
+
+cleanup_k3s_non_target_mangle_rules() {
+    local mangle_rule
+    local -a parts
+
+    while IFS= read -r mangle_rule; do
+        [ -n "${mangle_rule}" ] || continue
+        [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+        read -r -a parts <<< "${mangle_rule}"
+        parts[0]="-D"
+        iptables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+    done < <(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+
+    while IFS= read -r mangle_rule; do
+        [ -n "${mangle_rule}" ] || continue
+        [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+        read -r -a parts <<< "${mangle_rule}"
+        parts[0]="-D"
+        ip6tables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+    done < <(ip6tables -t mangle -S PREROUTING 2>/dev/null || true)
+}
+
+ensure_k3s_non_target_pod_exemption() {
+    local family="$1"
+    local address="${2%/*}"
+    local peer_v4="${3%/*}"
+    local attachment="" pod_dev="" pod_mac=""
+    local mangle_rule rule_line rule_spec rule_source rule_iif
+    local expected_rule_pattern existing_rule
+    local -a parts
+
+    [ -n "${address}" ] || return 0
+    if ! attachment="$(resolve_k3s_non_target_pod_attachment "${family}" "${address}" "${peer_v4}")" || [ -z "${attachment}" ]; then
+        revoke_k3s_non_target_pod_exemption "${family}" "${address}"
+        return 0
+    fi
+    IFS='|' read -r pod_dev pod_mac <<< "${attachment}"
+    if [ -z "${pod_dev}" ] || [ -z "${pod_mac}" ]; then
+        revoke_k3s_non_target_pod_exemption "${family}" "${address}"
+        return 0
+    fi
+
+    if [ "${family}" = "6" ]; then
+        while IFS= read -r mangle_rule; do
+            [ -n "${mangle_rule}" ] || continue
+            [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+            if [[ "${mangle_rule}" == *" -s ${address}/128 "* ]] || [[ "${mangle_rule}" == *" -s ${address} "* ]]; then
+                if [[ "${mangle_rule}" != *" -i ${pod_dev} "* ]] || [[ "${mangle_rule,,}" != *" --mac-source ${pod_mac} "* ]]; then
+                    read -r -a parts <<< "${mangle_rule}"
+                    parts[0]="-D"
+                    ip6tables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+                    POLICY_CHANGED="1"
+                fi
+            fi
+        done < <(ip6tables -t mangle -S PREROUTING 2>/dev/null || true)
+
+        if ! ip6tables -t mangle -C PREROUTING \
+            -i "${pod_dev}" -s "${address}" \
+            -m mac --mac-source "${pod_mac}" \
+            -m comment --comment "${K3S_NON_TARGET_RULE_MARKER}" \
+            -j MARK --set-xmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" >/dev/null 2>&1; then
+            if ! ip6tables -t mangle -I PREROUTING \
+                -i "${pod_dev}" -s "${address}" \
+                -m mac --mac-source "${pod_mac}" \
+                -m comment --comment "${K3S_NON_TARGET_RULE_MARKER}" \
+                -j MARK --set-xmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" >/dev/null 2>&1; then
+                revoke_k3s_non_target_pod_exemption "6" "${address}"
+                LAST_ERROR="k3s: Failed to add IPv6 non-target pod mangle mark rule for ${address}"
+                return 1
+            fi
+            POLICY_CHANGED="1"
+        fi
+
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                continue
+            fi
+            [[ "${rule_spec}" != *" to "* ]] || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            [ "${rule_source%/128}" = "${address}" ] || continue
+            rule_iif="$(awk '{for (i = 1; i <= NF; i++) if ($i == "iif") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [[ "${rule_spec}" != *" fwmark "* ]] || [ "${rule_iif}" != "${pod_dev}" ]; then
+                delete_ipv6_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+        expected_rule_pattern="^${K3S_BYPASS_RULE_PREF}:[[:space:]]+from[[:space:]]+${address}(/128)?[[:space:]]+fwmark[[:space:]]+${K3S_NON_TARGET_FWMARK}(/${K3S_NON_TARGET_FWMARK_MASK})?[[:space:]]+iif[[:space:]]+${pod_dev}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        if ! ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qiE "${expected_rule_pattern}"; then
+            if ! ip -6 rule add from "${address}" fwmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" iif "${pod_dev}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
+                revoke_k3s_non_target_pod_exemption "6" "${address}"
+                LAST_ERROR="k3s: Failed to add IPv6 non-target pod outbound route for ${address}"
+                return 1
+            fi
+            existing_rule="$(ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -iE "${expected_rule_pattern}" | head -n 1 || true)"
+            if [ -z "${existing_rule}" ] || ! k3s_policy_rule_is_owned "${existing_rule}"; then
+                revoke_k3s_non_target_pod_exemption "6" "${address}"
+                LAST_ERROR="k3s: IPv6 non-target pod outbound route was not installed for ${address}"
+                return 1
+            fi
+            POLICY_CHANGED="1"
+        fi
+    else
+        while IFS= read -r mangle_rule; do
+            [ -n "${mangle_rule}" ] || continue
+            [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+            if [[ "${mangle_rule}" == *" -s ${address}/32 "* ]] || [[ "${mangle_rule}" == *" -s ${address} "* ]]; then
+                if [[ "${mangle_rule}" != *" -i ${pod_dev} "* ]] || [[ "${mangle_rule,,}" != *" --mac-source ${pod_mac} "* ]]; then
+                    read -r -a parts <<< "${mangle_rule}"
+                    parts[0]="-D"
+                    iptables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+                    POLICY_CHANGED="1"
+                fi
+            fi
+        done < <(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+
+        if ! iptables -t mangle -C PREROUTING \
+            -i "${pod_dev}" -s "${address}" \
+            -m mac --mac-source "${pod_mac}" \
+            -m comment --comment "${K3S_NON_TARGET_RULE_MARKER}" \
+            -j MARK --set-xmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" >/dev/null 2>&1; then
+            if ! iptables -t mangle -I PREROUTING \
+                -i "${pod_dev}" -s "${address}" \
+                -m mac --mac-source "${pod_mac}" \
+                -m comment --comment "${K3S_NON_TARGET_RULE_MARKER}" \
+                -j MARK --set-xmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" >/dev/null 2>&1; then
+                revoke_k3s_non_target_pod_exemption "4" "${address}"
+                LAST_ERROR="k3s: Failed to add non-target pod mangle mark rule for ${address}"
+                return 1
+            fi
+            POLICY_CHANGED="1"
+        fi
+
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                continue
+            fi
+            [[ "${rule_spec}" != *" to "* ]] || continue
+            rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            [ "${rule_source%/32}" = "${address}" ] || continue
+            rule_iif="$(awk '{for (i = 1; i <= NF; i++) if ($i == "iif") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [[ "${rule_spec}" != *" fwmark "* ]] || [ "${rule_iif}" != "${pod_dev}" ]; then
+                delete_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+        expected_rule_pattern="^${K3S_BYPASS_RULE_PREF}:[[:space:]]+from[[:space:]]+${address//./\\.}(/32)?[[:space:]]+fwmark[[:space:]]+${K3S_NON_TARGET_FWMARK}(/${K3S_NON_TARGET_FWMARK_MASK})?[[:space:]]+iif[[:space:]]+${pod_dev}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        if ! ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qiE "${expected_rule_pattern}"; then
+            if ! ip rule add from "${address}" fwmark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" iif "${pod_dev}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
+                revoke_k3s_non_target_pod_exemption "4" "${address}"
+                LAST_ERROR="k3s: Failed to add non-target pod outbound route for ${address}"
+                return 1
+            fi
+            existing_rule="$(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -iE "${expected_rule_pattern}" | head -n 1 || true)"
+            if [ -z "${existing_rule}" ] || ! k3s_policy_rule_is_owned "${existing_rule}"; then
+                revoke_k3s_non_target_pod_exemption "4" "${address}"
+                LAST_ERROR="k3s: Non-target pod outbound route was not installed for ${address}"
+                return 1
+            fi
+            POLICY_CHANGED="1"
+        fi
+    fi
     return 0
 }
 
@@ -4070,10 +4561,11 @@ ensure_k3s_unknown_pod_containment() {
     local matched_cidrs pod_cidr escaped_cidr exact_pattern existing_rule
     local bypass_cidr rule_line rule_spec rule_source destination bypass_csv
     local ipv6_matched_cidrs=""
-    local non_target_ip non_target_ipv6
+    local non_target_ip non_target_ipv6 peer_v4 mangle_rule mangle_src
     local -a bypass_cidrs=()
     local -a non_target_ips=()
     local -a non_target_ipv6_list=()
+    local -a parts=()
     if ! normalize_k3s_bypass_cidrs; then
         return 1
     fi
@@ -4165,9 +4657,11 @@ ensure_k3s_unknown_pod_containment() {
         done
     done <<< "${matched_cidrs}"
 
-    # 4. Reconcile normal table-main outbound routes at K3S_BYPASS_RULE_PREF (32500)
-    # for known non-target pods on this node so unrelated pods keep Internet access
-    # while unseen replacement pod IPs remain blocked by 32765.
+    # 4. Reconcile MAC-and-interface-bound table-main outbound routes at
+    # K3S_BYPASS_RULE_PREF (32500) for known non-target pods on this node so
+    # unrelated pods keep Internet access while a replacement Lightning pod
+    # reusing a terminated non-target pod's IP (with a new veth/MAC) cannot
+    # match the exemption and falls through to the 32765 pod-CIDR blackhole.
     while IFS= read -r rule_line; do
         [ -n "${rule_line}" ] || continue
         rule_spec="${rule_line#*:}"
@@ -4179,33 +4673,37 @@ ensure_k3s_unknown_pod_containment() {
         rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
         rule_source="${rule_source%/32}"
         [ -n "${rule_source}" ] && [[ "${rule_source}" != */* ]] || continue
-        if [ "${rule_source}" = "${source_ip%/32}" ] || \
+        if [[ "${rule_spec}" != *" fwmark "* ]] || [[ "${rule_spec}" != *" iif "* ]] || \
+           [ "${rule_source}" = "${source_ip%/32}" ] || \
            k3s_ip_is_in_csv "${rule_source}" "${K3S_CANDIDATE_POD_IPS:-}" || \
            ! k3s_ip_is_in_csv "${rule_source}" "${K3S_KNOWN_NON_TARGET_POD_IPS:-}"; then
-            delete_policy_rule_line "${rule_line}"
-            POLICY_CHANGED="1"
+            revoke_k3s_non_target_pod_exemption "4" "${rule_source}"
         fi
     done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+    while IFS= read -r mangle_rule; do
+        [ -n "${mangle_rule}" ] || continue
+        [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+        mangle_src="$(awk '{for (i = 1; i <= NF; i++) if ($i == "-s") {print $(i + 1); exit}}' <<< "${mangle_rule}")"
+        mangle_src="${mangle_src%/32}"
+        if [ -z "${mangle_src}" ] || \
+           [ "${mangle_src}" = "${source_ip%/32}" ] || \
+           k3s_ip_is_in_csv "${mangle_src}" "${K3S_CANDIDATE_POD_IPS:-}" || \
+           ! k3s_ip_is_in_csv "${mangle_src}" "${K3S_KNOWN_NON_TARGET_POD_IPS:-}"; then
+            read -r -a parts <<< "${mangle_rule}"
+            parts[0]="-D"
+            iptables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+            POLICY_CHANGED="1"
+        fi
+    done < <(iptables -t mangle -S PREROUTING 2>/dev/null || true)
 
     for non_target_ip in "${non_target_ips[@]}"; do
         non_target_ip="${non_target_ip%/32}"
         [ -n "${non_target_ip}" ] || continue
         [ "${non_target_ip}" != "${source_ip%/32}" ] || continue
         k3s_ip_is_in_csv "${non_target_ip}" "${K3S_CANDIDATE_POD_IPS:-}" && continue
-        if ! ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qE \
-            "^${K3S_BYPASS_RULE_PREF}:[[:space:]]+from[[:space:]]+${non_target_ip//./\\.}(/32)?[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"; then
-            if ! ip rule add from "${non_target_ip}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
-                LAST_ERROR="k3s: Failed to add non-target pod outbound route for ${non_target_ip}"
-                return 1
-            fi
-            existing_rule="$(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -E \
-                "^${K3S_BYPASS_RULE_PREF}:[[:space:]]+from[[:space:]]+${non_target_ip//./\\.}(/32)?[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$" \
-                | head -n 1 || true)"
-            if [ -z "${existing_rule}" ] || ! k3s_policy_rule_is_owned "${existing_rule}"; then
-                LAST_ERROR="k3s: Non-target pod outbound route was not installed for ${non_target_ip}"
-                return 1
-            fi
-            POLICY_CHANGED="1"
+        if ! ensure_k3s_non_target_pod_exemption "4" "${non_target_ip}" ""; then
+            return 1
         fi
     done
 
@@ -4246,29 +4744,35 @@ ensure_k3s_unknown_pod_containment() {
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
             rule_source="${rule_source%/128}"
             [ -n "${rule_source}" ] && [[ "${rule_source}" != */* ]] || continue
-            if k3s_ip_is_in_csv "${rule_source}" "${K3S_CANDIDATE_POD_IPV6_ADDRESSES:-}" || \
+            if [[ "${rule_spec}" != *" fwmark "* ]] || [[ "${rule_spec}" != *" iif "* ]] || \
+               k3s_ip_is_in_csv "${rule_source}" "${K3S_CANDIDATE_POD_IPV6_ADDRESSES:-}" || \
                ! k3s_ip_is_in_csv "${rule_source}" "${K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES:-}"; then
-                delete_ipv6_policy_rule_line "${rule_line}"
-                POLICY_CHANGED="1"
+                revoke_k3s_non_target_pod_exemption "6" "${rule_source}"
             fi
         done < <(ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+        while IFS= read -r mangle_rule; do
+            [ -n "${mangle_rule}" ] || continue
+            [[ "${mangle_rule}" == *"--comment ${K3S_NON_TARGET_RULE_MARKER}"* ]] || continue
+            mangle_src="$(awk '{for (i = 1; i <= NF; i++) if ($i == "-s") {print $(i + 1); exit}}' <<< "${mangle_rule}")"
+            mangle_src="${mangle_src%/128}"
+            if [ -z "${mangle_src}" ] || \
+               k3s_ip_is_in_csv "${mangle_src}" "${K3S_CANDIDATE_POD_IPV6_ADDRESSES:-}" || \
+               ! k3s_ip_is_in_csv "${mangle_src}" "${K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES:-}"; then
+                read -r -a parts <<< "${mangle_rule}"
+                parts[0]="-D"
+                ip6tables -t mangle "${parts[@]}" >/dev/null 2>&1 || true
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip6tables -t mangle -S PREROUTING 2>/dev/null || true)
 
         for non_target_ipv6 in "${non_target_ipv6_list[@]}"; do
             non_target_ipv6="${non_target_ipv6%/128}"
             [ -n "${non_target_ipv6}" ] || continue
             k3s_ip_is_in_csv "${non_target_ipv6}" "${K3S_CANDIDATE_POD_IPV6_ADDRESSES:-}" && continue
-            v6_pattern="^${K3S_BYPASS_RULE_PREF}:[[:space:]]+from[[:space:]]+${non_target_ipv6}(/128)?[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-            if ! ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qE "${v6_pattern}"; then
-                if ! ip -6 rule add from "${non_target_ipv6}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
-                    LAST_ERROR="k3s: Failed to add IPv6 non-target pod outbound route for ${non_target_ipv6}"
-                    return 1
-                fi
-                v6_existing="$(ip -6 rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -E "${v6_pattern}" | head -n 1 || true)"
-                if [ -z "${v6_existing}" ] || ! k3s_policy_rule_is_owned "${v6_existing}"; then
-                    LAST_ERROR="k3s: IPv6 non-target pod outbound route was not installed for ${non_target_ipv6}"
-                    return 1
-                fi
-                POLICY_CHANGED="1"
+            peer_v4="$(k3s_lookup_non_target_v6_peer_v4 "${non_target_ipv6}" || true)"
+            if ! ensure_k3s_non_target_pod_exemption "6" "${non_target_ipv6}" "${peer_v4}"; then
+                return 1
             fi
         done
     fi
@@ -4907,6 +5411,8 @@ remove_stale_k3s_policy_rules() {
             fi
             if [ "${pref}" = "${K3S_BYPASS_RULE_PREF}" ] && \
                [[ "${rule_spec}" != *" to "* ]] && \
+               [[ "${rule_spec}" == *" fwmark "* ]] && \
+               [[ "${rule_spec}" == *" iif "* ]] && \
                [ "${rule_source%/32}" != "${current_source%/32}" ] && \
                ! k3s_ip_is_in_csv "${rule_source%/32}" "${K3S_CANDIDATE_POD_IPS:-}" && \
                k3s_ip_is_in_csv "${rule_source%/32}" "${K3S_KNOWN_NON_TARGET_POD_IPS:-}"; then
@@ -4915,8 +5421,12 @@ remove_stale_k3s_policy_rules() {
             if [ -n "${rule_source}" ] && \
                [ "${rule_source%/32}" != "${current_source%/32}" ] && \
                k3s_policy_rule_is_owned "${rule_line}"; then
-                delete_policy_rule_line "${rule_line}"
-                POLICY_CHANGED="1"
+                if [ "${pref}" = "${K3S_BYPASS_RULE_PREF}" ] && [[ "${rule_spec}" != *" to "* ]]; then
+                    revoke_k3s_non_target_pod_exemption "4" "${rule_source%/32}"
+                else
+                    delete_policy_rule_line "${rule_line}"
+                    POLICY_CHANGED="1"
+                fi
             fi
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)
     done
@@ -6162,6 +6672,9 @@ for raw_line in os.environ.get("ALL_RULES", "").splitlines():
                 print(f"k3s: Emergency quarantine rule at pref {pref} still shadows target pod routing: {line}")
                 sys.exit(1)
             quarantine_active = True
+        elif pref == bypass_pref and dst_token in ("all", "0.0.0.0/0", "0/0"):
+            print(f"k3s: Non-target bypass rule at pref {pref} shadows target pod routing: {line}")
+            sys.exit(1)
         continue
     if "fwmark" in tokens:
         idx = tokens.index("fwmark")
@@ -6569,7 +7082,8 @@ cleanup_k3s_policy_rules() {
     local pref
     local rule_line
     local rule_spec
-    local rule_source
+
+    cleanup_k3s_non_target_mangle_rules
 
     for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}"; do
         while IFS= read -r rule_line; do
@@ -6597,9 +7111,7 @@ cleanup_k3s_policy_rules() {
             else
                 [[ "${rule_spec}" == *"blackhole"* ]] || continue
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
-                rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-                if [ "${keep_blackholes}" != "false" ] && \
-                   { [[ "${rule_source}" != */* ]] || [[ "${rule_source}" == */32 ]]; }; then
+                if [ "${keep_blackholes}" != "false" ]; then
                     continue
                 fi
             fi
@@ -6628,9 +7140,7 @@ cleanup_k3s_policy_rules() {
         rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
         [[ "${rule_spec}" == *"blackhole"* ]] || continue
         [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
-        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-        if [ "${keep_blackholes}" != "false" ] && \
-           { [[ "${rule_source}" != */* ]] || [[ "${rule_source}" == */128 ]]; }; then
+        if [ "${keep_blackholes}" != "false" ]; then
             continue
         fi
         k3s_policy_rule_is_owned "${rule_line}" || continue
@@ -7351,8 +7861,12 @@ watch_k3s_target_pods_once() {
         persist_k3s_pod_watch_state || return 1
     fi
 
-    encoded_selector="$(urlencode "${selector}")"
-    watch_path="/api/v1/namespaces/${namespace}/pods?labelSelector=${encoded_selector}&watch=true&timeoutSeconds=${timeout_seconds}"
+    if [ -n "${TUNNELSATS_K8S_NODE_NAME:-}" ]; then
+        watch_path="/api/v1/namespaces/${namespace}/pods?fieldSelector=$(urlencode "spec.nodeName=${TUNNELSATS_K8S_NODE_NAME}")&watch=true&timeoutSeconds=${timeout_seconds}"
+    else
+        encoded_selector="$(urlencode "${selector}")"
+        watch_path="/api/v1/namespaces/${namespace}/pods?labelSelector=${encoded_selector}&watch=true&timeoutSeconds=${timeout_seconds}"
+    fi
     if [ -n "${K3S_WATCH_RESOURCE_VERSION:-}" ]; then
         watch_path="${watch_path}&resourceVersion=$(urlencode "${K3S_WATCH_RESOURCE_VERSION}")"
     fi
@@ -7723,13 +8237,14 @@ _verify_dataplane_decommissioned_inner() {
     if iptables -t nat -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-dnat" || \
        iptables -t nat -S POSTROUTING 2>/dev/null | grep -Fq -- "tunnelsats-masq" || \
        iptables -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(forward-in|forward-out|k3s-egress-guard)" || \
-       iptables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-conn-restore" || \
+       iptables -t mangle -S PREROUTING 2>/dev/null | grep -Eq -- "tunnelsats-(conn-restore|k3s-non-target)" || \
        iptables -t mangle -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(wg-mark|conn-save)"; then
         LAST_ERROR="Failed to remove tagged IPv4 dataplane iptables rules"
         return 1
     fi
 
-    if ip6tables -S FORWARD 2>/dev/null | grep -Eq -- "--comment (${IPV6_RULE_MARKER}|${K3S_IPV6_QUARANTINE_MARKER})"; then
+    if ip6tables -S FORWARD 2>/dev/null | grep -Eq -- "--comment (${IPV6_RULE_MARKER}|${K3S_IPV6_QUARANTINE_MARKER})" || \
+       ip6tables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "--comment ${K3S_NON_TARGET_RULE_MARKER}"; then
         LAST_ERROR="Failed to remove IPv6 FORWARD containment rules"
         return 1
     fi

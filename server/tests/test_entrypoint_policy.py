@@ -4638,7 +4638,63 @@ RECONCILE_TRIGGER_DIR="${TEST_TMP}/triggers"
 
 RULES=""
 V6_RULES=""
+MANGLE_RULES=""
+V6_MANGLE_RULES=""
 ROUTES=$'default dev tunnelsatsv2 metric 2\nblackhole default metric 3\n'
+iptables() {
+    if [[ "${1:-} ${2:-}" == "-t mangle" ]]; then
+        shift 2
+        if [[ "${1:-} ${2:-}" == "-S PREROUTING" ]]; then
+            printf '%s' "${MANGLE_RULES}"
+            return 0
+        fi
+        if [[ "${1:-} ${2:-}" == "-C PREROUTING" ]]; then
+            [[ "${MANGLE_RULES}" == *"-A PREROUTING -i cni0 -s 10.42.1.50/32 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff"* ]]
+            return
+        fi
+        if [[ "${1:-} ${2:-}" == "-I PREROUTING" ]]; then
+            if [[ "$*" == *"-i cni0 -s 10.42.1.50"* && "$*" == *"--mac-source 02:42:0a:2a:01:32"* && "$*" == *"--set-xmark 0xca6d/0xffffffff"* ]]; then
+                MANGLE_RULES+=$'-A PREROUTING -i cni0 -s 10.42.1.50/32 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff\n'
+                return 0
+            fi
+            return 1
+        fi
+        if [[ "${1:-} ${2:-}" == "-D PREROUTING" ]]; then
+            if [[ "$*" == *"10.42.1.50"* ]]; then
+                MANGLE_RULES=""
+            fi
+            return 0
+        fi
+    fi
+    return 0
+}
+ip6tables() {
+    if [[ "${1:-} ${2:-}" == "-t mangle" ]]; then
+        shift 2
+        if [[ "${1:-} ${2:-}" == "-S PREROUTING" ]]; then
+            printf '%s' "${V6_MANGLE_RULES}"
+            return 0
+        fi
+        if [[ "${1:-} ${2:-}" == "-C PREROUTING" ]]; then
+            [[ "${V6_MANGLE_RULES}" == *"-A PREROUTING -i cni0 -s 2001:cafe:42::50/128 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff"* ]]
+            return
+        fi
+        if [[ "${1:-} ${2:-}" == "-I PREROUTING" ]]; then
+            if [[ "$*" == *"-i cni0 -s 2001:cafe:42::50"* && "$*" == *"--mac-source 02:42:0a:2a:01:32"* && "$*" == *"--set-xmark 0xca6d/0xffffffff"* ]]; then
+                V6_MANGLE_RULES+=$'-A PREROUTING -i cni0 -s 2001:cafe:42::50/128 -m mac --mac-source 02:42:0a:2a:01:32 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff\n'
+                return 0
+            fi
+            return 1
+        fi
+        if [[ "${1:-} ${2:-}" == "-D PREROUTING" ]]; then
+            if [[ "$*" == *"2001:cafe:42::50"* ]]; then
+                V6_MANGLE_RULES=""
+            fi
+            return 0
+        fi
+    fi
+    return 0
+}
 ip() {
     if [[ "${1:-}" == "-6" ]]; then
         if [[ "${2:-} ${3:-} ${4:-}" == "rule show pref" ]]; then
@@ -4651,8 +4707,8 @@ ip() {
         fi
         if [[ "${2:-} ${3:-}" == "rule add" ]]; then
             case "$*" in
-                "-6 rule add from 2001:cafe:42::50 table main protocol 200 pref 32500")
-                    V6_RULES+=$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200\n'
+                "-6 rule add from 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 table main protocol 200 pref 32500")
+                    V6_RULES+=$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'
                     return 0
                     ;;
                 "-6 rule add from 2001:cafe:42::/56 blackhole protocol 200 pref 32765")
@@ -4663,18 +4719,34 @@ ip() {
             return 1
         fi
         if [[ "${2:-} ${3:-}" == "rule del" ]]; then
-            if [[ "$*" == *"from 2001:cafe:42::50 lookup main proto 200 pref 32500"* || "$*" == *"from 2001:cafe:42::50 table main protocol 200 pref 32500"* ]]; then
-                V6_RULES="${V6_RULES//$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200\n'/}"
+            if [[ "$*" == *"from 2001:cafe:42::50 "* && "$*" == *"pref 32500"* ]]; then
+                V6_RULES="${V6_RULES//$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'/}"
             fi
             if [[ "$*" == *"from 2001:cafe:42::/56 blackhole proto 200 pref 32765"* ]]; then
                 V6_RULES="${V6_RULES//$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200\n'/}"
             fi
             return 0
         fi
+        if [[ "$*" == "-6 route get 2001:cafe:42::50" ]]; then
+            printf '2001:cafe:42::50 dev cni0 src 2001:cafe:42::1 metric 256\n'
+            return 0
+        fi
+        if [[ "$*" == "-6 neigh show to 2001:cafe:42::50 dev cni0" ]]; then
+            printf '2001:cafe:42::50 lladdr 02:42:0a:2a:01:32 REACHABLE\n'
+            return 0
+        fi
         if [[ "${2:-} ${3:-}" == "route show" ]]; then
             printf '2001:cafe:42::/56 dev cni0 metric 256\n'
             return 0
         fi
+        return 0
+    fi
+    if [[ "$*" == "-4 route get 10.42.1.50" ]]; then
+        printf '10.42.1.50 dev cni0 src 10.42.0.1 uid 0\n'
+        return 0
+    fi
+    if [[ "$*" == "-4 neigh show to 10.42.1.50 dev cni0" ]]; then
+        printf '10.42.1.50 lladdr 02:42:0a:2a:01:32 REACHABLE\n'
         return 0
     fi
     if [[ "${1:-} ${2:-} ${3:-}" == "rule show pref" ]]; then
@@ -4699,8 +4771,8 @@ ip() {
             "rule add from 10.42.0.0/16 to 10.43.0.0/16 table main protocol 200 pref 32500")
                 RULES+=$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200\n'
                 ;;
-            "rule add from 10.42.1.50 table main protocol 200 pref 32500")
-                RULES+=$'32500:\tfrom 10.42.1.50 lookup main proto 200\n'
+            "rule add from 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'
                 ;;
             "rule add from 10.42.1.7 table 51820 protocol 200 pref 32764")
                 RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
@@ -4718,6 +4790,30 @@ ip() {
         return 0
     fi
     if [[ "${1:-} ${2:-}" == "rule del" ]]; then
+        if [[ "$*" == *"from 10.42.1.7 to 10.42.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.7 to 10.42.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 to 10.43.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.7 to 10.43.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 to 10.42.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 to 10.43.0.0/16 "* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.50 "* && "$*" == *"pref 32500"* ]]; then
+            RULES="${RULES//$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 lookup 51820 "* || "$*" == *"from 10.42.1.7 table 51820 "* ]]; then
+            RULES="${RULES//$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.1.7 blackhole proto 200 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.1.7 blackhole proto 200\n'/}"
+        fi
+        if [[ "$*" == *"from 10.42.0.0/16 blackhole proto 200 pref 32765"* ]]; then
+            RULES="${RULES//$'32765:\tfrom 10.42.0.0/16 blackhole proto 200\n'/}"
+        fi
         return 0
     fi
     if [[ "${1:-} ${2:-}" == "route replace" || "$*" == "route del 10.9.0.0/24 table 51820" ]]; then
@@ -4770,22 +4866,45 @@ k8s_api() {
 }
 
 # 1. ensure_policy_routing installs pod-CIDR cluster-local bypasses at 32500,
-# normal table-main outbound rules at 32500 for known non-target pods on the
-# same node (10.42.1.50 / 2001:cafe:42::50), and pod-CIDR fallback blackholes
-# at 32765 (IPv4 and IPv6) so any brand-new replacement pod IP is blocked from
-# clearnet egress in the kernel even before its podIP appears in the watch stream.
+# attachment-bound (fwmark + iif + MAC) table-main outbound rules at 32500 for
+# known non-target pods on the same node (10.42.1.50 / 2001:cafe:42::50), and
+# pod-CIDR fallback blackholes at 32765 (IPv4 and IPv6).
 ensure_policy_routing
 [[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200'* ]]
 [[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200'* ]]
-[[ "${RULES}" == *$'32500:\tfrom 10.42.1.50 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
 [[ "${RULES}" != *$'32500:\tfrom 10.42.1.7 lookup main'* ]]
 [[ "${RULES}" != *$'32500:\tfrom 10.42.1.8 lookup main'* ]]
 [[ "${RULES}" == *$'32765:\tfrom 10.42.0.0/16 blackhole proto 200'* ]]
-[[ "${V6_RULES}" == *$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200'* ]]
+[[ "${V6_RULES}" == *$'32500:\tfrom 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0 lookup main proto 200'* ]]
 [[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::7 lookup main'* ]]
 [[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::8 lookup main'* ]]
 [[ "${V6_RULES}" == *$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200'* ]]
+[[ "${MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
+[[ "${V6_MANGLE_RULES}" == *"--mac-source 02:42:0a:2a:01:32"* ]]
 verify_k3s_target_routes
+
+# 1b. When a non-target pod (bitcoind-0 at 10.42.1.50 / 2001:cafe:42::50) terminates,
+# watch_k3s_target_pods_once observes the event and immediately revokes its 32500
+# policy rules and mangle mark rules without falsely marking an unseen target replacement.
+WATCHED_PATH=""
+k8s_watch_api() {
+    WATCHED_PATH="$1"
+    printf '%s\n' '{"type":"DELETED","object":{"metadata":{"name":"bitcoind-0","namespace":"lightning","resourceVersion":"776","labels":{"app":"bitcoind"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.50","podIPs":[{"ip":"10.42.1.50"},{"ip":"2001:cafe:42::50"}]}}}'
+    return 0
+}
+watch_k3s_target_pods_once "lightning" "app=lnd"
+[[ "${WATCHED_PATH}" != *"labelSelector="* ]]
+[[ "${RULES}" != *"from 10.42.1.50"* ]]
+[[ "${V6_RULES}" != *"from 2001:cafe:42::50"* ]]
+[[ -z "${MANGLE_RULES}" ]]
+[[ -z "${V6_MANGLE_RULES}" ]]
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" == "false" ]]
+
+# Re-establish policy routing before testing watch failure and cleanup modes.
+ensure_policy_routing
+[[ "${RULES}" == *"from 10.42.1.50 fwmark 0xca6d/0xffffffff iif cni0"* ]]
+[[ "${V6_RULES}" == *"from 2001:cafe:42::50 fwmark 0xca6d/0xffffffff iif cni0"* ]]
 
 # 2. When k8s_watch_api fails (non-zero exit) or emits an ERROR event,
 # watch_k3s_target_pods_once must NOT swallow the failure: it must reset
@@ -4831,9 +4950,23 @@ load_k3s_pod_watch_state
 [[ "${CONTAINMENT_CALLS}" -ge 1 ]]
 [[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
 
-# 3. cleanup_k3s_policy_rules "false" must remove tab-indented IPv6 pod-CIDR
-# blackhole rules at pref 32765 and non-target pod IPv6 bypass rules at 32500.
+# 3. cleanup_k3s_policy_rules "true" (shutdown/restart) must remove 32500 and
+# 32764 rules + non-target mangle rules while preserving ALL 32765 blackholes
+# (both per-pod and pod-CIDR fallback blackholes for IPv4 and IPv6).
+cleanup_k3s_policy_rules "true"
+[[ "${RULES}" != *"32500:"* ]]
+[[ "${RULES}" != *"32764:"* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.1.7 blackhole proto 200'* ]]
+[[ "${RULES}" == *$'32765:\tfrom 10.42.0.0/16 blackhole proto 200'* ]]
+[[ "${V6_RULES}" != *"32500:"* ]]
+[[ "${V6_RULES}" == *$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200'* ]]
+[[ -z "${MANGLE_RULES}" ]]
+[[ -z "${V6_MANGLE_RULES}" ]]
+
+# 4. cleanup_k3s_policy_rules "false" (decommission) removes all remaining
+# owned IPv4 and IPv6 blackhole rules at pref 32765.
 cleanup_k3s_policy_rules "false"
+[[ -z "${RULES}" ]]
 [[ -z "${V6_RULES}" ]]
 '''
     )
