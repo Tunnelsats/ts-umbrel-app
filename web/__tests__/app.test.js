@@ -1946,13 +1946,31 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('restoreNode handles manual_mode and renders manual restore modal', async () => {
-        global.fetch = csrfFetchMock((url) => {
+        const restoreBodies = [];
+        global.fetch = csrfFetchMock((url, options) => {
             if (url === '/api/local/restore-node') {
+                const body = options && options.body ? JSON.parse(options.body) : {};
+                restoreBodies.push(body);
+                if (body.confirmManualRestore) {
+                    return Promise.resolve({
+                        json: () => Promise.resolve({
+                            success: true,
+                            manual_mode: true,
+                            restore: true,
+                            requires_confirmation: false,
+                            decommissioned: true,
+                            targets: []
+                        }),
+                        ok: true
+                    });
+                }
                 return Promise.resolve({
                     json: () => Promise.resolve({
                         success: true,
                         manual_mode: true,
                         restore: true,
+                        requires_confirmation: true,
+                        decommissioned: false,
                         targets: [
                             {
                                 node_type: 'lnd',
@@ -1969,17 +1987,19 @@ describe('Phase 3b: Install Config', () => {
 
         await window.restoreNode();
 
+        expect(restoreBodies).toEqual([{}]);
         const modal = document.getElementById('manual-restore-modal');
         expect(modal).toBeTruthy();
         expect(modal.textContent).toContain('Manual Restore Required');
         expect(modal.textContent).toContain('/path/to/lnd.conf');
         expect(modal.textContent).toContain('remove1');
 
-        // Close modal
+        // Confirm manual restore and close modal
         const doneBtn = Array.from(modal.querySelectorAll('button')).find(btn => btn.textContent === 'Done');
         doneBtn.click();
         await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-restore-modal')).toBeNull();
+        expect(restoreBodies).toEqual([{}, { confirmManualRestore: true }]);
     });
 
     test('restoreNode handles manual_mode with empty targets gracefully', async () => {

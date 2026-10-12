@@ -10,6 +10,8 @@ RECONCILE_TRIGGER_DIR="/tmp/tunnelsats_reconcile_trigger.d"
 RECONCILE_RESULT_DIR="/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_TRIGGER_LEGACY="/tmp/tunnelsats_reconcile_trigger"
 RECONCILE_RESULT_LEGACY="/tmp/tunnelsats_reconcile_result.json"
+DECOMMISSION_TRIGGER_DIR="/tmp/tunnelsats_decommission_trigger.d"
+DECOMMISSION_RESULT_DIR="/tmp/tunnelsats_decommission_result.d"
 RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
 TUNNELSATS_META_PATH="${TUNNELSATS_META_PATH:-/data/tunnelsats-meta.json}"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
@@ -19,11 +21,14 @@ DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
 DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
 IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_FILE:-/data/tunnelsats-ipv6-policy-sources.json}"
+K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE_FILE:-/data/tunnelsats-k3s-policy-state.json}"
+DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_FILE:-/data/tunnelsats-decommissioned.json}"
 IPV6_POLICY_TABLE="${IPV6_POLICY_TABLE:-51821}"
 IPV6_TUNNEL_RULE_PREF="${IPV6_TUNNEL_RULE_PREF:-32764}"
 IPV6_BLACKHOLE_RULE_PREF="${IPV6_BLACKHOLE_RULE_PREF:-32765}"
 IPV6_BLACKHOLE_METRIC="${IPV6_BLACKHOLE_METRIC:-42760}"
 IPV6_RULE_MARKER="tunnelsats-ipv6-deny"
+K3S_IPV6_QUARANTINE_MARKER="tunnelsats-k3s-ipv6-quarantine"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
 KILL_SWITCH_PREF=32762
@@ -66,6 +71,9 @@ export TUNNELSATS_K8S_NODE_NAME="${TUNNELSATS_K8S_NODE_NAME:-}"
 # These are the default k3s pod/service CIDRs; custom clusters must override
 # this with their exact internal CIDRs.
 export K3S_BYPASS_CIDRS="${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}"
+export K3S_POD_CIDRS="${K3S_POD_CIDRS:-}"
+export K3S_IPV6_BYPASS_CIDRS="${K3S_IPV6_BYPASS_CIDRS:-}"
+export K3S_IPV6_POD_CIDRS="${K3S_IPV6_POD_CIDRS:-}"
 # Persist a compound, boot-scoped policy-rule owner tag. Linux exposes only an
 # 8-bit protocol field, so ownership also includes a randomly allocated block
 # of four rule preferences. A component that later reuses our protocol cannot
@@ -206,6 +214,8 @@ K8S_SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 K8S_API_URL="https://kubernetes.default.svc"
 K3S_ISOLATION_RETRY_INTERVAL="${K3S_ISOLATION_RETRY_INTERVAL:-2}"
+K3S_SHUTDOWN_NETPOL_ATTEMPTS="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
+K3S_SHUTDOWN_RETRY_INTERVAL="${K3S_SHUTDOWN_RETRY_INTERVAL:-1}"
 
 API_PID=""
 LAST_RECONCILE_EPOCH=0
@@ -228,13 +238,23 @@ BRIDGE_NAME=""
 K3S_TARGET_POD_NAME=""
 K3S_TARGET_POD_NAMESPACE=""
 K3S_TARGET_POD_SELECTOR=""
+K3S_POLICY_STATE_LOADED="false"
+MANAGED_K3S_TARGET_IP=""
+MANAGED_K3S_TARGET_IPV6_ADDRESSES=()
+MANAGED_K3S_TARGET_IMPL=""
+MANAGED_K3S_POD_NAME=""
+MANAGED_K3S_POD_NAMESPACE=""
+MANAGED_K3S_POD_SELECTOR=""
 RULES_SYNCED="false"
 IPV4_RULES_SYNCED="false"
 IPV6_RULES_SYNCED="false"
+DECOMMISSIONED="${DECOMMISSIONED:-false}"
+DECOMMISSION_STATE_LOADED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
 K3S_BYPASS_CIDRS_NORMALIZED=""
+K3S_IPV6_QUARANTINE_CIDR=""
 
 log() {
     local level="$1"
@@ -256,9 +276,18 @@ ensure_reconcile_dirs() {
     mkdir -p "${RECONCILE_TRIGGER_DIR}" "${RECONCILE_RESULT_DIR}"
 }
 
+ensure_decommission_dirs() {
+    mkdir -p "${DECOMMISSION_TRIGGER_DIR}" "${DECOMMISSION_RESULT_DIR}"
+}
+
 reconcile_result_path() {
     local request_id="$1"
     printf '%s/%s.json' "${RECONCILE_RESULT_DIR}" "${request_id}"
+}
+
+decommission_result_path() {
+    local request_id="$1"
+    printf '%s/%s.json' "${DECOMMISSION_RESULT_DIR}" "${request_id}"
 }
 
 write_state() {
@@ -272,6 +301,13 @@ write_state() {
         dataplane_mode="secure-mode"
     else
         dataplane_mode="docker-full-parity"
+    fi
+
+    local decommissioned_json
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        decommissioned_json="true"
+    else
+        decommissioned_json="false"
     fi
 
     local target_ipv6_addresses_json
@@ -290,6 +326,7 @@ write_state() {
         --argjson rules_synced "${RULES_SYNCED}" \
         --argjson ipv4_rules_synced "${IPV4_RULES_SYNCED}" \
         --argjson ipv6_rules_synced "${IPV6_RULES_SYNCED}" \
+        --argjson decommissioned "${decommissioned_json}" \
         --arg ipv6_policy "deny" \
         --argjson target_ipv6_addresses "${target_ipv6_addresses_json}" \
         --argjson target_ipv6_default_route "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" \
@@ -308,6 +345,7 @@ write_state() {
             rules_synced: $rules_synced,
             ipv4_rules_synced: $ipv4_rules_synced,
             ipv6_rules_synced: $ipv6_rules_synced,
+            decommissioned: $decommissioned,
             ipv6_policy: $ipv6_policy,
             target_ipv6_addresses: $target_ipv6_addresses,
             target_ipv6_default_route: $target_ipv6_default_route,
@@ -611,6 +649,251 @@ persist_managed_ipv6_policy_state() {
        ! mv -f "${state_tmp}" "${IPV6_POLICY_STATE_FILE}"; then
         rm -f "${state_tmp}"
         LAST_ERROR="Failed to persist IPv6 policy ownership state"
+        return 1
+    fi
+}
+
+load_decommissioned_state() {
+    [ "${DECOMMISSION_STATE_LOADED}" = "false" ] || return 0
+
+    local state decommissioned
+    if [ ! -e "${DECOMMISSION_STATE_FILE}" ]; then
+        DECOMMISSION_STATE_LOADED="true"
+        return 0
+    fi
+    state=$(cat "${DECOMMISSION_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read decommission state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.decommissioned | type == "boolean")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="Decommission state is malformed"
+        return 1
+    fi
+    decommissioned=$(printf '%s' "${state}" | jq -r '.decommissioned')
+    DECOMMISSIONED="${decommissioned}"
+    DECOMMISSION_STATE_LOADED="true"
+}
+
+persist_decommissioned_state() {
+    local state_dir state_tmp decommissioned_json
+    state_dir="${DECOMMISSION_STATE_FILE%/*}"
+    [ "${state_dir}" != "${DECOMMISSION_STATE_FILE}" ] || state_dir="."
+    mkdir -p "${state_dir}" || {
+        LAST_ERROR="Failed to create decommission state directory"
+        return 1
+    }
+    state_tmp=$(mktemp "${DECOMMISSION_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary decommission state"
+        return 1
+    }
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        decommissioned_json="true"
+    else
+        decommissioned_json="false"
+    fi
+    if ! jq -n \
+        --argjson decommissioned "${decommissioned_json}" \
+        '{version: 1, decommissioned: $decommissioned}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${DECOMMISSION_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist decommission state"
+        return 1
+    fi
+    DECOMMISSION_STATE_LOADED="true"
+}
+
+load_managed_k3s_policy_state() {
+    load_decommissioned_state || return 1
+    if [ "${K3S_POLICY_STATE_LOADED}" != "false" ]; then
+        if [ -z "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ]; then
+            K3S_TARGET_POD_NAMESPACE="${MANAGED_K3S_POD_NAMESPACE}"
+        fi
+        if [ -z "${K3S_TARGET_POD_SELECTOR:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ]; then
+            K3S_TARGET_POD_SELECTOR="${MANAGED_K3S_POD_SELECTOR}"
+        fi
+        if [ -n "${MANAGED_K3S_TARGET_IP:-}" ] && [ "${MANAGED_K3S_TARGET_IP}" != "10.9.9.9" ] && \
+           { [ -z "${DOCKER_TARGET_IP:-}" ] || [ "${DOCKER_TARGET_IP}" = "10.9.9.9" ]; }; then
+            DOCKER_TARGET_IP="${MANAGED_K3S_TARGET_IP}"
+            TARGET_IMPL="${TARGET_IMPL:-${MANAGED_K3S_TARGET_IMPL:-}}"
+            K3S_TARGET_POD_NAME="${K3S_TARGET_POD_NAME:-${MANAGED_K3S_POD_NAME:-}}"
+            K3S_TARGET_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            K3S_TARGET_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
+        fi
+        if [ "${#MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] && [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ]; then
+            TARGET_IPV6_ADDRESSES=("${MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}")
+            TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        fi
+        return 0
+    fi
+
+    local current_boot state saved_boot target_ip target_impl pod_name pod_namespace pod_selector decommissioned parsed_ipv6 ipv6_addr
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for k3s policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to load k3s policy ownership"
+        return 1
+    }
+    if [ ! -e "${K3S_POLICY_STATE_FILE}" ]; then
+        K3S_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+
+    state=$(cat "${K3S_POLICY_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read k3s policy ownership state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.boot_id | type == "string") and
+        (.target_ip | type == "string") and
+        ((.target_ipv6_addresses // []) | type == "array" and all(.[]; type == "string")) and
+        (.target_impl | type == "string") and
+        (.pod_name | type == "string") and
+        (.pod_namespace | type == "string") and
+        (.pod_selector | type == "string") and
+        (.decommissioned | type == "boolean")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="k3s policy ownership state is malformed"
+        return 1
+    fi
+    saved_boot=$(printf '%s' "${state}" | jq -r '.boot_id')
+    target_impl=$(printf '%s' "${state}" | jq -r '.target_impl')
+    pod_name=$(printf '%s' "${state}" | jq -r '.pod_name')
+    pod_namespace=$(printf '%s' "${state}" | jq -r '.pod_namespace')
+    pod_selector=$(printf '%s' "${state}" | jq -r '.pod_selector')
+    decommissioned=$(printf '%s' "${state}" | jq -r '.decommissioned')
+    if [ ! -e "${DECOMMISSION_STATE_FILE}" ]; then
+        DECOMMISSIONED="${decommissioned}"
+    fi
+    if [ "${saved_boot}" != "${current_boot}" ]; then
+        MANAGED_K3S_TARGET_IP=""
+        MANAGED_K3S_TARGET_IPV6_ADDRESSES=()
+        MANAGED_K3S_TARGET_IMPL="${target_impl}"
+        MANAGED_K3S_POD_NAME=""
+        MANAGED_K3S_POD_NAMESPACE="${pod_namespace}"
+        MANAGED_K3S_POD_SELECTOR="${pod_selector}"
+        if [ -z "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${pod_namespace}" ]; then
+            K3S_TARGET_POD_NAMESPACE="${pod_namespace}"
+        fi
+        if [ -z "${K3S_TARGET_POD_SELECTOR:-}" ] && [ -n "${pod_selector}" ]; then
+            K3S_TARGET_POD_SELECTOR="${pod_selector}"
+        fi
+        K3S_POLICY_STATE_LOADED="true"
+        return 0
+    fi
+
+    target_ip=$(printf '%s' "${state}" | jq -r '.target_ip')
+    if [ -n "${target_ip}" ]; then
+        if ! target_ip=$(python3 -c 'import ipaddress, sys; print(ipaddress.IPv4Address(sys.argv[1]))' "${target_ip}" 2>/dev/null); then
+            LAST_ERROR="k3s policy ownership target IP is malformed"
+            return 1
+        fi
+    fi
+    if ! parsed_ipv6=$(printf '%s' "${state}" | jq -r '(.target_ipv6_addresses // [])[]' | python3 -c '
+import ipaddress
+import sys
+
+for raw in sys.stdin:
+    address = ipaddress.IPv6Address(raw.strip())
+    if address.is_unspecified or address.is_loopback or address.is_link_local or address.is_multicast:
+        raise SystemExit("non-routable address in k3s state")
+    print(address)
+' 2>/dev/null); then
+        LAST_ERROR="k3s policy ownership IPv6 addresses are malformed"
+        return 1
+    fi
+    MANAGED_K3S_TARGET_IPV6_ADDRESSES=()
+    while IFS= read -r ipv6_addr; do
+        [ -n "${ipv6_addr}" ] || continue
+        MANAGED_K3S_TARGET_IPV6_ADDRESSES+=("${ipv6_addr}")
+    done <<< "${parsed_ipv6}"
+
+    MANAGED_K3S_TARGET_IP="${target_ip}"
+    MANAGED_K3S_TARGET_IMPL="${target_impl}"
+    MANAGED_K3S_POD_NAME="${pod_name}"
+    MANAGED_K3S_POD_NAMESPACE="${pod_namespace}"
+    MANAGED_K3S_POD_SELECTOR="${pod_selector}"
+    if [ -z "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_NAMESPACE}" ]; then
+        K3S_TARGET_POD_NAMESPACE="${MANAGED_K3S_POD_NAMESPACE}"
+    fi
+    if [ -z "${K3S_TARGET_POD_SELECTOR:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR}" ]; then
+        K3S_TARGET_POD_SELECTOR="${MANAGED_K3S_POD_SELECTOR}"
+    fi
+    if [ -n "${MANAGED_K3S_TARGET_IP}" ] && { [ -z "${DOCKER_TARGET_IP:-}" ] || [ "${DOCKER_TARGET_IP}" = "10.9.9.9" ]; }; then
+        DOCKER_TARGET_IP="${MANAGED_K3S_TARGET_IP}"
+        TARGET_IMPL="${MANAGED_K3S_TARGET_IMPL}"
+        K3S_TARGET_POD_NAME="${MANAGED_K3S_POD_NAME}"
+        K3S_TARGET_POD_NAMESPACE="${MANAGED_K3S_POD_NAMESPACE}"
+        K3S_TARGET_POD_SELECTOR="${MANAGED_K3S_POD_SELECTOR}"
+    fi
+    if [ "${#MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] && [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ]; then
+        TARGET_IPV6_ADDRESSES=("${MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}")
+        TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+    fi
+    K3S_POLICY_STATE_LOADED="true"
+}
+
+persist_managed_k3s_policy_state() {
+    local current_boot state_dir state_tmp decommissioned_json ipv6_addresses_json
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || {
+        LAST_ERROR="Unable to identify the current boot for k3s policy ownership"
+        return 1
+    }
+    [ -n "${current_boot}" ] || {
+        LAST_ERROR="Current boot ID is empty; refusing to persist k3s policy ownership"
+        return 1
+    }
+    state_dir="${K3S_POLICY_STATE_FILE%/*}"
+    [ "${state_dir}" != "${K3S_POLICY_STATE_FILE}" ] || state_dir="."
+    mkdir -p "${state_dir}" || {
+        LAST_ERROR="Failed to create k3s policy ownership directory"
+        return 1
+    }
+    state_tmp=$(mktemp "${K3S_POLICY_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary k3s policy ownership state"
+        return 1
+    }
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        decommissioned_json="true"
+    else
+        decommissioned_json="false"
+    fi
+    ipv6_addresses_json=$(printf '%s\n' "${MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" \
+        | jq -Rsc 'split("\n") | map(select(length > 0))') || {
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to encode k3s policy ownership IPv6 addresses"
+        return 1
+    }
+    if ! jq -n \
+        --arg boot_id "${current_boot}" \
+        --arg target_ip "${MANAGED_K3S_TARGET_IP:-}" \
+        --argjson target_ipv6_addresses "${ipv6_addresses_json}" \
+        --arg target_impl "${MANAGED_K3S_TARGET_IMPL:-}" \
+        --arg pod_name "${MANAGED_K3S_POD_NAME:-}" \
+        --arg pod_namespace "${MANAGED_K3S_POD_NAMESPACE:-}" \
+        --arg pod_selector "${MANAGED_K3S_POD_SELECTOR:-}" \
+        --argjson decommissioned "${decommissioned_json}" \
+        '{
+            version: 1,
+            boot_id: $boot_id,
+            target_ip: $target_ip,
+            target_ipv6_addresses: $target_ipv6_addresses,
+            target_impl: $target_impl,
+            pod_name: $pod_name,
+            pod_namespace: $pod_namespace,
+            pod_selector: $pod_selector,
+            decommissioned: $decommissioned
+        }' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${K3S_POLICY_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist k3s policy ownership state"
         return 1
     fi
 }
@@ -1051,6 +1334,129 @@ print(json.dumps(selector, separators=(",", ":")))
 '
 }
 
+k3s_has_conflicting_egress_network_policy() {
+    local policy_collection_path="$1"
+    local owned_policy_name="$2"
+    local target_selector_json="$3"
+    local policy_list
+
+    if ! policy_list="$(k8s_api "${policy_collection_path}" 2>/dev/null)"; then
+        return 0
+    fi
+    POLICY_LIST_JSON="${policy_list}" \
+    OWNED_POLICY_NAME="${owned_policy_name}" \
+    TARGET_SELECTOR_JSON="${target_selector_json}" \
+    python3 -c '
+import json
+import os
+import sys
+
+try:
+    raw_list = json.loads(os.environ["POLICY_LIST_JSON"])
+    owned_name = os.environ["OWNED_POLICY_NAME"]
+    target_selector = json.loads(os.environ["TARGET_SELECTOR_JSON"])
+except Exception:
+    sys.exit(0)
+
+if isinstance(raw_list, dict) and isinstance(raw_list.get("items"), list):
+    items = raw_list["items"]
+elif isinstance(raw_list, dict):
+    items = [raw_list]
+else:
+    sys.exit(0)
+
+def selector_constraints(selector):
+    if not isinstance(selector, dict):
+        return None
+    constraints = {}
+    def get_key(k):
+        return constraints.setdefault(
+            k,
+            {"allowed": None, "forbidden": set(), "must_exist": False, "must_not_exist": False},
+        )
+    match_labels = selector.get("matchLabels") or {}
+    if not isinstance(match_labels, dict):
+        return None
+    for k, v in match_labels.items():
+        c = get_key(str(k))
+        c["must_exist"] = True
+        s = {str(v)}
+        c["allowed"] = s if c["allowed"] is None else (c["allowed"] & s)
+    match_exprs = selector.get("matchExpressions") or []
+    if not isinstance(match_exprs, list):
+        return None
+    for expr in match_exprs:
+        if not isinstance(expr, dict):
+            return None
+        k = str(expr.get("key", ""))
+        op = expr.get("operator", "")
+        vals = {str(v) for v in (expr.get("values") or [])}
+        c = get_key(k)
+        if op == "In":
+            c["must_exist"] = True
+            c["allowed"] = vals if c["allowed"] is None else (c["allowed"] & vals)
+        elif op == "NotIn":
+            c["forbidden"] |= vals
+        elif op == "Exists":
+            c["must_exist"] = True
+        elif op == "DoesNotExist":
+            c["must_not_exist"] = True
+        else:
+            return None
+    return constraints
+
+def selectors_can_overlap(sel_a, sel_b):
+    ca = selector_constraints(sel_a)
+    cb = selector_constraints(sel_b)
+    if ca is None or cb is None:
+        return True
+    for k in set(ca.keys()) | set(cb.keys()):
+        ka = ca.get(k, {"allowed": None, "forbidden": set(), "must_exist": False, "must_not_exist": False})
+        kb = cb.get(k, {"allowed": None, "forbidden": set(), "must_exist": False, "must_not_exist": False})
+        must_exist = ka["must_exist"] or kb["must_exist"]
+        must_not_exist = ka["must_not_exist"] or kb["must_not_exist"]
+        if must_exist and must_not_exist:
+            return False
+        if must_not_exist:
+            continue
+        allowed = None
+        for cand in (ka["allowed"], kb["allowed"]):
+            if cand is not None:
+                allowed = set(cand) if allowed is None else (allowed & cand)
+        forbidden = ka["forbidden"] | kb["forbidden"]
+        if allowed is not None and not (allowed - forbidden):
+            return False
+    return True
+
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    meta = item.get("metadata") or {}
+    if meta.get("name") == owned_name:
+        continue
+    spec = item.get("spec")
+    if not isinstance(spec, dict):
+        continue
+    policy_types = spec.get("policyTypes")
+    if isinstance(policy_types, list) and policy_types:
+        applies_to_egress = "Egress" in policy_types
+    else:
+        applies_to_egress = "egress" in spec
+    if not applies_to_egress:
+        continue
+    egress_rules = spec.get("egress")
+    if egress_rules is None or egress_rules == []:
+        continue
+    pod_selector = spec.get("podSelector")
+    if pod_selector is None:
+        continue
+    if selectors_can_overlap(target_selector, pod_selector):
+        sys.exit(0)
+
+sys.exit(1)
+'
+}
+
 ensure_k3s_emergency_network_policy() {
     local policy_name="tunnelsats-emergency-egress-deny"
     local policy_path
@@ -1101,6 +1507,11 @@ ensure_k3s_emergency_network_policy() {
         log ERROR "k3s: Emergency NetworkPolicy could not be verified"
         return 1
     fi
+    if k3s_has_conflicting_egress_network_policy "${policy_path}" "${policy_name}" "${policy_selector}"; then
+        LAST_ERROR="k3s: Conflicting egress NetworkPolicy in namespace ${K3S_TARGET_POD_NAMESPACE} can override emergency deny policy"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
     log ERROR "k3s: Emergency deny-egress NetworkPolicy protects current and replacement target pods"
     return 0
 }
@@ -1145,7 +1556,35 @@ remove_k3s_emergency_network_policy() {
     delete_payload="$(jq -cn --arg uid "${policy_uid}" '{preconditions:{uid:$uid}}')"
     status="$(k8s_api_write_status DELETE "${policy_path}" "${delete_payload}")"
     case "${status}" in
-        200|202|404) return 0 ;;
+        404) return 0 ;;
+        200|202)
+            local wait_attempts="${K3S_NETPOL_DELETE_WAIT_ATTEMPTS:-10}"
+            local wait_interval="${K3S_NETPOL_DELETE_WAIT_INTERVAL:-1}"
+            local attempt=0
+            local current_policy get_status
+            while [ "${attempt}" -lt "${wait_attempts}" ]; do
+                if ! current_policy="$(k8s_api "${policy_path}" 2>/dev/null)"; then
+                    get_status="$(k8s_api_write_status GET "${policy_path}")"
+                    if [ "${get_status}" = "404" ]; then
+                        return 0
+                    fi
+                elif ! printf '%s' "${current_policy}" | jq -e --arg uid "${policy_uid}" --argjson selector "${policy_selector}" '
+                    .metadata.uid == $uid
+                    and .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+                    and .spec.podSelector == $selector
+                    and .spec.policyTypes == ["Egress"]
+                    and .spec.egress == []
+                ' >/dev/null 2>&1; then
+                    return 0
+                fi
+                attempt=$((attempt + 1))
+                if [ "${attempt}" -lt "${wait_attempts}" ] && [ "${wait_interval}" -gt 0 ] 2>/dev/null; then
+                    sleep "${wait_interval}"
+                fi
+            done
+            LAST_ERROR="k3s: Emergency deny-egress NetworkPolicy is still present after deletion"
+            return 1
+            ;;
         409)
             LAST_ERROR="k3s: Emergency NetworkPolicy changed during deletion; retrying cleanup"
             return 1
@@ -1155,6 +1594,25 @@ remove_k3s_emergency_network_policy() {
             return 1
             ;;
     esac
+}
+
+remove_k3s_emergency_network_policy_for_target() {
+    local target_namespace="$1"
+    local target_selector="$2"
+    local saved_namespace="${K3S_TARGET_POD_NAMESPACE:-}"
+    local saved_selector="${K3S_TARGET_POD_SELECTOR:-}"
+    local saved_labels="${K3S_TARGET_POD_LABELS:-}"
+    local rc=0
+
+    [ -n "${target_namespace}" ] && [ -n "${target_selector}" ] || return 0
+    K3S_TARGET_POD_NAMESPACE="${target_namespace}"
+    K3S_TARGET_POD_SELECTOR="${target_selector}"
+    K3S_TARGET_POD_LABELS=""
+    remove_k3s_emergency_network_policy || rc=$?
+    K3S_TARGET_POD_NAMESPACE="${saved_namespace}"
+    K3S_TARGET_POD_SELECTOR="${saved_selector}"
+    K3S_TARGET_POD_LABELS="${saved_labels}"
+    return "${rc}"
 }
 
 # Percent-encode a string for safe use inside a URL query parameter. Used for
@@ -1272,6 +1730,70 @@ resolve_svc_ip() {
     return 1
 }
 
+k3s_owned_emergency_network_policy_is_present() {
+    local target_namespace="$1"
+    local target_selector="$2"
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_path
+    local policy_selector
+    local existing
+
+    [ -n "${target_namespace}" ] && [ -n "${target_selector}" ] || return 1
+    policy_selector="$(
+        K3S_TARGET_POD_SELECTOR="${target_selector}" k3s_network_policy_selector 2>/dev/null
+    )" || return 1
+    policy_path="/apis/networking.k8s.io/v1/namespaces/${target_namespace}/networkpolicies/${policy_name}"
+    existing="$(k8s_api "${policy_path}" 2>/dev/null)" || return 1
+    printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
+        .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+        and .spec.podSelector == $selector
+        and .spec.policyTypes == ["Egress"]
+        and .spec.egress == []
+    ' >/dev/null 2>&1
+}
+
+k3s_emergency_network_policy_is_active() {
+    local target_namespace="$1"
+    local target_selector="$2"
+    local policy_name="tunnelsats-emergency-egress-deny"
+    local policy_collection_path
+    local policy_path
+    local policy_selector
+    local existing
+
+    [ -n "${target_namespace}" ] && [ -n "${target_selector}" ] || return 1
+    policy_selector="$(
+        K3S_TARGET_POD_SELECTOR="${target_selector}" k3s_network_policy_selector 2>/dev/null
+    )" || return 1
+    policy_collection_path="/apis/networking.k8s.io/v1/namespaces/${target_namespace}/networkpolicies"
+    policy_path="${policy_collection_path}/${policy_name}"
+    existing="$(k8s_api "${policy_path}" 2>/dev/null)" || return 1
+    printf '%s' "${existing}" | jq -e --argjson selector "${policy_selector}" '
+        .metadata.annotations["tunnelsats.io/emergency-egress-deny"] == "true"
+        and .spec.podSelector == $selector
+        and .spec.policyTypes == ["Egress"]
+        and .spec.egress == []
+    ' >/dev/null 2>&1 || return 1
+    if k3s_has_conflicting_egress_network_policy "${policy_collection_path}" "${policy_name}" "${policy_selector}"; then
+        return 1
+    fi
+    return 0
+}
+
+k3s_pod_is_under_fail_closed_guard() {
+    local target_namespace="$1"
+    local target_selector="$2"
+
+    if [ -n "${MANAGED_K3S_TARGET_IP:-}" ] || [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] || \
+       [ -n "${K3S_QUARANTINE_CIDR:-}" ] || [ -n "${K3S_IPV6_QUARANTINE_CIDR:-}" ]; then
+        return 0
+    fi
+    if k3s_emergency_network_policy_is_active "${target_namespace}" "${target_selector}"; then
+        return 0
+    fi
+    return 1
+}
+
 resolve_k3s_target_pod() {
     local impl="$1"
     local namespace="$2"
@@ -1313,6 +1835,24 @@ resolve_k3s_target_pod() {
           )]
          | first
          // empty' 2>/dev/null || true)
+
+    # When fail-closed guards (such as the emergency deny-egress NetworkPolicy
+    # or persisted pod/subnet blackhole) are active across a restart or upgrade,
+    # the co-located Running pod's readiness probe may fail until TunnelSats
+    # restores routing and releases the emergency policy. Allow selecting a
+    # guarded, non-terminating local Running pod so reconciliation can recover.
+    if [ -z "${pod}" ] && k3s_pod_is_under_fail_closed_guard "${namespace}" "${selector}"; then
+        pod=$(printf '%s' "${running_pods}" | jq -ce --arg node "${TUNNELSATS_K8S_NODE_NAME}" \
+            '[.[]
+              | select(
+                  .spec.nodeName == $node
+                  and (.metadata.deletionTimestamp // null) == null
+                  and (.metadata.name // "") != ""
+                  and (.status.podIP // "") != ""
+              )]
+             | first
+             // empty' 2>/dev/null || true)
+    fi
 
     # Preserve the detailed incomplete-metadata error when the only otherwise
     # usable local candidate lacks a name or pod IP.
@@ -1403,10 +1943,28 @@ for raw in sys.stdin:
         return 1
     fi
 
+    load_managed_k3s_policy_state || true
+    if [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ] && \
+       { [ "${MANAGED_K3S_POD_NAMESPACE}" != "${namespace}" ] || \
+         [ "${MANAGED_K3S_POD_SELECTOR}" != "${selector}" ]; }; then
+        if ! remove_k3s_emergency_network_policy_for_target "${MANAGED_K3S_POD_NAMESPACE}" "${MANAGED_K3S_POD_SELECTOR}"; then
+            log ERROR "${LAST_ERROR}"
+            return 1
+        fi
+    fi
+
     DOCKER_TARGET_IP="${pod_ip}"
     K3S_TARGET_POD_NAMESPACE="${namespace}"
     K3S_TARGET_POD_NAME="${pod_name}"
     K3S_TARGET_POD_SELECTOR="${selector}"
+    MANAGED_K3S_TARGET_IP="${pod_ip}"
+    MANAGED_K3S_TARGET_IPV6_ADDRESSES=("${TARGET_IPV6_ADDRESSES[@]}")
+    MANAGED_K3S_TARGET_IMPL="${impl}"
+    MANAGED_K3S_POD_NAME="${pod_name}"
+    MANAGED_K3S_POD_NAMESPACE="${namespace}"
+    MANAGED_K3S_POD_SELECTOR="${selector}"
+    K3S_POLICY_STATE_LOADED="true"
+    persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
     log INFO "k3s: Using co-located ${impl^^} pod ${namespace}/${pod_name} on node ${pod_node} at ${pod_ip}"
     return 0
 }
@@ -1596,6 +2154,7 @@ detect_lightning_container() {
     local rest="${pick#*|}"
     TARGET_CONTAINER_NAME="${rest%%|*}"
     TARGET_IMPL="${rest##*|}"
+    DOCKER_TARGET_IP="${DOCKER_TARGET_IP:-10.9.9.9}"
 
     if [ "${TARGET_IMPL}" = "cln" ]; then
         LN_TARGET_PORT="9736"
@@ -1906,57 +2465,543 @@ remove_k3s_egress_guards() {
     return 0
 }
 
-ensure_k3s_subnet_quarantine() {
-    local source_ip="$1"
-    local pod_cidr
-    local escaped_cidr
-    local exact_pattern
-    local quarantine_rule
+k3s_node_has_ipv6_pod_route() {
+    local route_lines
+    route_lines="$(ip -6 route show 2>/dev/null || true)"
+    [ -n "${route_lines}" ] || return 1
+    ROUTE_LINES="${route_lines}" python3 -c '
+import ipaddress
+import os
 
-    if ! normalize_k3s_bypass_cidrs; then
+default_pod_nets = (
+    ipaddress.ip_network("2001:cafe:42::/56"),
+    ipaddress.ip_network("fd00:10:42::/56"),
+)
+cni_prefixes = ("cni", "flannel", "cilium", "cali", "kube", "ovn", "weave", "antrea", "pod-r")
+
+for line in os.environ.get("ROUTE_LINES", "").splitlines():
+    parts = line.split()
+    if not parts:
+        continue
+    if parts[0] in {
+        "local",
+        "broadcast",
+        "multicast",
+        "throw",
+        "unreachable",
+        "prohibit",
+        "blackhole",
+        "nat",
+        "anycast",
+    }:
+        continue
+    idx = 1 if parts[0] == "unicast" else 0
+    if idx >= len(parts):
+        continue
+    prefix_token = parts[idx]
+    if prefix_token == "default" or "/" not in prefix_token:
+        continue
+    try:
+        net = ipaddress.ip_network(prefix_token, strict=False)
+    except ValueError:
+        continue
+    if net.version != 6 or net.prefixlen <= 0 or net.prefixlen >= 128:
+        continue
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        continue
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or any(net.subnet_of(pod_net) for pod_net in default_pod_nets):
+        raise SystemExit(0)
+raise SystemExit(1)
+' >/dev/null 2>&1
+}
+
+k3s_ipv6_is_active() {
+    if [ "${K3S_MODE}" != "true" ]; then
         return 1
     fi
-    pod_cidr="$(
-        SOURCE_IP="${source_ip}" \
-        BYPASS_CIDRS="${K3S_BYPASS_CIDRS_NORMALIZED}" \
+    if ! load_managed_ipv6_policy_state; then
+        return 0
+    fi
+    if [ "${#TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] || \
+       [ "${#MANAGED_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] || \
+       [ "${#MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" -gt 0 ] || \
+       [ "${IPV6_POLICY_TABLE_MANAGED}" = "true" ] || \
+       [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" = "true" ] || \
+       [ -n "${K3S_IPV6_POD_CIDRS:-}" ] || \
+       [ -n "${K3S_IPV6_BYPASS_CIDRS:-}" ] || \
+       [ -n "${K3S_IPV6_QUARANTINE_CIDR:-}" ] || \
+       k3s_node_has_ipv6_pod_route; then
+        return 0
+    fi
+    return 1
+}
+
+delete_ipv6_policy_rule_line() {
+    local rule_line="$1"
+    local priority="${rule_line%%:*}"
+    local rule_spec="${rule_line#*:}"
+    local -a rule_parts
+
+    read -r -a rule_parts <<< "${rule_spec}"
+    [ "${#rule_parts[@]}" -gt 0 ] || return 0
+    ip -6 rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
+}
+
+ensure_k3s_ipv6_subnet_quarantine() {
+    if ! k3s_ipv6_is_active; then
+        K3S_IPV6_QUARANTINE_CIDR=""
+        return 0
+    fi
+    if ! load_managed_ipv6_policy_state; then
+        return 1
+    fi
+
+    local raw_cidrs="${K3S_IPV6_POD_CIDRS:-${K3S_IPV6_BYPASS_CIDRS:-}}"
+    local route_lines=""
+    route_lines="$(ip -6 route show 2>/dev/null || true)"
+
+    local target_ipv6_csv
+    target_ipv6_csv="$(printf '%s\n' \
+        "${TARGET_IPV6_ADDRESSES[@]}" \
+        "${MANAGED_TARGET_IPV6_ADDRESSES[@]}" \
+        "${MANAGED_K3S_TARGET_IPV6_ADDRESSES[@]}" \
+        | awk 'NF && !seen[$0]++' | paste -sd, -)"
+
+    local matched_cidrs
+    if ! matched_cidrs="$(
+        TARGET_IPV6_CSV="${target_ipv6_csv}" \
+        RAW_IPV6_CIDRS="${raw_cidrs}" \
+        ROUTE_LINES="${route_lines}" \
         python3 -c '
 import ipaddress
 import os
 
-source = ipaddress.ip_address(os.environ["SOURCE_IP"])
-matches = [
+raw_cidrs = [item.strip() for item in os.environ.get("RAW_IPV6_CIDRS", "").split(",") if item.strip()]
+raw_targets = [item.strip() for item in os.environ.get("TARGET_IPV6_CSV", "").split(",") if item.strip()]
+route_lines = os.environ.get("ROUTE_LINES", "").splitlines()
+default_pod_nets = [
+    ipaddress.ip_network("2001:cafe:42::/56"),
+    ipaddress.ip_network("fd00:10:42::/56"),
+]
+cni_prefixes = ("cni", "flannel", "cilium", "cali", "kube", "ovn", "weave", "antrea", "pod-r")
+
+configured_networks = []
+for value in raw_cidrs:
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SystemExit(f"invalid IPv6 CIDR {value!r}: {exc}")
+    if net.version != 6:
+        raise SystemExit(f"{value!r} is not an IPv6 CIDR")
+    if net.prefixlen <= 0 or net.prefixlen >= 128:
+        raise SystemExit(f"IPv6 pod CIDR {value!r} must be a subnet prefix between /1 and /127")
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        raise SystemExit(f"IPv6 pod CIDR {value!r} is not a routable pod subnet")
+    if net not in configured_networks:
+        configured_networks.append(net)
+
+route_networks = []
+cni_route_networks = []
+for line in route_lines:
+    parts = line.split()
+    if not parts:
+        continue
+    if parts[0] in {
+        "local",
+        "broadcast",
+        "multicast",
+        "throw",
+        "unreachable",
+        "prohibit",
+        "blackhole",
+        "nat",
+        "anycast",
+    }:
+        continue
+    idx = 1 if parts[0] == "unicast" else 0
+    if idx >= len(parts):
+        continue
+    prefix_token = parts[idx]
+    if prefix_token == "default" or "/" not in prefix_token:
+        continue
+    try:
+        net = ipaddress.ip_network(prefix_token, strict=False)
+    except ValueError:
+        continue
+    if net.version != 6 or net.prefixlen <= 0 or net.prefixlen >= 128:
+        continue
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        continue
+    if net not in route_networks:
+        route_networks.append(net)
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or any(net.subnet_of(pod_net) for pod_net in default_pod_nets):
+        if net not in cni_route_networks:
+            cni_route_networks.append(net)
+
+targets = []
+for value in raw_targets:
+    try:
+        addr = ipaddress.IPv6Address(value)
+    except ValueError as exc:
+        raise SystemExit(f"invalid target IPv6 address {value!r}: {exc}")
+    if addr not in targets:
+        targets.append(addr)
+
+selected = []
+if targets:
+    for addr in targets:
+        matches = [net for net in configured_networks if addr in net]
+        if not matches:
+            matches = [net for net in route_networks if addr in net]
+        if not matches and not configured_networks:
+            matches = [net for net in default_pod_nets if addr in net]
+        if not matches:
+            raise SystemExit(f"no IPv6 pod CIDR covers {addr}")
+        best = max(matches, key=lambda item: item.prefixlen)
+        if best not in selected:
+            selected.append(best)
+else:
+    if cni_route_networks:
+        for route_net in cni_route_networks:
+            matches = [net for net in configured_networks if route_net.subnet_of(net)]
+            best = max(matches, key=lambda item: item.prefixlen) if matches else route_net
+            if best not in selected:
+                selected.append(best)
+    elif configured_networks:
+        selected = list(configured_networks)
+    else:
+        raise SystemExit("missing IPv6 pod CIDR")
+
+for net in selected:
+    print(net)
+' 2>/dev/null
+    )"; then
+        LAST_ERROR="k3s: Cannot determine IPv6 pod CIDR for emergency quarantine"
+        return 1
+    fi
+
+    if [ -z "${matched_cidrs}" ]; then
+        LAST_ERROR="k3s: Cannot determine IPv6 pod CIDR for emergency quarantine"
+        return 1
+    fi
+
+    if ! command -v ip6tables >/dev/null 2>&1; then
+        LAST_ERROR="k3s: ip6tables is unavailable for emergency IPv6 pod-CIDR quarantine"
+        return 1
+    fi
+
+    local ipv6_cidr
+    local exact_pattern
+    local quarantine_rule
+    local -a quarantined_list=()
+    while IFS= read -r ipv6_cidr; do
+        [ -n "${ipv6_cidr}" ] || continue
+        if ! ip6tables -C FORWARD -s "${ipv6_cidr}" ! -d fe80::/10 \
+            -m comment --comment "${K3S_IPV6_QUARANTINE_MARKER}" -j DROP >/dev/null 2>&1; then
+            if ! ip6tables -I FORWARD 1 -s "${ipv6_cidr}" ! -d fe80::/10 \
+                -m comment --comment "${K3S_IPV6_QUARANTINE_MARKER}" -j DROP >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to install emergency IPv6 pod-CIDR filter quarantine"
+                return 1
+            fi
+        fi
+        if ! ip6tables -C FORWARD -s "${ipv6_cidr}" ! -d fe80::/10 \
+            -m comment --comment "${K3S_IPV6_QUARANTINE_MARKER}" -j DROP >/dev/null 2>&1; then
+            LAST_ERROR="k3s: Emergency IPv6 pod-CIDR filter quarantine was not installed"
+            return 1
+        fi
+
+        exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${ipv6_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        quarantine_rule="$(ip -6 rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+        if [ -n "${quarantine_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency IPv6 quarantine preference is occupied by an unowned rule"
+                return 1
+            fi
+        else
+            if ! ip -6 rule add from "${ipv6_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to install emergency IPv6 pod-CIDR quarantine"
+                return 1
+            fi
+            quarantine_rule="$(ip -6 rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+            if [ -z "${quarantine_rule}" ] || ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency IPv6 pod-CIDR quarantine was not installed"
+                return 1
+            fi
+        fi
+        quarantined_list+=("${ipv6_cidr}")
+    done <<< "${matched_cidrs}"
+
+    K3S_IPV6_QUARANTINE_CIDR="$(IFS=,; printf '%s' "${quarantined_list[*]}")"
+    return 0
+}
+
+remove_k3s_ipv6_subnet_quarantine() {
+    local rule_line
+    local rule_spec
+    local rule_source
+    local quarantine_pref="${K3S_QUARANTINE_RULE_PREF}"
+    local rules
+    local rule
+    local -a parts
+
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        k3s_policy_rule_is_owned "${rule_line}" || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        delete_ipv6_policy_rule_line "${rule_line}"
+    done < <(ip -6 rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        rule_spec="${rule_line#*:}"
+        [[ "${rule_spec}" == *"blackhole"* ]] || continue
+        k3s_policy_rule_is_owned "${rule_line}" || continue
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        [ -n "${rule_source}" ] || continue
+        LAST_ERROR="k3s: Failed to remove emergency IPv6 pod-CIDR quarantine"
+        return 1
+    done < <(ip -6 rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    if command -v ip6tables >/dev/null 2>&1; then
+        rules="$(ip6tables -S FORWARD 2>/dev/null | grep -F -- "--comment ${K3S_IPV6_QUARANTINE_MARKER}" || true)"
+        while IFS= read -r rule; do
+            [ -n "${rule}" ] || continue
+            read -r -a parts <<< "${rule}"
+            parts[0]="-D"
+            if ! ip6tables "${parts[@]}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to remove emergency IPv6 pod-CIDR filter quarantine"
+                return 1
+            fi
+        done <<< "${rules}"
+        if ip6tables -S FORWARD 2>/dev/null | grep -Fq -- "--comment ${K3S_IPV6_QUARANTINE_MARKER}"; then
+            LAST_ERROR="k3s: Failed to remove emergency IPv6 pod-CIDR filter quarantine"
+            return 1
+        fi
+    fi
+
+    K3S_IPV6_QUARANTINE_CIDR=""
+    return 0
+}
+
+ensure_k3s_subnet_quarantine() {
+    local source_ip="${1:-}"
+    local matched_cidrs
+    local pod_cidr
+    local escaped_cidr
+    local exact_pattern
+    local quarantine_rule
+    local route_lines=""
+
+    if ! normalize_k3s_bypass_cidrs; then
+        return 1
+    fi
+    if [ -z "${source_ip}" ] || [ "${source_ip}" = "10.9.9.9" ]; then
+        route_lines="$(ip -4 route show 2>/dev/null || ip route show 2>/dev/null || true)"
+    fi
+    if ! matched_cidrs="$(
+        SOURCE_IP="${source_ip}" \
+        BYPASS_CIDRS="${K3S_BYPASS_CIDRS_NORMALIZED}" \
+        CONFIGURED_POD_CIDRS="${K3S_POD_CIDRS:-}" \
+        K8S_SERVICE_HOST="${KUBERNETES_SERVICE_HOST:-}" \
+        ROUTE_LINES="${route_lines}" \
+        python3 -c '
+import ipaddress
+import os
+
+raw_source = os.environ.get("SOURCE_IP", "").strip()
+raw_configured = [
+    value.strip()
+    for value in os.environ.get("CONFIGURED_POD_CIDRS", "").split(",")
+    if value.strip()
+]
+k8s_service_host = os.environ.get("K8S_SERVICE_HOST", "").strip()
+route_lines = os.environ.get("ROUTE_LINES", "").splitlines()
+cni_prefixes = (
+    "cni",
+    "flannel",
+    "cali",
+    "cilium",
+    "cbr",
+    "lxc",
+    "vxlan.calico",
+    "ovn",
+    "kube-bridge",
+    "weave",
+)
+default_pod_net = ipaddress.ip_network("10.42.0.0/16")
+
+configured_pod_networks = []
+for value in raw_configured:
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SystemExit(f"invalid IPv4 pod CIDR {value!r}: {exc}")
+    if net.version != 4:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} is not an IPv4 network")
+    if net.prefixlen <= 0 or net.prefixlen >= 32:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} must be a subnet prefix between /1 and /31")
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        raise SystemExit(f"IPv4 pod CIDR {value!r} is not a routable pod subnet")
+    if net not in configured_pod_networks:
+        configured_pod_networks.append(net)
+
+networks = [
     ipaddress.ip_network(value)
     for value in os.environ["BYPASS_CIDRS"].split(",")
-    if value and source in ipaddress.ip_network(value)
+    if value
 ]
-print(max(matches, key=lambda network: network.prefixlen) if matches else "")
-'
-    )"
-    if [ -z "${pod_cidr}" ]; then
+if not networks and not configured_pod_networks:
+    raise SystemExit("no bypass CIDRs")
+
+service_host_ip = None
+if k8s_service_host:
+    try:
+        addr = ipaddress.ip_address(k8s_service_host)
+        if addr.version == 4:
+            service_host_ip = addr
+    except ValueError:
+        pass
+
+cni_route_networks = []
+host_route_networks = []
+for line in route_lines:
+    parts = line.split()
+    if not parts:
+        continue
+    if parts[0] in {
+        "local",
+        "broadcast",
+        "multicast",
+        "throw",
+        "unreachable",
+        "prohibit",
+        "blackhole",
+        "nat",
+        "anycast",
+    }:
+        continue
+    idx = 1 if parts[0] == "unicast" else 0
+    if idx >= len(parts):
+        continue
+    prefix_token = parts[idx]
+    if prefix_token == "default" or "/" not in prefix_token:
+        continue
+    try:
+        net = ipaddress.ip_network(prefix_token, strict=False)
+    except ValueError:
+        continue
+    if net.version != 4 or net.prefixlen <= 0 or net.prefixlen >= 32:
+        continue
+    if net.is_loopback or net.is_link_local or net.is_multicast or net.is_unspecified:
+        continue
+    dev = ""
+    if "dev" in parts:
+        dev_idx = parts.index("dev")
+        if dev_idx + 1 < len(parts):
+            dev = parts[dev_idx + 1]
+    if dev.startswith(cni_prefixes) or net.subnet_of(default_pod_net):
+        if net not in cni_route_networks:
+            cni_route_networks.append(net)
+    elif dev:
+        if net not in host_route_networks:
+            host_route_networks.append(net)
+
+selected = []
+if not raw_source or raw_source == "10.9.9.9":
+    if configured_pod_networks:
+        if cni_route_networks:
+            for route_net in cni_route_networks:
+                matches = [net for net in configured_pod_networks if route_net.subnet_of(net)]
+                if matches:
+                    best = max(matches, key=lambda item: item.prefixlen)
+                    if best not in selected:
+                        selected.append(best)
+        if not selected:
+            selected = list(configured_pod_networks)
+    else:
+        cni_matches = []
+        for route_net in cni_route_networks:
+            matches = [net for net in networks if route_net.subnet_of(net)]
+            if matches:
+                best = max(matches, key=lambda item: item.prefixlen)
+                if best not in cni_matches:
+                    cni_matches.append(best)
+        if cni_matches:
+            selected = cni_matches
+        else:
+            selected = [
+                network for network in networks
+                if str(network) != "10.43.0.0/16"
+                and network.prefixlen < 32
+                and (service_host_ip is None or service_host_ip not in network)
+                and not any(
+                    host_net == network or host_net.subnet_of(network) or network.subnet_of(host_net)
+                    for host_net in host_route_networks
+                )
+            ]
+else:
+    source = ipaddress.ip_address(raw_source)
+    candidate_pool = configured_pod_networks + [
+        net for net in networks if net not in configured_pod_networks
+    ]
+    matches = [network for network in candidate_pool if source in network]
+    if matches:
+        selected.append(max(matches, key=lambda network: network.prefixlen))
+
+for net in selected:
+    print(net)
+' 2>/dev/null
+    )"; then
         LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
         return 1
     fi
-    K3S_QUARANTINE_CIDR="${pod_cidr}"
-
-    # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
-    escaped_cidr="${pod_cidr%/32}"
-    escaped_cidr="${escaped_cidr//./\\.}"
-    exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
-    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
-    if [ -n "${quarantine_rule}" ]; then
-        if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
-            LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
-            return 1
-        fi
-        return 0
-    fi
-    if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
-        LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
+    if [ -z "${matched_cidrs}" ]; then
+        LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
         return 1
     fi
-    quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
-    if [ -z "${quarantine_rule}" ]; then
-        LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+
+    local -a quarantined_list=()
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        # `ip rule show` renders IPv4 /32 sources without the prefix suffix.
+        escaped_cidr="${pod_cidr%/32}"
+        escaped_cidr="${escaped_cidr//./\\.}"
+        exact_pattern="^${K3S_QUARANTINE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+        if [ -n "${quarantine_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency quarantine preference is occupied by an unowned rule"
+                return 1
+            fi
+        else
+            if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_QUARANTINE_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to install emergency pod-CIDR quarantine"
+                return 1
+            fi
+            quarantine_rule="$(ip rule show pref "${K3S_QUARANTINE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+            if [ -z "${quarantine_rule}" ] || ! k3s_policy_rule_is_owned "${quarantine_rule}"; then
+                LAST_ERROR="k3s: Emergency pod-CIDR quarantine was not installed"
+                return 1
+            fi
+        fi
+        quarantined_list+=("${pod_cidr}")
+    done <<< "${matched_cidrs}"
+
+    K3S_QUARANTINE_CIDR="$(IFS=,; printf '%s' "${quarantined_list[*]}")"
+    if ! ensure_k3s_ipv6_subnet_quarantine; then
         return 1
     fi
     return 0
@@ -1998,6 +3043,10 @@ remove_k3s_subnet_quarantine() {
         LAST_ERROR="k3s: Failed to remove emergency pod-CIDR quarantine"
         return 1
     done < <(ip rule show pref "${quarantine_pref}" 2>/dev/null || true)
+
+    if ! remove_k3s_ipv6_subnet_quarantine; then
+        return 1
+    fi
 
     # A protocol-only pre-upgrade marker cannot distinguish our old rule from
     # a foreign rule created with the same protocol and preference. Preserve
@@ -2115,7 +3164,7 @@ get_target_subnet() {
         echo "10.21.0.0/16"
         return
     fi
-    local route_info dev_iface subnet
+    local route_info dev_iface="" subnet=""
     route_info=$(ip route get "${target_ip}" 2>/dev/null || true)
     dev_iface=$(echo "${route_info}" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
     if [ -n "${dev_iface}" ]; then
@@ -2203,7 +3252,32 @@ ensure_docker_target_kill_switches() {
 
 ensure_reconcile_kill_switch() {
     local include_detected_target="${1:-true}"
-    [[ "${K3S_MODE}" == "true" ]] && return 0
+    load_decommissioned_state || return 1
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        load_managed_k3s_policy_state || return 1
+    fi
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        return 0
+    fi
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        if [ -n "${MANAGED_K3S_TARGET_IP:-}" ]; then
+            local guard_ok=false
+            local blackhole_ok=false
+            if ensure_k3s_egress_guard "${MANAGED_K3S_TARGET_IP}"; then
+                guard_ok=true
+            fi
+            if ensure_fallback_blackhole_rule \
+                "${MANAGED_K3S_TARGET_IP}" \
+                "k3s: Failed to protect managed pod before reconciliation" \
+                "${K3S_RULE_PROTOCOL}"; then
+                blackhole_ok=true
+            fi
+            if [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ]; then
+                return 1
+            fi
+        fi
+        return 0
+    fi
 
     if [[ "${SECURE_MODE}" == "true" ]]; then
         ensure_source_blackhole_rule \
@@ -3835,7 +4909,7 @@ cleanup_ipv6_containment() {
     local rules rule managed_source
     local -a parts
 
-    rules=$(ip6tables -S FORWARD 2>/dev/null | grep -F -- "--comment ${IPV6_RULE_MARKER}" || true)
+    rules=$(ip6tables -S FORWARD 2>/dev/null | grep -E -- "--comment (${IPV6_RULE_MARKER}|${K3S_IPV6_QUARANTINE_MARKER})" || true)
     while IFS= read -r rule; do
         [ -n "${rule}" ] || continue
         read -r -a parts <<< "${rule}"
@@ -3844,14 +4918,21 @@ cleanup_ipv6_containment() {
     done <<< "${rules}"
 
     if load_managed_ipv6_policy_state; then
+        local -a remaining_ipv6_addresses=()
         for managed_source in "${MANAGED_TARGET_IPV6_ADDRESSES[@]}"; do
             ip -6 rule del from "${managed_source}" table "${IPV6_POLICY_TABLE}" pref "${IPV6_TUNNEL_RULE_PREF}" >/dev/null 2>&1 || true
             ip -6 rule del from "${managed_source}" blackhole pref "${IPV6_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1 || true
+            if ip -6 rule show pref "${IPV6_TUNNEL_RULE_PREF}" 2>/dev/null | grep -Fq -- "from ${managed_source}" || \
+               ip -6 rule show pref "${IPV6_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -Fq -- "from ${managed_source}"; then
+                remaining_ipv6_addresses+=("${managed_source}")
+            fi
         done
-        MANAGED_TARGET_IPV6_ADDRESSES=()
+        MANAGED_TARGET_IPV6_ADDRESSES=("${remaining_ipv6_addresses[@]}")
         if [ "${IPV6_POLICY_TABLE_MANAGED}" = "true" ]; then
             ip -6 route del blackhole default metric "${IPV6_BLACKHOLE_METRIC}" table "${IPV6_POLICY_TABLE}" >/dev/null 2>&1 || true
-            IPV6_POLICY_TABLE_MANAGED="false"
+            if ! ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null | grep -Fq -- "blackhole default"; then
+                IPV6_POLICY_TABLE_MANAGED="false"
+            fi
         fi
         persist_managed_ipv6_policy_state || log WARN "${LAST_ERROR}"
     else
@@ -3861,6 +4942,7 @@ cleanup_ipv6_containment() {
 
 cleanup_dataplane() {
     local keep_tunnel=false
+    local defer_wg_down="${DEFER_WG_DOWN:-false}"
     if [[ "${1:-}" == "--keep-tunnel" ]]; then
         keep_tunnel=true
     fi
@@ -3899,20 +4981,28 @@ cleanup_dataplane() {
             fi
         done
 
+        if [ "${keep_tunnel}" = false ] && [[ "${SECURE_MODE}" != "true" ]]; then
+            load_managed_docker_policy_state || log WARN "${LAST_ERROR}"
+        fi
         local managed_endpoint
         local managed_source
         local managed_subnet
+        local -a remaining_docker_endpoints=()
         for managed_endpoint in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
             IFS='|' read -r managed_source managed_subnet _ <<< "${managed_endpoint}"
             ip rule del from "${managed_source}" to "${managed_subnet}" table main pref 32500 >/dev/null 2>&1 || true
             ip rule del from "${managed_source}" table 51820 pref 32764 >/dev/null 2>&1 || true
             if [ "${keep_tunnel}" = false ]; then
-                ip rule del from "${managed_source}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
-                ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+                if ! remove_source_blackhole_rule "${managed_source}" "${KILL_SWITCH_PREF}" || \
+                   ! remove_source_blackhole_rule "${managed_source}" "32765" || \
+                   ip rule show pref 32500 2>/dev/null | grep -Fq -- "from ${managed_source}" || \
+                   ip rule show pref 32764 2>/dev/null | grep -Fq -- "from ${managed_source}"; then
+                    remaining_docker_endpoints+=("${managed_endpoint}")
+                fi
             fi
         done
         if [ "${keep_tunnel}" = false ] && [ "${DOCKER_POLICY_STATE_LOADED}" = "true" ]; then
-            MANAGED_DOCKER_IPV4_ENDPOINTS=()
+            MANAGED_DOCKER_IPV4_ENDPOINTS=("${remaining_docker_endpoints[@]}")
             persist_managed_docker_policy_state || log WARN "${LAST_ERROR}"
         fi
 
@@ -3939,10 +5029,12 @@ cleanup_dataplane() {
 
     if [ "${keep_tunnel}" = false ]; then
         cleanup_ipv6_containment
-        ip route flush table 51820 >/dev/null 2>&1 || true
+        if [ "${defer_wg_down}" = false ]; then
+            ip route flush table 51820 >/dev/null 2>&1 || true
 
-        if wg show "${WG_IFACE}" >/dev/null 2>&1; then
-            wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+            if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+                wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 }
@@ -3981,6 +5073,41 @@ write_reconcile_result() {
 
     mv -f "${tmp_path}" "${result_path}"
     cp -f "${result_path}" "${RECONCILE_RESULT_LEGACY}" || true
+}
+
+write_decommission_result() {
+    local request_id="$1"
+    local decommissioned="$2"
+    local result_path
+    local tmp_path
+    local state_json="{}"
+
+    if ! is_valid_request_id "${request_id}"; then
+        log WARN "Skipping decommission result write for invalid request_id: ${request_id}"
+        return 0
+    fi
+
+    ensure_decommission_dirs
+    result_path="$(decommission_result_path "${request_id}")"
+    tmp_path="$(mktemp "${DECOMMISSION_RESULT_DIR}/.${request_id}.tmp.XXXXXX")"
+
+    if [ -f "${STATE_FILE}" ]; then
+        state_json="$(cat "${STATE_FILE}" 2>/dev/null || echo "{}")"
+        if ! echo "${state_json}" | jq -e . >/dev/null 2>&1; then
+            state_json="{}"
+        fi
+    fi
+
+    if ! jq -n \
+        --arg request_id "${request_id}" \
+        --argjson decommissioned "${decommissioned}" \
+        --argjson state "${state_json}" \
+        '{request_id:$request_id, decommissioned:$decommissioned, state:$state}' > "${tmp_path}"; then
+        rm -f "${tmp_path}"
+        return 1
+    fi
+
+    mv -f "${tmp_path}" "${result_path}"
 }
 
 fail_reconcile_closed() {
@@ -4032,6 +5159,49 @@ reconcile_once() {
     local nat_changed="0"
     local k3s_guard_active=false
 
+    if ! load_decommissioned_state; then
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        log ERROR "${LAST_ERROR:-Failed to load decommission state}"
+        return 1
+    fi
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        load_managed_k3s_policy_state || true
+    fi
+
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        if [ "${reason}" != "manual" ] && [ "${reason}" != "restart" ]; then
+            write_state
+            log INFO "reconcile_skip reason=${reason} decommissioned=true"
+            LAST_RECONCILE_EPOCH="$(date +%s)"
+            return 0
+        fi
+        DECOMMISSIONED="false"
+        if ! persist_decommissioned_state; then
+            DECOMMISSIONED="true"
+            RULES_SYNCED="false"
+            IPV4_RULES_SYNCED="false"
+            IPV6_RULES_SYNCED="false"
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+            log ERROR "${LAST_ERROR:-Failed to persist decommission state}"
+            return 1
+        fi
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            K3S_POLICY_STATE_LOADED="true"
+            persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
+        elif [[ "${SECURE_MODE}" != "true" ]]; then
+            DOCKER_TARGET_IP="${DOCKER_TARGET_IP:-10.9.9.9}"
+        fi
+    fi
+
     LAST_ERROR=""
     RULES_SYNCED="false"
     IPV4_RULES_SYNCED="false"
@@ -4066,6 +5236,27 @@ reconcile_once() {
             fail_reconcile_closed "${request_id}"
         fi
         return 1
+    fi
+
+    if [[ "${K3S_MODE}" == "true" ]] && \
+       [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ] && \
+       [ -n "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${K3S_TARGET_POD_SELECTOR:-}" ] && \
+       { [ "${MANAGED_K3S_POD_NAMESPACE}" != "${K3S_TARGET_POD_NAMESPACE}" ] || \
+         [ "${MANAGED_K3S_POD_SELECTOR}" != "${K3S_TARGET_POD_SELECTOR}" ]; }; then
+        if ! remove_k3s_emergency_network_policy_for_target "${MANAGED_K3S_POD_NAMESPACE}" "${MANAGED_K3S_POD_SELECTOR}"; then
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+            return 1
+        fi
+        MANAGED_K3S_TARGET_IP="${DOCKER_TARGET_IP:-}"
+        MANAGED_K3S_TARGET_IMPL="${TARGET_IMPL:-}"
+        MANAGED_K3S_POD_NAME="${K3S_TARGET_POD_NAME:-}"
+        MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE}"
+        MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR}"
+        K3S_POLICY_STATE_LOADED="true"
+        persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
     fi
 
     # Discovery exposes the target's pre-existing Docker network sources.
@@ -4242,13 +5433,509 @@ reconcile_once() {
     return 0
 }
 
+ensure_k3s_selector_context() {
+    if [ -n "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${K3S_TARGET_POD_SELECTOR:-}" ]; then
+        return 0
+    fi
+    if [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ]; then
+        K3S_TARGET_POD_NAMESPACE="${MANAGED_K3S_POD_NAMESPACE}"
+        K3S_TARGET_POD_SELECTOR="${MANAGED_K3S_POD_SELECTOR}"
+        return 0
+    fi
+    local meta_node=""
+    if [ -f "${TUNNELSATS_META_PATH}" ]; then
+        meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    fi
+    if [ "${meta_node}" = "cln" ] && [ -n "${CLN_K8S_SERVICE:-}" ]; then
+        K3S_TARGET_POD_NAMESPACE="${CLN_K8S_NAMESPACE}"
+        K3S_TARGET_POD_SELECTOR="${CLN_K8S_POD_SELECTOR}"
+    elif [ -n "${LND_K8S_SERVICE:-}" ]; then
+        K3S_TARGET_POD_NAMESPACE="${LND_K8S_NAMESPACE}"
+        K3S_TARGET_POD_SELECTOR="${LND_K8S_POD_SELECTOR}"
+    elif [ -n "${CLN_K8S_SERVICE:-}" ]; then
+        K3S_TARGET_POD_NAMESPACE="${CLN_K8S_NAMESPACE}"
+        K3S_TARGET_POD_SELECTOR="${CLN_K8S_POD_SELECTOR}"
+    else
+        K3S_TARGET_POD_NAMESPACE="${LND_K8S_NAMESPACE:-${K8S_NAMESPACE:-default}}"
+        K3S_TARGET_POD_SELECTOR="${LND_K8S_POD_SELECTOR:-app=lnd}"
+    fi
+    [ -n "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${K3S_TARGET_POD_SELECTOR:-}" ]
+}
+
+preserve_fail_closed_dataplane() {
+    local mode="${1:-shutdown}"
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        load_managed_k3s_policy_state || true
+        load_managed_ipv6_policy_state || true
+        ensure_k3s_selector_context || true
+        local target_ip="${DOCKER_TARGET_IP:-}"
+        if [ "${target_ip}" = "10.9.9.9" ]; then
+            target_ip=""
+        fi
+        if [ -z "${target_ip}" ] && [ "${MANAGED_K3S_TARGET_IP:-}" != "10.9.9.9" ]; then
+            target_ip="${MANAGED_K3S_TARGET_IP:-}"
+        fi
+        if [ -n "${target_ip}" ]; then
+            DOCKER_TARGET_IP="${target_ip}"
+        fi
+        if [ -z "${K3S_TARGET_POD_NAME:-}" ] && [ -n "${MANAGED_K3S_POD_NAME:-}" ]; then
+            K3S_TARGET_POD_NAME="${MANAGED_K3S_POD_NAME}"
+        fi
+        local guard_ok=false
+        local blackhole_ok=false
+        local quarantine_ok=false
+        local policy_ok=false
+        if [ -n "${target_ip}" ]; then
+            MANAGED_K3S_TARGET_IP="${target_ip}"
+            if [ "${#TARGET_IPV6_ADDRESSES[@]}" -gt 0 ]; then
+                MANAGED_K3S_TARGET_IPV6_ADDRESSES=("${TARGET_IPV6_ADDRESSES[@]}")
+            fi
+            MANAGED_K3S_TARGET_IMPL="${TARGET_IMPL:-${MANAGED_K3S_TARGET_IMPL:-}}"
+            MANAGED_K3S_POD_NAME="${K3S_TARGET_POD_NAME:-${MANAGED_K3S_POD_NAME:-}}"
+            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
+            K3S_POLICY_STATE_LOADED="true"
+            persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
+            if ensure_k3s_egress_guard "${target_ip}"; then
+                guard_ok=true
+            fi
+            if ensure_fallback_blackhole_rule \
+                "${target_ip}" \
+                "k3s: Failed to preserve fallback blackhole rule" \
+                "${K3S_RULE_PROTOCOL}"; then
+                blackhole_ok=true
+            fi
+            if [ "${guard_ok}" = false ] && [ "${blackhole_ok}" = false ]; then
+                if ensure_k3s_subnet_quarantine "${target_ip}" && ensure_k3s_ipv6_subnet_quarantine; then
+                    quarantine_ok=true
+                fi
+            fi
+        else
+            MANAGED_K3S_POD_NAMESPACE="${K3S_TARGET_POD_NAMESPACE:-${MANAGED_K3S_POD_NAMESPACE:-}}"
+            MANAGED_K3S_POD_SELECTOR="${K3S_TARGET_POD_SELECTOR:-${MANAGED_K3S_POD_SELECTOR:-}}"
+            K3S_POLICY_STATE_LOADED="true"
+            persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
+        fi
+        # Always install selector-based emergency NetworkPolicy before exiting or
+        # restarting so any controller-created replacement Lightning pod (with a
+        # new IP) is also fail-closed while TunnelSats is stopped.
+        local quarantine_for_netpol=false
+        if ensure_k3s_emergency_network_policy; then
+            policy_ok=true
+        else
+            if [ "${quarantine_ok}" = false ]; then
+                # If the Kubernetes API is unavailable on the first attempt, immediately
+                # quarantine the pod CIDR in the kernel so replacement pods scheduled on
+                # this node cannot egress over clearnet while the cluster-wide emergency
+                # NetworkPolicy is retried.
+                quarantine_for_netpol=true
+                if ensure_k3s_subnet_quarantine "${target_ip}" && ensure_k3s_ipv6_subnet_quarantine; then
+                    quarantine_ok=true
+                fi
+            fi
+            local max_attempts="${K3S_SHUTDOWN_NETPOL_ATTEMPTS:-3}"
+            local attempt=1
+            while [ "${attempt}" -lt "${max_attempts}" ]; do
+                attempt=$((attempt + 1))
+                if [ "${K3S_SHUTDOWN_RETRY_INTERVAL:-1}" -gt 0 ] 2>/dev/null; then
+                    sleep "${K3S_SHUTDOWN_RETRY_INTERVAL}"
+                fi
+                if ensure_k3s_emergency_network_policy; then
+                    policy_ok=true
+                    if [ "${quarantine_for_netpol}" = true ]; then
+                        remove_k3s_subnet_quarantine || true
+                        remove_k3s_ipv6_subnet_quarantine || true
+                        quarantine_ok=false
+                    fi
+                    break
+                fi
+            done
+        fi
+        if [ "${policy_ok}" = false ] && [ "${mode}" != "restart" ]; then
+            delete_k3s_target_pod || true
+        fi
+        if [ "${policy_ok}" = true ] || [ "${quarantine_ok}" = true ] || [ "${guard_ok}" = true ] || [ "${blackhole_ok}" = true ]; then
+            cleanup_dataplane "--keep-tunnel"
+        fi
+        local target_protected=false
+        if [ "${guard_ok}" = true ] || [ "${blackhole_ok}" = true ] || [ "${quarantine_ok}" = true ]; then
+            target_protected=true
+        fi
+        local replacement_protected=false
+        if [ "${policy_ok}" = true ]; then
+            replacement_protected=true
+        elif [ "${quarantine_ok}" = true ] && { ! k3s_ipv6_is_active || [ -n "${K3S_IPV6_QUARANTINE_CIDR:-}" ]; }; then
+            replacement_protected=true
+        fi
+        if { [ "${mode}" = "restart" ] && { [ "${replacement_protected}" = false ] || { [ -n "${target_ip}" ] && [ "${target_protected}" = false ]; }; }; } || \
+           { [ "${mode}" != "restart" ] && { [ "${policy_ok}" = false ] || { [ -n "${target_ip}" ] && [ "${target_protected}" = false ]; }; }; }; then
+            LAST_ERROR="${LAST_ERROR:-k3s: Failed to establish replacement-pod fail-closed protection during shutdown}"
+            RULES_SYNCED="false"
+            IPV4_RULES_SYNCED="false"
+            write_state
+            log ERROR "${LAST_ERROR}"
+            return 1
+        fi
+        return 0
+    fi
+    local kill_switch_ok=true
+    ensure_reconcile_kill_switch || true
+    cleanup_dataplane "--keep-tunnel"
+    if ! ensure_reconcile_kill_switch; then
+        kill_switch_ok=false
+    fi
+    if [ "${kill_switch_ok}" = false ]; then
+        LAST_ERROR="${LAST_ERROR:-Failed to preserve reconciliation kill switch during shutdown}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        write_state
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+    return 0
+}
+
+restore_saved_decommission_ownership() {
+    if [ "${DECOMMISSION_SAVED_DOCKER_LOADED:-false}" = "true" ]; then
+        MANAGED_DOCKER_IPV4_ENDPOINTS=("${DECOMMISSION_SAVED_DOCKER_ENDPOINTS[@]}")
+        DOCKER_POLICY_STATE_LOADED="true"
+        persist_managed_docker_policy_state || log WARN "${LAST_ERROR}"
+    fi
+    if [ "${DECOMMISSION_SAVED_IPV6_LOADED:-false}" = "true" ]; then
+        MANAGED_TARGET_IPV6_ADDRESSES=("${DECOMMISSION_SAVED_IPV6_ADDRESSES[@]}")
+        IPV6_POLICY_TABLE_MANAGED="${DECOMMISSION_SAVED_IPV6_TABLE_MANAGED}"
+        IPV6_POLICY_STATE_LOADED="true"
+        persist_managed_ipv6_policy_state || log WARN "${LAST_ERROR}"
+    fi
+}
+
+_verify_dataplane_decommissioned_inner() {
+    local managed_endpoint managed_source managed_subnet cleanup_ip pref rule_line
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        if [ -n "${K3S_TARGET_POD_NAMESPACE:-}" ] && [ -n "${K3S_TARGET_POD_SELECTOR:-}" ] && \
+           k3s_owned_emergency_network_policy_is_present "${K3S_TARGET_POD_NAMESPACE}" "${K3S_TARGET_POD_SELECTOR}"; then
+            LAST_ERROR="k3s: Emergency deny-egress NetworkPolicy is still present"
+            return 1
+        fi
+        if [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ] && \
+           k3s_owned_emergency_network_policy_is_present "${MANAGED_K3S_POD_NAMESPACE}" "${MANAGED_K3S_POD_SELECTOR}"; then
+            LAST_ERROR="k3s: Previous emergency deny-egress NetworkPolicy is still present"
+            return 1
+        fi
+        if iptables -S FORWARD 2>/dev/null | grep -Fq -- "tunnelsats-k3s-egress-guard"; then
+            LAST_ERROR="k3s: Failed to remove temporary egress guard"
+            return 1
+        fi
+        if ! remove_k3s_subnet_quarantine; then
+            return 1
+        fi
+        for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}" "${K3S_QUARANTINE_RULE_PREF}"; do
+            while IFS= read -r rule_line; do
+                [ -n "${rule_line}" ] || continue
+                if k3s_policy_rule_is_owned "${rule_line}"; then
+                    LAST_ERROR="k3s: Failed to remove owned policy rule at pref ${pref}"
+                    return 1
+                fi
+            done < <(ip rule show pref "${pref}" 2>/dev/null || true)
+            while IFS= read -r rule_line; do
+                [ -n "${rule_line}" ] || continue
+                if k3s_policy_rule_is_owned "${rule_line}"; then
+                    LAST_ERROR="k3s: Failed to remove owned IPv6 policy rule at pref ${pref}"
+                    return 1
+                fi
+            done < <(ip -6 rule show pref "${pref}" 2>/dev/null || true)
+        done
+    else
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+            [ -n "${cleanup_ip}" ] || continue
+            remove_source_blackhole_rule "${cleanup_ip}" "${KILL_SWITCH_PREF}" || return 1
+            remove_source_blackhole_rule "${cleanup_ip}" "32765" || return 1
+            if ip rule show pref 32500 2>/dev/null | grep -Fq -- "from ${cleanup_ip}" || \
+               ip rule show pref 32764 2>/dev/null | grep -Fq -- "from ${cleanup_ip}"; then
+                LAST_ERROR="Failed to remove IPv4 policy rules for ${cleanup_ip}"
+                return 1
+            fi
+        done
+        if [[ "${SECURE_MODE}" != "true" ]]; then
+            local bridge_gw="${DOCKER_NETWORK_SUBNET%.*}.1"
+            remove_source_blackhole_rule "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}" || return 1
+            remove_source_blackhole_rule "${DOCKER_NETWORK_SUBNET}" "32765" || return 1
+            if ip rule show pref 32500 2>/dev/null | grep -Fq -- "from ${DOCKER_NETWORK_SUBNET}" || \
+               ip rule show pref 32763 2>/dev/null | grep -Fq -- "from ${bridge_gw}" || \
+               ip rule show 2>/dev/null | grep -qE "^[0-9]+:[[:space:]]+from[[:space:]]+${DOCKER_NETWORK_SUBNET//./\\.}[[:space:]]+lookup[[:space:]]+51820[[:space:]]*$"; then
+                LAST_ERROR="Failed to remove Docker bridge IPv4 policy rules for ${DOCKER_NETWORK_SUBNET}"
+                return 1
+            fi
+            for managed_endpoint in "${DECOMMISSION_SAVED_DOCKER_ENDPOINTS[@]}"; do
+                [ -n "${managed_endpoint}" ] || continue
+                IFS='|' read -r managed_source managed_subnet _ <<< "${managed_endpoint}"
+                [ -n "${managed_source}" ] || continue
+                if ! remove_source_blackhole_rule "${managed_source}" "${KILL_SWITCH_PREF}" || \
+                   ! remove_source_blackhole_rule "${managed_source}" "32765" || \
+                   ip rule show pref 32500 2>/dev/null | grep -Fq -- "from ${managed_source}" || \
+                   ip rule show pref 32764 2>/dev/null | grep -Fq -- "from ${managed_source}"; then
+                    LAST_ERROR="${LAST_ERROR:-Failed to remove Docker IPv4 policy rules for ${managed_source}}"
+                    return 1
+                fi
+            done
+        fi
+    fi
+
+    if iptables -t nat -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-dnat" || \
+       iptables -t nat -S POSTROUTING 2>/dev/null | grep -Fq -- "tunnelsats-masq" || \
+       iptables -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(forward-in|forward-out|k3s-egress-guard)" || \
+       iptables -t mangle -S PREROUTING 2>/dev/null | grep -Fq -- "tunnelsats-conn-restore" || \
+       iptables -t mangle -S FORWARD 2>/dev/null | grep -Eq -- "tunnelsats-(wg-mark|conn-save)"; then
+        LAST_ERROR="Failed to remove tagged IPv4 dataplane iptables rules"
+        return 1
+    fi
+
+    if ip6tables -S FORWARD 2>/dev/null | grep -Eq -- "--comment (${IPV6_RULE_MARKER}|${K3S_IPV6_QUARANTINE_MARKER})"; then
+        LAST_ERROR="Failed to remove IPv6 FORWARD containment rules"
+        return 1
+    fi
+    for managed_source in "${DECOMMISSION_SAVED_IPV6_ADDRESSES[@]}"; do
+        [ -n "${managed_source}" ] || continue
+        if ip -6 rule show pref "${IPV6_TUNNEL_RULE_PREF}" 2>/dev/null | grep -Fq -- "from ${managed_source}" || \
+           ip -6 rule show pref "${IPV6_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -Fq -- "from ${managed_source}"; then
+            LAST_ERROR="Failed to remove IPv6 policy rules for ${managed_source}"
+            return 1
+        fi
+    done
+    if [ "${DECOMMISSION_SAVED_IPV6_TABLE_MANAGED}" = "true" ] && \
+       ip -6 route show table "${IPV6_POLICY_TABLE}" 2>/dev/null | grep -Fq -- "blackhole default"; then
+        LAST_ERROR="Failed to remove IPv6 blackhole route from table ${IPV6_POLICY_TABLE}"
+        return 1
+    fi
+
+    return 0
+}
+
+verify_dataplane_decommissioned() {
+    if ! _verify_dataplane_decommissioned_inner; then
+        restore_saved_decommission_ownership
+        return 1
+    fi
+    return 0
+}
+
+decommission_dataplane() {
+    local request_id="${1:-}"
+    local decommission_ok=true
+    local decommission_error=""
+    log INFO "decommission_start request_id=${request_id:-none}"
+
+    DECOMMISSION_SAVED_DOCKER_LOADED="false"
+    DECOMMISSION_SAVED_DOCKER_ENDPOINTS=()
+    DECOMMISSION_SAVED_IPV6_LOADED="false"
+    DECOMMISSION_SAVED_IPV6_ADDRESSES=()
+    DECOMMISSION_SAVED_IPV6_TABLE_MANAGED="false"
+
+    if [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]]; then
+        if load_managed_docker_policy_state; then
+            DECOMMISSION_SAVED_DOCKER_LOADED="true"
+            DECOMMISSION_SAVED_DOCKER_ENDPOINTS=("${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}")
+        else
+            decommission_ok=false
+            decommission_error="${LAST_ERROR:-Failed to load Docker policy ownership state}"
+        fi
+    fi
+    if load_managed_ipv6_policy_state; then
+        DECOMMISSION_SAVED_IPV6_LOADED="true"
+        DECOMMISSION_SAVED_IPV6_ADDRESSES=("${MANAGED_TARGET_IPV6_ADDRESSES[@]}")
+        DECOMMISSION_SAVED_IPV6_TABLE_MANAGED="${IPV6_POLICY_TABLE_MANAGED}"
+    else
+        decommission_ok=false
+        decommission_error="${decommission_error:-${LAST_ERROR:-Failed to load IPv6 policy ownership state}}"
+    fi
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        if ! load_managed_k3s_policy_state; then
+            decommission_ok=false
+            decommission_error="${decommission_error:-${LAST_ERROR:-k3s: Failed to load policy ownership state}}"
+        fi
+        ensure_k3s_selector_context || true
+        if ! remove_k3s_emergency_network_policy; then
+            decommission_ok=false
+            decommission_error="${decommission_error:-${LAST_ERROR:-k3s: Failed to remove emergency deny-egress NetworkPolicy}}"
+        fi
+        if [ -n "${MANAGED_K3S_POD_NAMESPACE:-}" ] && [ -n "${MANAGED_K3S_POD_SELECTOR:-}" ] && \
+           { [ "${MANAGED_K3S_POD_NAMESPACE}" != "${K3S_TARGET_POD_NAMESPACE:-}" ] || \
+             [ "${MANAGED_K3S_POD_SELECTOR}" != "${K3S_TARGET_POD_SELECTOR:-}" ]; }; then
+            if ! remove_k3s_emergency_network_policy_for_target "${MANAGED_K3S_POD_NAMESPACE}" "${MANAGED_K3S_POD_SELECTOR}"; then
+                decommission_ok=false
+                decommission_error="${decommission_error:-${LAST_ERROR:-k3s: Failed to remove previous emergency deny-egress NetworkPolicy}}"
+            fi
+        fi
+    fi
+
+    DEFER_WG_DOWN=true cleanup_dataplane
+    if ! verify_dataplane_decommissioned; then
+        decommission_ok=false
+        decommission_error="${decommission_error:-${LAST_ERROR:-Failed to verify dataplane guard removal}}"
+    fi
+
+    if [ "${decommission_ok}" = false ]; then
+        restore_saved_decommission_ownership
+        DECOMMISSIONED="false"
+        LAST_ERROR="${decommission_error}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_decommission_result "${request_id}" false
+        fi
+        log ERROR "decommission_failed request_id=${request_id:-none} error=${LAST_ERROR}"
+        return 1
+    fi
+
+    DECOMMISSIONED="true"
+    if ! persist_decommissioned_state; then
+        restore_saved_decommission_ownership
+        DECOMMISSIONED="false"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_decommission_result "${request_id}" false
+        fi
+        log ERROR "decommission_failed request_id=${request_id:-none} error=${LAST_ERROR}"
+        return 1
+    fi
+
+    ip route flush table 51820 >/dev/null 2>&1 || true
+    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+        wg-quick down "${WG_IFACE}" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "${K3S_MODE}" == "true" ]] || [[ "${SECURE_MODE}" == "true" ]]; then
+        DOCKER_TARGET_IP=""
+    else
+        DOCKER_TARGET_IP="10.9.9.9"
+    fi
+    TARGET_CONTAINER_ID=""
+    TARGET_CONTAINER_NAME=""
+    TARGET_IMPL=""
+    TARGET_IPV6_ADDRESSES=()
+    TARGET_IPV6_MACS=()
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
+    FORWARDING_PORT=""
+    MANAGED_K3S_TARGET_IP=""
+    MANAGED_K3S_TARGET_IPV6_ADDRESSES=()
+    MANAGED_K3S_TARGET_IMPL=""
+    MANAGED_K3S_POD_NAME=""
+    MANAGED_K3S_POD_NAMESPACE=""
+    MANAGED_K3S_POD_SELECTOR=""
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        K3S_POLICY_STATE_LOADED="true"
+        persist_managed_k3s_policy_state || log WARN "${LAST_ERROR}"
+    fi
+    RULES_SYNCED="false"
+    IPV4_RULES_SYNCED="false"
+    IPV6_RULES_SYNCED="false"
+    LAST_ERROR=""
+    write_state
+    discard_pending_activation_triggers
+    if [ -n "${request_id}" ]; then
+        write_decommission_result "${request_id}" true
+    fi
+    log INFO "decommission_done request_id=${request_id:-none}"
+    return 0
+}
+
+discard_pending_activation_triggers() {
+    ensure_reconcile_dirs
+    rm -f "${RESTART_TRIGGER}"
+    if [ -f "${RECONCILE_TRIGGER_LEGACY}" ]; then
+        local legacy_req
+        legacy_req="$(cat "${RECONCILE_TRIGGER_LEGACY}" 2>/dev/null || true)"
+        rm -f "${RECONCILE_TRIGGER_LEGACY}"
+        if is_valid_request_id "${legacy_req}"; then
+            write_reconcile_result "${legacy_req}" false
+        fi
+    fi
+    local trigger_path
+    local req
+    while IFS= read -r trigger_path; do
+        [ -n "${trigger_path}" ] || continue
+        req="$(basename "${trigger_path}" .trigger)"
+        rm -f "${trigger_path}"
+        if is_valid_request_id "${req}"; then
+            write_reconcile_result "${req}" false
+        fi
+    done < <(find "${RECONCILE_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' | sort)
+}
+
+process_decommission_triggers() {
+    ensure_decommission_dirs
+    local trigger_path
+    local req
+    while IFS= read -r trigger_path; do
+        [ -n "${trigger_path}" ] || continue
+        req="$(basename "${trigger_path}" .trigger)"
+        rm -f "${trigger_path}"
+        if is_valid_request_id "${req}"; then
+            decommission_dataplane "${req}" || true
+        else
+            log WARN "Ignoring decommission trigger with invalid request id: ${req}"
+        fi
+    done < <(find "${DECOMMISSION_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' | sort)
+}
+
 cleanup() {
+    local rc=0
     log INFO "Received SIGTERM. Stopping ${APP_NAME}."
     if [ -n "${API_PID}" ]; then
         kill "${API_PID}" >/dev/null 2>&1 || true
     fi
-    cleanup_dataplane
-    exit 0
+    if ! load_decommissioned_state; then
+        DECOMMISSIONED="false"
+    fi
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        cleanup_dataplane || rc=$?
+    else
+        preserve_fail_closed_dataplane || rc=$?
+    fi
+    exit "${rc}"
+}
+
+handle_restart_trigger() {
+    log INFO "restart trigger detected"
+    rm -f "${RESTART_TRIGGER}"
+    if ! load_decommissioned_state; then
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        log ERROR "${LAST_ERROR:-Failed to load decommission state before WireGuard restart}"
+        return 1
+    fi
+    local was_decommissioned="${DECOMMISSIONED:-false}"
+    DECOMMISSIONED="false"
+    if ! persist_decommissioned_state; then
+        DECOMMISSIONED="${was_decommissioned}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        log ERROR "${LAST_ERROR:-Failed to persist decommission state before WireGuard restart}"
+        return 1
+    fi
+    LAST_ERROR="Restart requested; dataplane remains fail-closed"
+    if ! preserve_fail_closed_dataplane "restart"; then
+        log ERROR "${LAST_ERROR:-Failed to preserve fail-closed dataplane before WireGuard restart}"
+        return 1
+    fi
+    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+        wg-quick down "${WG_CONF_PATH}" >/dev/null 2>&1 \
+            || wg-quick down "${WG_IFACE}" >/dev/null 2>&1 \
+            || ip link del dev "${WG_IFACE}" >/dev/null 2>&1 \
+            || true
+    fi
+    reconcile_once "restart" || true
 }
 
 main_loop() {
@@ -4261,21 +5948,17 @@ main_loop() {
         fi
 
         ensure_reconcile_dirs
+        ensure_decommission_dirs
 
         if [ -f "${RESTART_TRIGGER}" ]; then
-            log INFO "restart trigger detected"
-            rm -f "${RESTART_TRIGGER}"
-            if [ -n "${API_PID}" ]; then
-                kill "${API_PID}" >/dev/null 2>&1 || true
-            fi
-            if [[ "${K3S_MODE}" == "true" ]]; then
-                cleanup_dataplane
+            if [ -n "$(find "${DECOMMISSION_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' -print -quit 2>/dev/null)" ]; then
+                rm -f "${RESTART_TRIGGER}"
             else
-                LAST_ERROR="Restart requested; dataplane remains fail-closed"
-                fail_reconcile_closed || true
+                handle_restart_trigger || true
             fi
-            exit 1
         fi
+
+        process_decommission_triggers
 
         if [ -f "${RECONCILE_TRIGGER_LEGACY}" ]; then
             local legacy_req
@@ -4322,6 +6005,11 @@ fi
 
 trap cleanup SIGTERM SIGINT
 
+if ! load_decommissioned_state; then
+    log ERROR "Startup aborted because decommission state could not be loaded: ${LAST_ERROR}"
+    exit 1
+fi
+
 if ! ensure_reconcile_kill_switch; then
     log ERROR "Startup aborted because the Lightning kill switch could not be installed: ${LAST_ERROR}"
     exit 1
@@ -4365,6 +6053,7 @@ python3 /app/server/app.py &
 API_PID=$!
 
 ensure_reconcile_dirs
+ensure_decommission_dirs
 
 reconcile_once "startup" || true
 

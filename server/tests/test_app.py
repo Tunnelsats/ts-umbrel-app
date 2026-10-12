@@ -43,6 +43,21 @@ def mock_target_reconcile():
     with patch('app.reconcile_target_and_wait', return_value=(True, result)) as mocked:
         yield mocked, original
 
+
+@pytest.fixture(autouse=True)
+def mock_dataplane_decommission():
+    """Keep restore tests synchronous; decommission-specific tests use the original helper."""
+    original = getattr(app_module, "decommission_dataplane_and_wait", None)
+    result = {
+        "decommissioned": True,
+        "state": {"decommissioned": True, "rules_synced": False, "last_error": None},
+    }
+    if original is None:
+        yield None, None
+    else:
+        with patch('app.decommission_dataplane_and_wait', return_value=(True, result)) as mocked:
+            yield mocked, original
+
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
@@ -2637,7 +2652,10 @@ class TestDataplaneAndRegressionFixes:
 
 
 class TestAnnouncementPrivacy:
-    @patch('app.container_ids_by_match', return_value=['mock'])
+    @patch(
+        'app.container_ids_by_match',
+        side_effect=lambda pattern, containers=None: ['mock'] if pattern == app_module.LND_CONTAINER_PATTERN else [],
+    )
     def test_lnd_conflicts_require_confirmation_then_backup_disable_and_restore(
         self, _mock_ids, mock_lnd_announcement_cleanup, client
     ):
@@ -3590,3 +3608,327 @@ def test_reconcile_target_and_wait_rejects_a_different_synced_target(mock_target
 
     assert ok is False
     assert "does not match requested target cln" in detail["error"]
+
+
+def test_restore_node_k3s_mode_restarts_pod_and_decommissions_dataplane(client, mock_dataplane_decommission):
+    decommission_mock = mock_dataplane_decommission[0]
+    assert decommission_mock is not None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        cln_path = os.path.join(tmp_dir, "config")
+        with open(lnd_path, "w") as f:
+            f.write("[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n")
+
+        events = []
+
+        def fake_delete_pod(pod_name, namespace=None):
+            events.append(f"delete:{pod_name}:{namespace}")
+            return True
+
+        def fake_wait_termination(pod_name, namespace=None, pod_uid=None, timeout=30.0):
+            events.append(f"wait:{pod_name}:{namespace}")
+            return True
+
+        decommission_mock.side_effect = lambda *args, **kwargs: (
+            events.append("decommission") or (True, {"decommissioned": True, "state": {"decommissioned": True}})
+        )
+
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.k8s_get_pod_name", side_effect=lambda selector, namespace=None: "lnd-0" if "lnd" in selector else None), \
+                patch("app.k8s_delete_pod", side_effect=fake_delete_pod) as mock_delete_pod, \
+                patch("app.k8s_wait_for_pod_termination", side_effect=fake_wait_termination) as mock_wait_pod:
+            res = client.post("/api/local/restore-node")
+
+        assert res.status_code == 200
+        payload = json.loads(res.data)
+        assert payload["lnd"] is True
+        assert payload["decommissioned"] is True
+        mock_delete_pod.assert_called_once_with("lnd-0", namespace=app_module.LND_K8S_NAMESPACE)
+        mock_wait_pod.assert_called_once_with("lnd-0", namespace=app_module.LND_K8S_NAMESPACE, pod_uid=None)
+        decommission_mock.assert_called_once()
+        assert events == [
+            f"delete:lnd-0:{app_module.LND_K8S_NAMESPACE}",
+            f"wait:lnd-0:{app_module.LND_K8S_NAMESPACE}",
+            "decommission",
+        ]
+
+    # Also verify k8s_wait_for_pod_termination waits while old pod is still Running and succeeds once replaced/404.
+    running_resp = MagicMock()
+    running_resp.status_code = 200
+    running_resp.json.return_value = {
+        "metadata": {"name": "lnd-0", "uid": "old-uid", "deletionTimestamp": "2026-10-11T18:00:00Z"},
+        "status": {"phase": "Running"},
+    }
+    replaced_resp = MagicMock()
+    replaced_resp.status_code = 200
+    replaced_resp.json.return_value = {
+        "metadata": {"name": "lnd-0", "uid": "new-uid"},
+        "status": {"phase": "Running"},
+    }
+    with patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
+            patch("app.time.sleep") as mock_sleep, \
+            patch("app._k8s_session.get", side_effect=[running_resp, replaced_resp]):
+        assert app_module.k8s_wait_for_pod_termination("lnd-0", namespace="lightning", pod_uid="old-uid", timeout=5.0) is True
+        mock_sleep.assert_called_once()
+
+    # Verify web role uses extended timeout for /api/local/restore-node and /api/local/configure-node.
+    daemon_response = UnixHTTPResponse(
+        status=200,
+        reason="OK",
+        headers=(("Content-Type", "application/json"),),
+        body=b'{"decommissioned":true}',
+    )
+    with patch.object(app_module, "TUNNELSATS_ROLE", "web"), \
+            patch("app.request_over_unix_socket", return_value=daemon_response) as request_daemon:
+        web_res = client.post("/api/local/restore-node")
+        cfg_res = client.post("/api/local/configure-node", json={"nodeType": "cln"})
+    assert web_res.status_code == 200
+    assert cfg_res.status_code == 200
+    assert request_daemon.call_args_list[0].kwargs["timeout"] == app_module.DAEMON_RESTORE_TIMEOUT_SECONDS
+    assert request_daemon.call_args_list[1].kwargs["timeout"] == app_module.DAEMON_RESTORE_TIMEOUT_SECONDS
+
+
+def test_restore_node_fails_closed_without_decommissioning_when_restart_or_config_restore_fails(
+    client, mock_dataplane_decommission
+):
+    decommission_mock = mock_dataplane_decommission[0]
+    assert decommission_mock is not None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        cln_path = os.path.join(tmp_dir, "config")
+        with open(lnd_path, "w") as f:
+            f.write("[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n")
+
+        # 1. Pod/container restart fails -> must return 500 and NOT decommission dataplane
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.lnd_exists", return_value=True), \
+                patch("app.cln_exists", return_value=False), \
+                patch("app.restart_container_by_pattern", return_value=False):
+            res = client.post("/api/local/restore-node")
+
+        assert res.status_code == 500
+        decommission_mock.assert_not_called()
+
+        # 2. Config restore fails -> must return 500 and NOT decommission dataplane
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.lnd_exists", return_value=True), \
+                patch("app.cln_exists", return_value=False), \
+                patch("app.comment_out_config_lines", return_value=(False, False)), \
+                patch("app.restart_container_by_pattern", return_value=True):
+            res2 = client.post("/api/local/restore-node")
+
+        assert res2.status_code == 500
+        decommission_mock.assert_not_called()
+
+        # 3. One running node's config is missing while the other node's config succeeds -> must return 500 and NOT decommission
+        with open(cln_path, "w") as f:
+            f.write("announce-addr=de2.tunnelsats.com:35825\n")
+        missing_lnd_path = os.path.join(tmp_dir, "missing-lnd.conf")
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", missing_lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.lnd_exists", return_value=True), \
+                patch("app.cln_exists", return_value=True), \
+                patch("app.restart_container_by_pattern", return_value=True):
+            res3 = client.post("/api/local/restore-node")
+
+        assert res3.status_code == 500
+        assert "Failed to restore LND configuration." in json.loads(res3.data)["error"]
+        decommission_mock.assert_not_called()
+
+
+def test_restore_node_rejects_restore_when_node_running_state_lookup_fails(
+    client, mock_dataplane_decommission
+):
+    decommission_mock = mock_dataplane_decommission[0]
+    assert decommission_mock is not None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        cln_path = os.path.join(tmp_dir, "config")
+        original_lnd = "[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n"
+        with open(lnd_path, "w") as f:
+            f.write(original_lnd)
+
+        # 1. Kubernetes lookup timeout/error in K3S_MODE must reject restore before touching configs or decommissioning
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
+                patch("app._k8s_session.get", side_effect=requests.Timeout("k8s api timeout")):
+            res_k8s = client.post("/api/local/restore-node")
+
+        assert res_k8s.status_code == 500
+        err_k8s = json.loads(res_k8s.data)["error"]
+        assert "Failed to determine LND running state." in err_k8s
+        decommission_mock.assert_not_called()
+        with open(lnd_path, "r") as f:
+            assert f.read() == original_lnd
+
+        # 2. Docker lookup failure (docker_api -> None) must reject restore before touching configs or decommissioning
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", False), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.docker_api", return_value=None):
+            res_docker = client.post("/api/local/restore-node")
+
+        assert res_docker.status_code == 500
+        err_docker = json.loads(res_docker.data)["error"]
+        assert "Failed to determine LND running state." in err_docker
+        decommission_mock.assert_not_called()
+        with open(lnd_path, "r") as f:
+            assert f.read() == original_lnd
+
+        # 3. Confirmed stopped node (lookup succeeds with empty items) restores config and decommissions without restart
+        empty_k8s_resp = MagicMock()
+        empty_k8s_resp.status_code = 200
+        empty_k8s_resp.json.return_value = {"items": []}
+
+        def k8s_get_only_lnd_ns(url, **_kwargs):
+            if "/namespaces/bitcoin-lab/" in url:
+                return empty_k8s_resp
+            raise requests.HTTPError("403 Client Error: Forbidden for unused CLN namespace")
+
+        with patch.dict(os.environ, {"LND_K8S_SERVICE": "lnd", "CLN_K8S_SERVICE": ""}), \
+                patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.LND_K8S_NAMESPACE", "bitcoin-lab"), \
+                patch("app.CLN_K8S_NAMESPACE", "default"), \
+                patch("app.K8S_SA_TOKEN_PATH", "/dev/null"), \
+                patch("app._k8s_session.get", side_effect=k8s_get_only_lnd_ns), \
+                patch("app.restart_container_by_pattern") as mock_restart:
+            res_stopped = client.post("/api/local/restore-node")
+
+        assert res_stopped.status_code == 200
+        mock_restart.assert_not_called()
+        decommission_mock.assert_called_once()
+        with open(lnd_path, "r") as f:
+            assert "# externalhosts=de2.tunnelsats.com:35825\n" in f.read()
+
+
+
+def test_restore_node_fails_when_dataplane_decommission_fails(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        cln_path = os.path.join(tmp_dir, "config")
+        with open(lnd_path, "w") as f:
+            f.write("[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\n")
+
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.K3S_MODE", True), \
+                patch("app.SECURE_MODE", False), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.CLN_CONFIG_PATH", cln_path), \
+                patch("app.lnd_exists", return_value=True), \
+                patch("app.cln_exists", return_value=False), \
+                patch("app.restart_container_by_pattern", return_value=True), \
+                patch(
+                    "app.decommission_dataplane_and_wait",
+                    return_value=(False, {"error": "Timed out waiting for dataplane decommission."}),
+                ):
+            res = client.post("/api/local/restore-node")
+
+        assert res.status_code == 500
+        assert "Timed out waiting for dataplane decommission." in json.loads(res.data)["error"]
+
+
+def test_decommission_dataplane_and_wait_writes_trigger_and_reads_result(mock_dataplane_decommission):
+    original_decommission = mock_dataplane_decommission[1]
+    assert original_decommission is not None
+    result = {
+        "request_id": "decomm-1",
+        "decommissioned": True,
+        "state": {"decommissioned": True, "rules_synced": False, "last_error": None},
+    }
+    with patch("app.uuid.uuid4", return_value="decomm-1"), \
+            patch("app.ensure_decommission_dirs"), \
+            patch("app.atomic_write_text") as write_trigger, \
+            patch("app.read_decommission_result", return_value=result):
+        ok, detail = original_decommission(timeout=1)
+
+    assert ok is True
+    assert detail["decommissioned"] is True
+    write_trigger.assert_called_once()
+
+
+def test_restore_node_secure_mode_requires_confirmation_before_decommissioning_dataplane(
+    client, mock_dataplane_decommission, mock_target_reconcile
+):
+    decommission_mock = mock_dataplane_decommission[0]
+    reconcile_mock = mock_target_reconcile[0]
+    assert decommission_mock is not None
+    assert reconcile_mock is not None
+
+    with tempfile.TemporaryDirectory() as tmp_dir, \
+            patch("app.DATA_DIR", tmp_dir), \
+            patch("app.SECURE_MODE", True), \
+            patch("app.lnd_exists", return_value=True), \
+            patch("app.cln_exists", return_value=False):
+        meta_path = os.path.join(tmp_dir, app_module.META_FILE)
+        with open(meta_path, "w") as f:
+            json.dump({"vpnPort": 35825, "serverDomain": "de2.tunnelsats.com"}, f)
+
+        # 1. First restore request returns manual restore instructions without removing guards.
+        res1 = client.post("/api/local/restore-node")
+        assert res1.status_code == 200
+        payload1 = json.loads(res1.data)
+        assert payload1["manual_mode"] is True
+        assert payload1["requires_confirmation"] is True
+        assert payload1["decommissioned"] is False
+        assert len(payload1["targets"]) == 1
+        decommission_mock.assert_not_called()
+
+        # 2. Second restore request with confirmManualRestore=True removes guards after manual restore.
+        res2 = client.post(
+            "/api/local/restore-node",
+            json={"confirmManualRestore": True},
+        )
+        assert res2.status_code == 200
+        payload2 = json.loads(res2.data)
+        assert payload2["manual_mode"] is True
+        assert payload2["requires_confirmation"] is False
+        assert payload2["decommissioned"] is True
+        decommission_mock.assert_called_once()
+
+        # 3. Initial Secure Mode configure-node returns manual instructions without reconciling yet.
+        cfg1 = client.post("/api/local/configure-node", json={"nodeType": "lnd"})
+        assert cfg1.status_code == 200
+        cfg1_payload = json.loads(cfg1.data)
+        assert cfg1_payload["manual_mode"] is True
+        assert cfg1_payload["requires_confirmation"] is True
+        assert cfg1_payload["reconciled"] is False
+        reconcile_mock.assert_not_called()
+
+        # 4. Confirming manual setup reconciles target routing and guards.
+        cfg2 = client.post(
+            "/api/local/configure-node",
+            json={"nodeType": "lnd", "confirmManualConfigure": True},
+        )
+        assert cfg2.status_code == 200
+        cfg2_payload = json.loads(cfg2.data)
+        assert cfg2_payload["manual_mode"] is True
+        assert cfg2_payload["requires_confirmation"] is False
+        assert cfg2_payload["reconciled"] is True
+        reconcile_mock.assert_called_once_with("lnd")
+
+

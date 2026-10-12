@@ -11,14 +11,15 @@ LND (and/or CLN) node running in the same cluster.
 # 2. Deploy everything:
 kubectl apply -k k3s/
 
-# Remove everything again (safe — see "Uninstall" below):
+# 3. Before uninstalling, run "Restore Node Networking" in the UI
+#    (POST /api/local/restore-node), then remove the manifests (see "Uninstall" below):
 kubectl delete -k k3s/
 ```
 
 > [!IMPORTANT]
 > The most common setup failures are **namespace/RBAC**, **node co-location**
 > (multi-node clusters only), and **PVC mount paths**. Read the sections below
-> carefully — they cover the errors you are most likely to hit on a first
+> carefully - they cover the errors you are most likely to hit on a first
 > install.
 
 ## 1. Namespace & RBAC
@@ -185,7 +186,14 @@ currently assign client IPv6 addresses or provide IPv6 transit. On a dual-stack
 pod, the reconciler reads every address in Kubernetes `status.podIPs`, installs
 per-source IPv6 policy and fallback blackholes, and adds a tagged `ip6tables`
 drop for non-link-local egress. IPv6 cluster/ULA ranges are not bypassed by
-`K3S_BYPASS_CIDRS`; that setting remains IPv4-only. A missing IPv6 control sets
+`K3S_BYPASS_CIDRS`; that setting remains IPv4-only. For emergency node-level
+subnet quarantine when Kubernetes `NetworkPolicy` enforcement is unavailable on
+a dual-stack cluster, `K3S_IPV6_POD_CIDRS` supplies the cluster IPv6 pod CIDRs
+(left empty by default in `deployment.yaml` for IPv4-only clusters, with
+automatic detection of the node's local IPv6 pod subnet route and the standard
+k3s `2001:cafe:42::/56,fd00:10:42::/56` ranges). On dual-stack clusters, set
+`K3S_IPV6_POD_CIDRS` in `deployment.yaml` to your IPv6 `--cluster-cidr` (for
+example `2001:cafe:42::/56,fd00:10:42::/56`). A missing IPv6 control sets
 `ipv6_rules_synced: false` and prevents aggregate `rules_synced` protection.
 
 Cluster-internal destinations must be listed explicitly in
@@ -273,10 +281,31 @@ the config and its directory must be readable/writable by uid/gid 1000.)
 
 ## Uninstall
 
-`kubectl delete -k k3s/` removes only what these manifests
-create: the ServiceAccount, Role, RoleBinding, Service, Deployment, and the
-`tunnelsats-data` PVC. Your **LND/CLN PVC is never touched** — it is only
-*referenced* by `deployment.yaml`, not managed by this kustomization — so your
+By design, `SIGTERM` shutdown, container/pod restarts, and `Recreate`
+Deployment upgrades preserve fail-closed kernel policy routing (`ip rule`),
+`iptables`/`ip6tables` egress guards, and emergency `NetworkPolicy` containment
+on the node so the Lightning pod cannot leak traffic over clearnet while the
+TunnelSats pod is being replaced.
+
+Before deleting the Kubernetes manifests, you **must** decommission those
+node-level fail-closed guards and restore your Lightning node configuration:
+
+1. Open the TunnelSats web UI (or call `POST /api/local/restore-node`) and run
+   **Restore Node Networking** (**Disable Routing (Uninstall)**). This removes
+   the TunnelSats `externalhosts` / `announce-addr` directives, restarts the
+   Lightning pod, and instructs the privileged daemon to decommission its
+   node-level policy routing, firewall, IPv6, and emergency `NetworkPolicy`
+   guards.
+2. Once the restore operation succeeds, remove the Kubernetes manifests:
+
+```sh
+kubectl delete -k k3s/
+```
+
+`kubectl delete -k k3s/` removes only what these manifests create: the
+ServiceAccount, Role, RoleBinding, Service, Deployment, and the
+`tunnelsats-data` PVC. Your **LND/CLN PVC is never touched** - it is only
+*referenced* by `deployment.yaml`, not managed by this kustomization - so your
 `lnd.conf` and channel state are safe.
 
 Verify a clean removal:

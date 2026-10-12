@@ -40,6 +40,7 @@ def test_k3s_manifest_exposes_tunnelsats_node_name_to_runtime():
     }
     assert env["LND_K8S_POD_SELECTOR"]["value"] == "app=lnd"
     assert env["K3S_BYPASS_CIDRS"]["value"] == "10.42.0.0/16,10.43.0.0/16"
+    assert env["K3S_IPV6_POD_CIDRS"]["value"] == ""
 
 
 def test_k3s_role_can_install_last_resort_network_policy():

@@ -48,25 +48,25 @@ When TunnelSats detects CLN, it handles two distinct ports:
 - **Internal (9736):** This is the local bind port required by the Umbrel architecture. It is used for local communication inside the Docker network.
 - **External (VPN Port):** This is the port assigned by your TunnelSats subscription (e.g., 39486). This port is gossiped to the network so other nodes can reach you.
 
-TunnelSats handles this mapping automatically—you do not need to manually change your CLN `bind-addr`.
+TunnelSats handles this mapping automatically - you do not need to manually change your CLN `bind-addr`.
 
 ### 6. How do I safely uninstall the TunnelSats App on Umbrel?
 
-To prevent network routing issues with your Lightning node, you must perform a **two-step uninstall process**. 
+To prevent network routing issues with your Lightning node, you must perform a **two-step uninstall process**.
 
-Because of how Umbrel isolates applications, simply clicking "Uninstall" in the Umbrel App Store immediately kills the TunnelSats background processes. If this happens while your node is still actively routing through the VPN, your Lightning node (LND/CLN) will be left trying to broadcast a VPN IP address that no longer exists, resulting in lost connections and gossip failures.
+By design, normal `SIGTERM` shutdowns, container or pod restarts, and `Recreate` upgrades preserve fail-closed kernel policy routing, `iptables` egress guards, and IPv6 containment on the host/node so your Lightning node cannot leak traffic over clearnet while the TunnelSats daemon is restarting. Because stopping the container intentionally leaves fail-closed protection active, clicking "Uninstall" in the Umbrel App Store without first running **Restore Node Networking** (`POST /api/local/restore-node`) will leave your Lightning node (LND/CLN) blocked by the host/node fail-closed kill switch and still configured to advertise your VPN address.
 
 Please follow these exact steps to safely remove TunnelSats:
 
-#### Step 1: Disconnect within the TunnelSats App
-First, we must safely detach the VPN from your Lightning node and return it to its default Tor/Clearnet state.
+#### Step 1: Restore Node Networking within the TunnelSats App
+First, we must safely detach the VPN from your Lightning node, restore its configuration, and decommission the host/node fail-closed guards.
 1. Open the **TunnelSats App** from your Umbrel dashboard.
 2. Locate the **Node Routing Status** section.
-3. Click the **Disable Routing (Uninstall)** button.
-4. Wait for the UI to confirm that your node has been successfully restored to its default routing state.
+3. Click the **Disable Routing (Uninstall)** / **Restore Node Networking** button (which calls `POST /api/local/restore-node`).
+4. Wait for the UI to confirm that your node configuration has been restored, your Lightning node has restarted, and the host/node fail-closed dataplane rules have been decommissioned.
 
 #### Step 2: Uninstall via the Umbrel App Store
-Once TunnelSats is disconnected from your node, you can safely remove the app itself.
+Once TunnelSats has decommissioned its fail-closed guards and disconnected from your node, you can safely remove the app itself.
 1. Go to the **Umbrel App Store**.
 2. Navigate to your installed apps and locate TunnelSats.
 3. Click **Uninstall**.
@@ -78,10 +78,10 @@ Once TunnelSats is disconnected from your node, you can safely remove the app it
 
 ### Troubleshooting: I uninstalled via the App Store first, and now my node is offline!
 
-If you skipped Step 1, your LND or CLN configuration file still contains the TunnelSats `externalhosts` or `announce-addr` directives, but the VPN tunnel is dead. Your traffic is effectively being sent into a black hole.
+If you skipped Step 1, TunnelSats's fail-closed host/node routing and firewall guards remain active (as designed for crash/restart protection), and your LND or CLN configuration file still contains the TunnelSats `externalhosts` or `announce-addr` directives while the VPN tunnel is gone.
 
 **How to fix it:**
-1. **The Easy Way:** Go back to the Umbrel App Store and **Reinstall** the TunnelSats app. Open it, ensure the VPN connects, and then follow the safe two-step process above.
-2. **The Manual Way (Advanced):** Connect to your Umbrel via SSH and manually remove the orphaned TunnelSats lines from your node's configuration files:
+1. **The Easy Way:** Go back to the Umbrel App Store and **Reinstall** the TunnelSats app. Open it, and then run **Disable Routing (Uninstall)** / **Restore Node Networking** in Step 1 above before uninstalling.
+2. **The Manual Way (Advanced):** Connect to your Umbrel via SSH, reboot or flush the residual `tunnelsats` routing/firewall rules after removing the orphaned TunnelSats lines from your node's configuration files:
    * **For LND:** Edit `~/umbrel/app-data/lightning/data/lnd/lnd.conf` and delete or comment out the `externalhosts=` line. Then restart LND.
    * **For CLN:** Edit `~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config` and delete or comment out the `announce-addr=` line. Then restart CLN.
