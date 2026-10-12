@@ -5386,14 +5386,52 @@ ensure_k3s_dns_protection
 k3s_dns_protection_is_synced
 [[ "${V6_INPUT}" == "" ]]
 [[ "${V6_FORWARD}" == "" ]]
-[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.0.0/16 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
-[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.0.0/16 ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.0.0/16 -i cni+ -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.0.0/16 -i cni+ ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+
+# Multi-node CNI routing table narrows unknown-pod DNS guard to local node pod CIDR (10.42.1.0/24) and local bridge (cni0)
+ip() {
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cni0 src 10.42.1.1 uid 0\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]] || [[ "${1:-}" == "route" && "${2:-}" == "show" ]]; then
+        cat <<'EOF_ROUTES'
+default via 192.168.1.1 dev eth0
+10.42.0.0/24 via 10.42.0.0 dev flannel.1 onlink
+10.42.1.0/24 dev cni0 proto kernel scope link src 10.42.1.1
+10.42.2.0/24 via 10.42.2.0 dev flannel.1 onlink
+EOF_ROUTES
+        return 0
+    fi
+    return 0
+}
+[[ "$(resolve_k3s_local_pod_cidrs "10.42.1.7")" == "10.42.1.0/24" ]]
+[[ "$(resolve_k3s_local_pod_interfaces "10.42.1.7")" == "cni0" ]]
 
 TARGET_IPV6_MACS=("02:42:0a:2a:01:07")
 ensure_k3s_dns_protection
 k3s_dns_protection_is_synced
+[[ "${FILTER_INPUT}" != *"-s 10.42.0.0/16"* ]]
+[[ "${FILTER_FORWARD}" != *"-s 10.42.0.0/16"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.0/24 -i cni0 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.0/24 -i cni0 ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
 [[ "${V6_INPUT}" == *"-A INPUT -m mac --mac-source 02:42:0a:2a:01:07 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
 [[ "${V6_FORWARD}" == *"-A FORWARD -m mac --mac-source 02:42:0a:2a:01:07 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+
+# Per-pod veth CNI (Calico) normalizes interface to cali+ wildcard
+ip() {
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cali9f8e7d scope link src 192.168.1.10\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]]; then
+        printf '10.42.1.7 dev cali9f8e7d scope link\n10.42.2.0/24 via 192.168.1.12 dev tunl0 proto bird onlink\n'
+        return 0
+    fi
+    return 0
+}
+[[ "$(resolve_k3s_local_pod_interfaces "10.42.1.7")" == "cali+" ]]
 
 # 4. Proxy startup failures preserve stderr diagnostics in K3S_DNS_PROXY_LOG_FILE and LAST_ERROR
 BAD_PROXY_SCRIPT="$(mktemp)"

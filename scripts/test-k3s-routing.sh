@@ -509,13 +509,17 @@ if [ "${direct_clear_res}" != "0:198.51.100.77" ]; then
     echo "FAIL: direct clearnet DNS query to 192.0.2.2:53 was not redirected to VPN DNS (${direct_clear_res})" >&2
     exit 1
 fi
-# Verify that an undiscovered replacement pod IP (10.42.1.11) in the pod CIDR
+# Verify that an undiscovered replacement pod IP (10.42.1.11) in the local pod CIDR
 # cannot reach CoreDNS (10.43.0.10:53) before its IP appears in the watch stream,
-# while a verified non-target pod (10.42.1.50 with MAC-bound fwmark) retains
-# direct CoreDNS access.
+# while both a verified local non-target pod (10.42.1.50 with MAC-bound fwmark)
+# and a remote pod on another node (10.42.2.15 arriving via clear0 without fwmark)
+# retain direct CoreDNS access.
 ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
 ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
 ip -n "${ROUTER_NS}" neigh replace 10.42.1.50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+ip -n "${CLEAR_NS}" addr add 10.42.2.15/24 dev clear-peer
+ip -n "${CLEAR_NS}" route add 10.43.0.0/16 via 192.0.2.1 dev clear-peer src 10.42.2.15
+ip -n "${ROUTER_NS}" route add 10.42.2.0/24 via 192.0.2.2 dev clear0
 if pod_dns_query udp 10.43.0.10 nodes.lightning.directory 10.42.1.11 >/dev/null 2>&1; then
     echo "FAIL: unseen replacement pod IP 10.42.1.11 bypassed DNS protection via CoreDNS" >&2
     exit 1
@@ -525,6 +529,32 @@ if [ "${non_target_dns_res}" != "0:10.43.0.1" ]; then
     echo "FAIL: verified non-target pod IP 10.42.1.50 lost CoreDNS access (${non_target_dns_res})" >&2
     exit 1
 fi
+remote_pod_dns_res="$(
+    ip netns exec "${CLEAR_NS}" python3 -c '
+import socket, struct
+pkt = struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+for label in "kubernetes.default.svc.cluster.local".split("."):
+    pkt += bytes([len(label)]) + label.encode("ascii")
+pkt += b"\x00" + struct.pack("!HH", 1, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.0)
+s.bind(("10.42.2.15", 0))
+s.sendto(pkt, ("10.43.0.10", 53))
+resp, _ = s.recvfrom(4096)
+s.close()
+_, flags, _, ancount, _, _ = struct.unpack("!HHHHHH", resp[:12])
+rcode = flags & 0x000F
+ip_str = socket.inet_ntoa(resp[-4:]) if rcode == 0 and ancount >= 1 else ""
+print(f"{rcode}:{ip_str}")
+'
+)"
+if [ "${remote_pod_dns_res}" != "0:10.43.0.1" ]; then
+    echo "FAIL: remote node pod 10.42.2.15 lost CoreDNS access (${remote_pod_dns_res})" >&2
+    exit 1
+fi
+ip -n "${ROUTER_NS}" route del 10.42.2.0/24 via 192.0.2.2 dev clear0
+ip -n "${CLEAR_NS}" route del 10.43.0.0/16 via 192.0.2.1 dev clear-peer src 10.42.2.15
+ip -n "${CLEAR_NS}" addr del 10.42.2.15/24 dev clear-peer
 ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
 ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
 if grep -Fq "nodes.lightning.directory" "${CLUSTER_DNS_LOG_TMP}" 2>/dev/null; then
