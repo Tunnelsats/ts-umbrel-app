@@ -5433,7 +5433,8 @@ ip() {
 }
 [[ "$(resolve_k3s_local_pod_interfaces "10.42.1.7")" == "cali+" ]]
 
-# 4. Proxy startup failures preserve stderr diagnostics in K3S_DNS_PROXY_LOG_FILE and LAST_ERROR
+# 4. Proxy startup failures preserve stderr diagnostics in K3S_DNS_PROXY_LOG_FILE and LAST_ERROR,
+# while ensure_k3s_dns_protection still installs fail-closed DNS/DoT guard rules and strips stale PREROUTING redirects.
 BAD_PROXY_SCRIPT="$(mktemp)"
 cat > "${BAD_PROXY_SCRIPT}" <<'EOF_BAD_PROXY'
 import sys
@@ -5444,12 +5445,63 @@ K3S_DNS_PROXY_SCRIPT="${BAD_PROXY_SCRIPT}"
 K3S_DNS_PROXY_PID_FILE="$(mktemp -u)"
 K3S_DNS_PROXY_LOG_FILE="$(mktemp)"
 K3S_DNS_ENFORCE_PROXY_PROCESS="true"
-if ensure_k3s_dns_proxy_running; then
+FILTER_INPUT=""
+FILTER_FORWARD=""
+V6_INPUT=""
+V6_FORWARD=""
+NAT_PREROUTING=$'-A PREROUTING -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns -j REDIRECT --to-ports 15353\n'
+if ensure_k3s_dns_protection; then
     exit 1
 fi
 [[ "${LAST_ERROR}" == *"Address already in use"* ]]
 grep -Fq "Address already in use" "${K3S_DNS_PROXY_LOG_FILE}"
+[[ "${NAT_PREROUTING}" == "" ]]
+[[ "${FILTER_INPUT}" != *"tunnelsats-k3s-dns-in"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${V6_INPUT}" == *"-A INPUT -m mac --mac-source 02:42:0a:2a:01:07 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
 rm -f "${BAD_PROXY_SCRIPT}" "${K3S_DNS_PROXY_LOG_FILE}" "${K3S_DNS_PROXY_PID_FILE}" "${K3S_DNS_PROXY_PID_FILE}.args"
+
+# 5. cleanup_k3s_dns_protection "true" (--keep-tunnel) removes nat PREROUTING redirect and proxy INPUT rules
+# while preserving fail-closed tunnelsats-k3s-dns-guard and tunnelsats-k3s-ipv6-dns-guard rules.
+K3S_DNS_ENFORCE_PROXY_PROCESS="false"
+ensure_k3s_dns_protection
+[[ "${NAT_PREROUTING}" == *"tunnelsats-k3s-dns"* ]]
+[[ "${FILTER_INPUT}" == *"tunnelsats-k3s-dns-in"* ]]
+cleanup_k3s_dns_protection "true"
+[[ "${NAT_PREROUTING}" == "" ]]
+[[ "${FILTER_INPUT}" != *"tunnelsats-k3s-dns-in"* ]]
+[[ "${FILTER_INPUT}" == *"tunnelsats-k3s-dns-guard"* ]]
+[[ "${FILTER_FORWARD}" == *"tunnelsats-k3s-dns-guard"* ]]
+[[ "${V6_INPUT}" == *"tunnelsats-k3s-ipv6-dns-guard"* ]]
+
+# 6. k3s_dns_protection_is_synced verifies the oif ${WG_IFACE} lookup 51820 rule when K3S_DNS_ENFORCE_OIF_RULE=true
+OIF_RULE_PRESENT="1"
+ip() {
+    if [[ "${1:-}" == "rule" && "${2:-}" == "show" ]]; then
+        if [[ "${OIF_RULE_PRESENT}" == "1" ]]; then
+            printf '32764:\tfrom all oif tunnelsatsv2 lookup 51820\n'
+        fi
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cni0 src 10.42.1.1 uid 0\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]]; then
+        printf '10.42.1.0/24 dev cni0 proto kernel scope link src 10.42.1.1\n'
+        return 0
+    fi
+    return 0
+}
+K3S_DNS_ENFORCE_OIF_RULE="true"
+ensure_k3s_dns_protection
+k3s_dns_protection_is_synced
+OIF_RULE_PRESENT="0"
+if k3s_dns_protection_is_synced; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Tunnel oif policy rule"* ]]
 '''
     )
     assert result.returncode == 0, result.stderr

@@ -7234,56 +7234,8 @@ ensure_k3s_dns_protection() {
         local_pod_ifaces="cni+"
     fi
 
-    if ! ensure_k3s_dns_oif_policy_rule; then
-        return 1
-    fi
-    if ! ensure_k3s_dns_proxy_running; then
-        return 1
-    fi
-    if [ "${K3S_DNS_CHANGED}" = "1" ]; then
-        changed=1
-    fi
-
-    local need_nat_sync=0
-    if ! iptables -t nat -C PREROUTING -s "${target_ip}" -p udp --dport 53 \
-        -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}" 2>/dev/null || \
-       ! iptables -t nat -C PREROUTING -s "${target_ip}" -p tcp --dport 53 \
-        -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}" 2>/dev/null || \
-       ! k3s_nat_dns_rules_precede_kube_services "${target_ip}"; then
-        need_nat_sync=1
-    fi
-
-    local stale_nat_count
-    stale_nat_count="$(iptables -t nat -S PREROUTING 2>/dev/null | grep "tunnelsats-k3s-dns" | grep -vcF -- "-s ${target_ip}" || true)"
-    if [ "${stale_nat_count}" -gt 0 ]; then
-        need_nat_sync=1
-    fi
-
-    if [ "${need_nat_sync}" -eq 1 ]; then
-        remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
-        if ! iptables -t nat -I PREROUTING 1 -s "${target_ip}" -p tcp --dport 53 \
-            -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}"; then
-            LAST_ERROR="k3s: Failed to add TCP DNS interception rule for ${target_ip}"
-            return 1
-        fi
-        if ! iptables -t nat -I PREROUTING 1 -s "${target_ip}" -p udp --dport 53 \
-            -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}"; then
-            LAST_ERROR="k3s: Failed to add UDP DNS interception rule for ${target_ip}"
-            return 1
-        fi
-        changed=1
-    fi
-
-    local need_input_sync=0
-    if ! iptables -C INPUT -s "${target_ip}" -p udp --dport "${K3S_DNS_PROXY_PORT}" \
-        -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT 2>/dev/null || \
-       ! iptables -C INPUT -s "${target_ip}" -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
-        -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT 2>/dev/null || \
-       ! iptables -C INPUT ! -s "${target_ip}" ! -i lo -p udp --dport "${K3S_DNS_PROXY_PORT}" \
-        -m comment --comment "tunnelsats-k3s-dns-in" -j DROP 2>/dev/null || \
-       ! iptables -C INPUT ! -s "${target_ip}" ! -i lo -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
-        -m comment --comment "tunnelsats-k3s-dns-in" -j DROP 2>/dev/null || \
-       ! iptables -C INPUT -s "${target_ip}" -p udp --dport 53 \
+    local need_input_guard_sync=0
+    if ! iptables -C INPUT -s "${target_ip}" -p udp --dport 53 \
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
        ! iptables -C INPUT -s "${target_ip}" -p tcp --dport 53 \
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
@@ -7291,7 +7243,7 @@ ensure_k3s_dns_protection() {
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
        ! iptables -C INPUT -s "${target_ip}" -p tcp --dport 853 \
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
-        need_input_sync=1
+        need_input_guard_sync=1
     fi
     while IFS= read -r pod_cidr; do
         [ -n "${pod_cidr}" ] || continue
@@ -7306,19 +7258,18 @@ ensure_k3s_dns_protection() {
                 -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
                ! iptables -C INPUT -s "${pod_cidr}" -i "${pod_iface}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
                 -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
-                need_input_sync=1
+                need_input_guard_sync=1
             fi
         done <<< "${local_pod_ifaces}"
     done <<< "${matched_pod_cidrs}"
     while IFS= read -r rule_line; do
         [ -n "${rule_line}" ] || continue
         if ! k3s_ipv4_dns_rule_is_current "${rule_line}" "${target_ip}" "${matched_pod_cidrs}" "${local_pod_ifaces}"; then
-            need_input_sync=1
+            need_input_guard_sync=1
             break
         fi
-    done < <(iptables -S INPUT 2>/dev/null | grep -E "tunnelsats-k3s-dns-(in|guard)" || true)
-    if [ "${need_input_sync}" -eq 1 ]; then
-        remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
+    done < <(iptables -S INPUT 2>/dev/null | grep "tunnelsats-k3s-dns-guard" || true)
+    if [ "${need_input_guard_sync}" -eq 1 ]; then
         remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-guard"
         while IFS= read -r pod_cidr; do
             [ -n "${pod_cidr}" ] || continue
@@ -7345,16 +7296,8 @@ ensure_k3s_dns_protection() {
            ! iptables -I INPUT 1 -s "${target_ip}" -p tcp --dport 53 \
             -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
            ! iptables -I INPUT 1 -s "${target_ip}" -p udp --dport 53 \
-            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
-           ! iptables -I INPUT 1 ! -s "${target_ip}" ! -i lo -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
-            -m comment --comment "tunnelsats-k3s-dns-in" -j DROP || \
-           ! iptables -I INPUT 1 ! -s "${target_ip}" ! -i lo -p udp --dport "${K3S_DNS_PROXY_PORT}" \
-            -m comment --comment "tunnelsats-k3s-dns-in" -j DROP || \
-           ! iptables -I INPUT 1 -s "${target_ip}" -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
-            -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT || \
-           ! iptables -I INPUT 1 -s "${target_ip}" -p udp --dport "${K3S_DNS_PROXY_PORT}" \
-            -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT; then
-            LAST_ERROR="k3s: Failed to add DNS INPUT rules for ${target_ip}"
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP; then
+            LAST_ERROR="k3s: Failed to add DNS INPUT guard rules for ${target_ip}"
             return 1
         fi
         changed=1
@@ -7505,6 +7448,87 @@ ensure_k3s_dns_protection() {
         done
     fi
 
+    if ! ensure_k3s_dns_oif_policy_rule || ! ensure_k3s_dns_proxy_running; then
+        remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
+        remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
+        flush_k3s_target_dns_conntrack "${target_ip}"
+        return 1
+    fi
+    if [ "${K3S_DNS_CHANGED}" = "1" ]; then
+        changed=1
+    fi
+
+    local need_input_in_sync=0
+    if ! iptables -C INPUT -s "${target_ip}" -p udp --dport "${K3S_DNS_PROXY_PORT}" \
+        -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT 2>/dev/null || \
+       ! iptables -C INPUT -s "${target_ip}" -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
+        -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT 2>/dev/null || \
+       ! iptables -C INPUT ! -s "${target_ip}" ! -i lo -p udp --dport "${K3S_DNS_PROXY_PORT}" \
+        -m comment --comment "tunnelsats-k3s-dns-in" -j DROP 2>/dev/null || \
+       ! iptables -C INPUT ! -s "${target_ip}" ! -i lo -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
+        -m comment --comment "tunnelsats-k3s-dns-in" -j DROP 2>/dev/null; then
+        need_input_in_sync=1
+    fi
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        if ! k3s_ipv4_dns_rule_is_current "${rule_line}" "${target_ip}" "${matched_pod_cidrs}" "${local_pod_ifaces}"; then
+            need_input_in_sync=1
+            break
+        fi
+    done < <(iptables -S INPUT 2>/dev/null | grep "tunnelsats-k3s-dns-in" || true)
+    if [ "${need_input_in_sync}" -eq 1 ]; then
+        remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
+        if ! iptables -I INPUT 1 ! -s "${target_ip}" ! -i lo -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
+            -m comment --comment "tunnelsats-k3s-dns-in" -j DROP || \
+           ! iptables -I INPUT 1 ! -s "${target_ip}" ! -i lo -p udp --dport "${K3S_DNS_PROXY_PORT}" \
+            -m comment --comment "tunnelsats-k3s-dns-in" -j DROP || \
+           ! iptables -I INPUT 1 -s "${target_ip}" -p tcp --dport "${K3S_DNS_PROXY_PORT}" \
+            -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT || \
+           ! iptables -I INPUT 1 -s "${target_ip}" -p udp --dport "${K3S_DNS_PROXY_PORT}" \
+            -m comment --comment "tunnelsats-k3s-dns-in" -j ACCEPT; then
+            remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
+            remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
+            flush_k3s_target_dns_conntrack "${target_ip}"
+            LAST_ERROR="k3s: Failed to add DNS proxy INPUT listener rules for ${target_ip}"
+            return 1
+        fi
+        changed=1
+    fi
+
+    local need_nat_sync=0
+    if ! iptables -t nat -C PREROUTING -s "${target_ip}" -p udp --dport 53 \
+        -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}" 2>/dev/null || \
+       ! iptables -t nat -C PREROUTING -s "${target_ip}" -p tcp --dport 53 \
+        -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}" 2>/dev/null || \
+       ! k3s_nat_dns_rules_precede_kube_services "${target_ip}"; then
+        need_nat_sync=1
+    fi
+
+    local stale_nat_count
+    stale_nat_count="$(iptables -t nat -S PREROUTING 2>/dev/null | grep "tunnelsats-k3s-dns" | grep -vcF -- "-s ${target_ip}" || true)"
+    if [ "${stale_nat_count}" -gt 0 ]; then
+        need_nat_sync=1
+    fi
+
+    if [ "${need_nat_sync}" -eq 1 ]; then
+        remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
+        if ! iptables -t nat -I PREROUTING 1 -s "${target_ip}" -p tcp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}"; then
+            remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
+            flush_k3s_target_dns_conntrack "${target_ip}"
+            LAST_ERROR="k3s: Failed to add TCP DNS interception rule for ${target_ip}"
+            return 1
+        fi
+        if ! iptables -t nat -I PREROUTING 1 -s "${target_ip}" -p udp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns" -j REDIRECT --to-ports "${K3S_DNS_PROXY_PORT}"; then
+            remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
+            flush_k3s_target_dns_conntrack "${target_ip}"
+            LAST_ERROR="k3s: Failed to add UDP DNS interception rule for ${target_ip}"
+            return 1
+        fi
+        changed=1
+    fi
+
     if [ "${changed}" -eq 1 ]; then
         flush_k3s_target_dns_conntrack "${target_ip}"
     fi
@@ -7570,6 +7594,19 @@ k3s_dns_protection_is_synced() {
     local_pod_ifaces="$(resolve_k3s_local_pod_interfaces "${DOCKER_TARGET_IP}" 2>/dev/null || true)"
     if [ -z "${local_pod_ifaces}" ]; then
         local_pod_ifaces="cni+"
+    fi
+
+    if [ "${K3S_DNS_ENFORCE_OIF_RULE:-false}" = "true" ] || \
+       { ! declare -F ip >/dev/null 2>&1 && ! declare -F iptables >/dev/null 2>&1; }; then
+        local existing_oif_rules
+        existing_oif_rules="$(ip rule show pref "${K3S_TUNNEL_RULE_PREF}" 2>/dev/null || true)"
+        if ! grep -Fq -- "oif ${WG_IFACE} lookup 51820" <<< "${existing_oif_rules}" && \
+           ! grep -Fq -- "oif ${WG_IFACE} table 51820" <<< "${existing_oif_rules}"; then
+            DNS_PROTECTED="false"
+            LAST_ERROR="k3s: Tunnel oif policy rule for ${WG_IFACE} is missing"
+            log WARN "rules_are_synced: ${LAST_ERROR}"
+            return 1
+        fi
     fi
 
     if { [ "${K3S_DNS_ENFORCE_PROXY_PROCESS:-false}" = "true" ] || ! declare -F iptables >/dev/null 2>&1; } && \
@@ -7732,17 +7769,17 @@ cleanup_k3s_dns_protection() {
     local keep_tunnel="${1:-false}"
 
     stop_k3s_dns_proxy
+    remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
     remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
+    flush_k3s_target_dns_conntrack "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}"
     DNS_PROTECTED="false"
 
     if [ "${keep_tunnel}" != "false" ]; then
         return 0
     fi
 
-    remove_tagged_iptables_rules nat PREROUTING "tunnelsats-k3s-dns"
     remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-guard"
     remove_tagged_iptables_rules filter FORWARD "tunnelsats-k3s-dns-guard"
-    flush_k3s_target_dns_conntrack "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}"
 
     if command -v ip6tables >/dev/null 2>&1; then
         local chain=""
