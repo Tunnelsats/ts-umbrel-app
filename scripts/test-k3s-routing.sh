@@ -23,10 +23,25 @@ K3S_POLICY_STATE="/tmp/tunnelsats-k3s-policy-${TEST_SUFFIX}.json"
 K3S_PROTOCOL_STATE="/tmp/tunnelsats-k3s-protocol-${TEST_SUFFIX}"
 DECOMMISSION_STATE="/tmp/tunnelsats-decommissioned-${TEST_SUFFIX}.json"
 STATE_FILE_TMP="/tmp/tunnelsats-state-${TEST_SUFFIX}.json"
+K3S_DNS_PROXY_PID_TMP="/tmp/tunnelsats-k3s-dns-proxy-${TEST_SUFFIX}.pid"
+K3S_DNS_PROXY_LOG_TMP="/tmp/tunnelsats-k3s-dns-proxy-${TEST_SUFFIX}.log"
+DNS_MOCK_PIDS=()
 
 cleanup() {
     local namespace
     local link
+    local pid
+    if [ -f "${K3S_DNS_PROXY_PID_TMP}" ]; then
+        pid="$(cat "${K3S_DNS_PROXY_PID_TMP}" 2>/dev/null || true)"
+        if [ -n "${pid}" ]; then
+            kill "${pid}" >/dev/null 2>&1 || true
+        fi
+    fi
+    for pid in "${DNS_MOCK_PIDS[@]:-}"; do
+        if [ -n "${pid}" ]; then
+            kill "${pid}" >/dev/null 2>&1 || true
+        fi
+    done
     for link in \
         "${POD_ROUTER_TMP}" "${POD_TMP}" \
         "${VPN_ROUTER_TMP}" "${VPN_TMP}" \
@@ -41,7 +56,8 @@ cleanup() {
         "${K3S_POLICY_STATE}" "${K3S_POLICY_STATE}.tmp."* \
         "${K3S_PROTOCOL_STATE}" "${K3S_PROTOCOL_STATE}.tmp."* \
         "${DECOMMISSION_STATE}" "${DECOMMISSION_STATE}.tmp."* \
-        "${STATE_FILE_TMP}" "${STATE_FILE_TMP}.tmp."*
+        "${STATE_FILE_TMP}" "${STATE_FILE_TMP}.tmp."* \
+        "${K3S_DNS_PROXY_PID_TMP}" "${K3S_DNS_PROXY_LOG_TMP}"
 }
 trap cleanup EXIT
 
@@ -344,6 +360,213 @@ ip -n "${POD_NS}" -6 addr del 2001:db8:42::50/64 dev pod0
 ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
 ip -n "${POD_NS}" -6 addr del 2001:db8:42::11/64 dev pod0
 
+# Verify k3s split-horizon DNS protection: cluster-local names resolve via
+# cluster DNS (10.43.0.10:53), while external names queried against the cluster
+# DNS service IP (inside 10.43.0.0/16 K3S_BYPASS_CIDRS) or clearnet DNS are
+# intercepted before KUBE-SERVICES and routed through tunnelsatsv2 to VPN DNS
+# (10.9.0.1:53) without ever reaching cluster DNS or clearnet DNS.
+CLUSTER_DNS_LOG_TMP="/tmp/tunnelsats-cluster-dns-${TEST_SUFFIX}.log"
+VPN_DNS_LOG_TMP="/tmp/tunnelsats-vpn-dns-${TEST_SUFFIX}.log"
+CLEAR_DNS_LOG_TMP="/tmp/tunnelsats-clear-dns-${TEST_SUFFIX}.log"
+rm -f "${CLUSTER_DNS_LOG_TMP}" "${VPN_DNS_LOG_TMP}" "${CLEAR_DNS_LOG_TMP}"
+ip -n "${ROUTER_NS}" addr add 10.43.0.10/32 dev lo
+ip netns exec "${ROUTER_NS}" iptables -t nat -N KUBE-SERVICES 2>/dev/null || true
+ip netns exec "${ROUTER_NS}" iptables -t nat -A PREROUTING -j KUBE-SERVICES
+
+start_mock_dns_responder() {
+    local ns="$1"
+    local bind_ip="$2"
+    local answer_ip="$3"
+    local log_file="$4"
+    ip netns exec "${ns}" python3 -c '
+import socket, struct, sys, threading
+from pathlib import Path
+sys.path.insert(0, "'"${REPO_ROOT}"'/server")
+import k3s_dns_proxy as p
+
+bind_ip, answer_ip, log_file = sys.argv[1], sys.argv[2], sys.argv[3]
+ans_bytes = socket.inet_aton(answer_ip)
+
+def build_reply(raw):
+    txid, flags, qd, _, _, _ = struct.unpack("!HHHHHH", raw[:12])
+    qname, end_off = p.decode_qname(raw, 12)
+    with open(log_file, "a", encoding="utf-8") as fh:
+        fh.write(f"{qname}\n")
+    question = raw[12:end_off + 4]
+    resp_hdr = struct.pack("!HHHHHH", txid, 0x8180, 1, 1, 0, 0)
+    rr = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + ans_bytes
+    return resp_hdr + question + rr
+
+udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+udp_sock.bind((bind_ip, 53))
+
+tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp_sock.bind((bind_ip, 53))
+tcp_sock.listen(16)
+
+def serve_udp():
+    while True:
+        data, addr = udp_sock.recvfrom(4096)
+        udp_sock.sendto(build_reply(data), addr)
+
+def serve_tcp():
+    while True:
+        conn, _ = tcp_sock.accept()
+        with conn:
+            hdr = conn.recv(2)
+            if len(hdr) < 2:
+                continue
+            (length,) = struct.unpack("!H", hdr)
+            data = conn.recv(length)
+            reply = build_reply(data)
+            conn.sendall(struct.pack("!H", len(reply)) + reply)
+
+threading.Thread(target=serve_udp, daemon=True).start()
+threading.Thread(target=serve_tcp, daemon=True).start()
+threading.Event().wait()
+' "${bind_ip}" "${answer_ip}" "${log_file}" >/dev/null 2>&1 &
+    DNS_MOCK_PIDS+=("$!")
+}
+
+start_mock_dns_responder "${ROUTER_NS}" "10.43.0.10" "10.43.0.1" "${CLUSTER_DNS_LOG_TMP}"
+start_mock_dns_responder "${VPN_NS}" "10.9.0.1" "198.51.100.77" "${VPN_DNS_LOG_TMP}"
+start_mock_dns_responder "${CLEAR_NS}" "192.0.2.2" "192.0.2.99" "${CLEAR_DNS_LOG_TMP}"
+sleep 0.2
+
+# shellcheck disable=SC2016
+ip netns exec "${ROUTER_NS}" env \
+    ENTRYPOINT_PATH="${REPO_ROOT}/scripts/entrypoint.sh" \
+    IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE}" \
+    K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
+    K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
+    K3S_DNS_PROXY_SCRIPT="${REPO_ROOT}/server/k3s_dns_proxy.py" \
+    K3S_DNS_PROXY_PID_FILE="${K3S_DNS_PROXY_PID_TMP}" \
+    K3S_DNS_PROXY_LOG_FILE="${K3S_DNS_PROXY_LOG_TMP}" \
+    bash -c '
+        source "${ENTRYPOINT_PATH}"
+        K3S_MODE="true"
+        SECURE_MODE="false"
+        DOCKER_TARGET_IP="10.42.1.7"
+        WG_IFACE="tunnelsatsv2"
+        K3S_CLUSTER_DNS_IP="10.43.0.10"
+        K3S_VPN_DNS="10.9.0.1"
+        ensure_k3s_dns_protection "10.42.1.7"
+        k3s_dns_protection_is_synced "10.42.1.7"
+    '
+
+pod_dns_query() {
+    local proto="$1"
+    local server_ip="$2"
+    local qname="$3"
+    local src_ip="${4:-10.42.1.7}"
+    ip netns exec "${POD_NS}" python3 -c '
+import socket, struct, sys
+proto, server_ip, qname, src_ip = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+labels = b"".join(bytes([len(p)]) + p.encode("ascii") for p in qname.split(".")) + b"\x00"
+pkt = struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", 1, 1)
+if proto == "udp":
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1.0)
+    s.bind((src_ip, 0))
+    s.sendto(pkt, (server_ip, 53))
+    resp, _ = s.recvfrom(4096)
+    s.close()
+else:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    s.bind((src_ip, 0))
+    s.connect((server_ip, 53))
+    s.sendall(struct.pack("!H", len(pkt)) + pkt)
+    (rlen,) = struct.unpack("!H", s.recv(2))
+    resp = s.recv(rlen)
+    s.close()
+_, flags, _, ancount, _, _ = struct.unpack("!HHHHHH", resp[:12])
+rcode = flags & 0x000F
+ip_str = socket.inet_ntoa(resp[-4:]) if rcode == 0 and ancount >= 1 else ""
+print(f"{rcode}:{ip_str}")
+' "${proto}" "${server_ip}" "${qname}" "${src_ip}"
+}
+
+cluster_dns_res="$(pod_dns_query udp 10.43.0.10 kubernetes.default.svc.cluster.local)"
+if [ "${cluster_dns_res}" != "0:10.43.0.1" ]; then
+    echo "FAIL: cluster-local DNS query did not resolve via cluster DNS (${cluster_dns_res})" >&2
+    exit 1
+fi
+ext_udp_res="$(pod_dns_query udp 10.43.0.10 nodes.lightning.directory)"
+if [ "${ext_udp_res}" != "0:198.51.100.77" ]; then
+    echo "FAIL: external UDP DNS query to 10.43.0.10:53 did not resolve via VPN DNS (${ext_udp_res})" >&2
+    exit 1
+fi
+ext_tcp_res="$(pod_dns_query tcp 10.43.0.10 nodes.lightning.directory)"
+if [ "${ext_tcp_res}" != "0:198.51.100.77" ]; then
+    echo "FAIL: external TCP DNS query to 10.43.0.10:53 did not resolve via VPN DNS (${ext_tcp_res})" >&2
+    exit 1
+fi
+direct_clear_res="$(pod_dns_query udp 192.0.2.2 nodes.lightning.directory)"
+if [ "${direct_clear_res}" != "0:198.51.100.77" ]; then
+    echo "FAIL: direct clearnet DNS query to 192.0.2.2:53 was not redirected to VPN DNS (${direct_clear_res})" >&2
+    exit 1
+fi
+# Verify that an undiscovered replacement pod IP (10.42.1.11) in the local pod CIDR
+# cannot reach CoreDNS (10.43.0.10:53) before its IP appears in the watch stream,
+# while both a verified local non-target pod (10.42.1.50 with MAC-bound fwmark)
+# and a remote pod on another node (10.42.2.15 arriving via clear0 without fwmark)
+# retain direct CoreDNS access.
+ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${ROUTER_NS}" neigh replace 10.42.1.50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+ip -n "${CLEAR_NS}" addr add 10.42.2.15/24 dev clear-peer
+ip -n "${CLEAR_NS}" route add 10.43.0.0/16 via 192.0.2.1 dev clear-peer src 10.42.2.15
+ip -n "${ROUTER_NS}" route add 10.42.2.0/24 via 192.0.2.2 dev clear0
+if pod_dns_query udp 10.43.0.10 nodes.lightning.directory 10.42.1.11 >/dev/null 2>&1; then
+    echo "FAIL: unseen replacement pod IP 10.42.1.11 bypassed DNS protection via CoreDNS" >&2
+    exit 1
+fi
+non_target_dns_res="$(pod_dns_query udp 10.43.0.10 kubernetes.default.svc.cluster.local 10.42.1.50)"
+if [ "${non_target_dns_res}" != "0:10.43.0.1" ]; then
+    echo "FAIL: verified non-target pod IP 10.42.1.50 lost CoreDNS access (${non_target_dns_res})" >&2
+    exit 1
+fi
+remote_pod_dns_res="$(
+    ip netns exec "${CLEAR_NS}" python3 -c '
+import socket, struct
+pkt = struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+for label in "kubernetes.default.svc.cluster.local".split("."):
+    pkt += bytes([len(label)]) + label.encode("ascii")
+pkt += b"\x00" + struct.pack("!HH", 1, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.0)
+s.bind(("10.42.2.15", 0))
+s.sendto(pkt, ("10.43.0.10", 53))
+resp, _ = s.recvfrom(4096)
+s.close()
+_, flags, _, ancount, _, _ = struct.unpack("!HHHHHH", resp[:12])
+rcode = flags & 0x000F
+ip_str = socket.inet_ntoa(resp[-4:]) if rcode == 0 and ancount >= 1 else ""
+print(f"{rcode}:{ip_str}")
+'
+)"
+if [ "${remote_pod_dns_res}" != "0:10.43.0.1" ]; then
+    echo "FAIL: remote node pod 10.42.2.15 lost CoreDNS access (${remote_pod_dns_res})" >&2
+    exit 1
+fi
+ip -n "${ROUTER_NS}" route del 10.42.2.0/24 via 192.0.2.2 dev clear0
+ip -n "${CLEAR_NS}" route del 10.43.0.0/16 via 192.0.2.1 dev clear-peer src 10.42.2.15
+ip -n "${CLEAR_NS}" addr del 10.42.2.15/24 dev clear-peer
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
+if grep -Fq "nodes.lightning.directory" "${CLUSTER_DNS_LOG_TMP}" 2>/dev/null; then
+    echo "FAIL: external domain nodes.lightning.directory leaked to cluster DNS 10.43.0.10" >&2
+    exit 1
+fi
+if [ -s "${CLEAR_DNS_LOG_TMP}" ]; then
+    echo "FAIL: DNS queries leaked to clearnet DNS 192.0.2.2" >&2
+    exit 1
+fi
+
+
 # Removing the WireGuard default leaves the table blackhole in place. External
 # traffic must fail instead of falling back to the clear interface.
 ip -n "${ROUTER_NS}" route del default dev tunnelsatsv2 metric 2 table 51820
@@ -351,6 +574,20 @@ if ip netns exec "${POD_NS}" ping -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
     echo "FAIL: external traffic escaped after the WireGuard route was removed" >&2
     exit 1
 fi
+
+# When the WireGuard tunnel is unavailable, external DNS queries must fail closed
+# (SERVFAIL / RCODE=2) and never fall back to cluster DNS or clearnet DNS.
+ip -n "${ROUTER_NS}" link set tunnelsatsv2 down
+fail_closed_dns_res="$(pod_dns_query udp 10.43.0.10 nodes.lightning.directory)"
+if [ "${fail_closed_dns_res}" != "2:" ]; then
+    echo "FAIL: external DNS query did not fail closed with SERVFAIL when tunnel was down (${fail_closed_dns_res})" >&2
+    exit 1
+fi
+if grep -Fq "nodes.lightning.directory" "${CLUSTER_DNS_LOG_TMP}" 2>/dev/null || [ -s "${CLEAR_DNS_LOG_TMP}" ]; then
+    echo "FAIL: external DNS query leaked to cluster or clearnet DNS when tunnel was down" >&2
+    exit 1
+fi
+rm -f "${CLUSTER_DNS_LOG_TMP}" "${VPN_DNS_LOG_TMP}" "${CLEAR_DNS_LOG_TMP}"
 
 kill_route="$(
     ip netns exec "${ROUTER_NS}" \
@@ -386,6 +623,7 @@ ip netns exec "${ROUTER_NS}" env \
     K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
     K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
     DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    K3S_DNS_PROXY_PID_FILE="${K3S_DNS_PROXY_PID_TMP}" \
     bash -c '
         source "${ENTRYPOINT_PATH}"
         STATE_FILE="'"${STATE_FILE_TMP}"'"
@@ -433,6 +671,7 @@ ip netns exec "${ROUTER_NS}" env \
     K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
     K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
     DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    K3S_DNS_PROXY_PID_FILE="${K3S_DNS_PROXY_PID_TMP}" \
     bash -c '
         source "${ENTRYPOINT_PATH}"
         STATE_FILE="'"${STATE_FILE_TMP}"'"
@@ -478,6 +717,7 @@ ip netns exec "${ROUTER_NS}" env \
     K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE}" \
     K3S_RULE_PROTOCOL_FILE="${K3S_PROTOCOL_STATE}" \
     DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE}" \
+    K3S_DNS_PROXY_PID_FILE="${K3S_DNS_PROXY_PID_TMP}" \
     bash -c '
         source "${ENTRYPOINT_PATH}"
         STATE_FILE="'"${STATE_FILE_TMP}"'"

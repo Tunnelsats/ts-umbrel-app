@@ -25,6 +25,9 @@ def run_bash(script):
         env["DECOMMISSION_STATE_FILE"] = os.path.join(
             temp_dir, "decommissioned.json"
         )
+        env["K3S_DNS_PROXY_PID_FILE"] = os.path.join(
+            temp_dir, "k3s-dns-proxy.pid"
+        )
         env["K3S_RULE_PROTOCOL"] = "200"
         return subprocess.run(
             ["bash", "-c", script, "policy-test", ENTRYPOINT_PATH],
@@ -4408,7 +4411,8 @@ ip() {
     return 0
 }
 WATCH_EVENT_FILE="${TEST_TMP}/watch-event.json"
-printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-bg","resourceVersion":"555","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.11","podIPs":[{"ip":"10.42.1.11"}]}}}' > "${WATCH_EVENT_FILE}"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-bg","resourceVersion":"555","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.11","podIPs":[{"ip":"10.42.1.11"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
 k8s_watch_api() {
     cat "${WATCH_EVENT_FILE}"
     sleep 0.2
@@ -4416,7 +4420,7 @@ k8s_watch_api() {
 ensure_k3s_pod_watcher_running
 [[ -n "${K3S_WATCHER_PID}" ]]
 kill -0 "${K3S_WATCHER_PID}"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     load_k3s_pod_watch_state
     if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "555" ]]; then
         break
@@ -4436,11 +4440,11 @@ MANAGED_K3S_POD_NAMESPACE="lightning"
 MANAGED_K3S_POD_SELECTOR="app=lnd"
 K3S_POLICY_STATE_LOADED="true"
 persist_managed_k3s_policy_state
-jq -n '{target_ip:"10.42.1.8", rules_synced:true}' > "${STATE_FILE}"
-: > "${BG_GUARD_LOG}"
-rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
-printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"556","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+jq -n '{target_ip:"10.42.1.8", rules_synced:true}' > "${STATE_FILE}.tmp"
+mv -f "${STATE_FILE}.tmp" "${STATE_FILE}"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"556","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     load_k3s_pod_watch_state
     if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]; then
         break
@@ -4448,6 +4452,19 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     sleep 0.1
 done
 [[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]
+
+: > "${BG_GUARD_LOG}"
+rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"557","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    load_k3s_pod_watch_state
+    if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "557" ]]; then
+        break
+    fi
+    sleep 0.1
+done
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "557" ]]
 ! grep -Fxq "10.42.1.8" "${BG_GUARD_LOG}"
 [[ ! -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
 
@@ -5040,4 +5057,454 @@ cleanup_k3s_policy_rules "false"
 '''
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_k3s_dns_protection_interception_dot_blocking_ipv6_and_sync_verification():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+TARGET_IPV6_ADDRESSES=("2001:db8:42::7")
+WG_IFACE="tunnelsatsv2"
+[[ "${K3S_DNS_PROXY_PORT}" == "15353" ]]
+STATE_FILE="${POLICY_TEST_STATE_FILE}"
+
+NAT_PREROUTING=""
+FILTER_INPUT=""
+FILTER_FORWARD=""
+V6_INPUT=""
+V6_FORWARD=""
+CONNTRACK_CALLS=""
+SS_CALLS=""
+
+conntrack() {
+    CONNTRACK_CALLS="${CONNTRACK_CALLS}conntrack $*"$'\n'
+    return 0
+}
+
+ss() {
+    SS_CALLS="${SS_CALLS}ss $*"$'\n'
+    return 0
+}
+
+iptables() {
+    local table="filter"
+    if [[ "${1:-}" == "-t" ]]; then
+        table="$2"
+        shift 2
+    fi
+    local op="$1"
+    local chain="$2"
+    shift 2
+
+    if [[ "${op}" == "-S" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) printf '%s' "${NAT_PREROUTING}" ;;
+            filter/INPUT) printf '%s' "${FILTER_INPUT}" ;;
+            filter/FORWARD) printf '%s' "${FILTER_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-C" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) [[ "${NAT_PREROUTING}" == *"-A PREROUTING $*"* ]] ;;
+            filter/INPUT) [[ "${FILTER_INPUT}" == *"-A INPUT $*"* ]] ;;
+            filter/FORWARD) [[ "${FILTER_FORWARD}" == *"-A FORWARD $*"* ]] ;;
+            *) return 1 ;;
+        esac
+        return
+    fi
+    if [[ "${op}" == "-I" ]]; then
+        shift
+        case "${table}/${chain}" in
+            nat/PREROUTING) NAT_PREROUTING="-A PREROUTING $*"$'\n'"${NAT_PREROUTING}" ;;
+            filter/INPUT) FILTER_INPUT="-A INPUT $*"$'\n'"${FILTER_INPUT}" ;;
+            filter/FORWARD) FILTER_FORWARD="-A FORWARD $*"$'\n'"${FILTER_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-D" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) NAT_PREROUTING="${NAT_PREROUTING//"-A PREROUTING $*"$'\n'/}" ;;
+            filter/INPUT) FILTER_INPUT="${FILTER_INPUT//"-A INPUT $*"$'\n'/}" ;;
+            filter/FORWARD) FILTER_FORWARD="${FILTER_FORWARD//"-A FORWARD $*"$'\n'/}" ;;
+        esac
+        return 0
+    fi
+    return 0
+}
+
+ip6tables() {
+    local op="$1"
+    local chain="$2"
+    shift 2
+    if [[ "${op}" == "-S" ]]; then
+        case "${chain}" in
+            INPUT) printf '%s' "${V6_INPUT}" ;;
+            FORWARD) printf '%s' "${V6_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-C" ]]; then
+        case "${chain}" in
+            INPUT) [[ "${V6_INPUT}" == *"-A INPUT $*"* ]] ;;
+            FORWARD) [[ "${V6_FORWARD}" == *"-A FORWARD $*"* ]] ;;
+            *) return 1 ;;
+        esac
+        return
+    fi
+    if [[ "${op}" == "-I" ]]; then
+        shift
+        case "${chain}" in
+            INPUT) V6_INPUT="-A INPUT $*"$'\n'"${V6_INPUT}" ;;
+            FORWARD) V6_FORWARD="-A FORWARD $*"$'\n'"${V6_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-D" ]]; then
+        case "${chain}" in
+            INPUT) V6_INPUT="${V6_INPUT//"-A INPUT $*"$'\n'/}" ;;
+            FORWARD) V6_FORWARD="${V6_FORWARD//"-A FORWARD $*"$'\n'/}" ;;
+        esac
+        return 0
+    fi
+    return 0
+}
+
+# Pre-seed stale rules for an old pod IP (10.42.1.6) and KUBE-SERVICES in PREROUTING
+NAT_PREROUTING=$'-A PREROUTING -s 10.42.1.6 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns -j REDIRECT --to-ports 15353\n-A PREROUTING -m comment --comment "kubernetes service portals" -j KUBE-SERVICES\n'
+
+ensure_k3s_dns_protection
+
+# 1. Stale 10.42.1.6 DNS redirect rule removed; 10.42.1.7 UDP/53 and TCP/53 rules sit ahead of KUBE-SERVICES on 15353
+[[ "${NAT_PREROUTING}" != *"10.42.1.6"* ]]
+[[ "${NAT_PREROUTING}" == *"-A PREROUTING -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns -j REDIRECT --to-ports 15353"* ]]
+[[ "${NAT_PREROUTING}" == *"-A PREROUTING -s 10.42.1.7 -p tcp --dport 53 -m comment --comment tunnelsats-k3s-dns -j REDIRECT --to-ports 15353"* ]]
+
+# 2. INPUT accepts 10.42.1.7 on 15353, drops non-target/non-lo on 15353, and drops direct 53/853 on INPUT
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p udp --dport 15353 -m comment --comment tunnelsats-k3s-dns-in -j ACCEPT"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p tcp --dport 15353 -m comment --comment tunnelsats-k3s-dns-in -j ACCEPT"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT ! -s 10.42.1.7 ! -i lo -p udp --dport 15353 -m comment --comment tunnelsats-k3s-dns-in -j DROP"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+
+# 3. FORWARD drops unintercepted 53 and DoT 853 outside tunnelsatsv2
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p tcp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p udp --dport 853 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+
+# 4. IPv6 DNS and DoT (53/853) dropped in both ip6tables INPUT and FORWARD
+[[ "${V6_INPUT}" == *"-A INPUT -s 2001:db8:42::7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+[[ "${V6_FORWARD}" == *"-A FORWARD -s 2001:db8:42::7 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+
+# 4b. Installing interception flushes stale conntrack / socket DNS flows for 10.42.1.7 and 2001:db8:42::7
+[[ "${CONNTRACK_CALLS}" == *"conntrack -D -f ipv4 -s 10.42.1.7 -p udp --dport 53"* ]]
+[[ "${CONNTRACK_CALLS}" == *"conntrack -D -f ipv4 -s 10.42.1.7 -p tcp --dport 53"* ]]
+[[ "${CONNTRACK_CALLS}" == *"conntrack -D -f ipv6 -s 2001:db8:42::7 -p udp --dport 53"* ]]
+[[ "${SS_CALLS}" == *"ss -K -4 src 10.42.1.7 dport = :53"* ]]
+
+k3s_dns_protection_is_synced
+[[ "${DNS_PROTECTED}" == "true" ]]
+RULES_SYNCED="true"
+IPV4_RULES_SYNCED="true"
+IPV6_RULES_SYNCED="true"
+write_state
+[[ "$(jq -r '.dns_protected' "${STATE_FILE}")" == "true" ]]
+
+# 5. If KUBE-SERVICES jumps ahead of tunnelsats-k3s-dns in nat PREROUTING, sync check fails!
+NAT_PREROUTING="-A PREROUTING -m comment --comment \"kubernetes service portals\" -j KUBE-SERVICES"$'\n'"${NAT_PREROUTING}"
+if k3s_dns_protection_is_synced; then
+    exit 1
+fi
+[[ "${DNS_PROTECTED}" == "false" ]]
+
+# 6. Re-running ensure_k3s_dns_protection restores tunnelsats-k3s-dns ahead of KUBE-SERVICES
+ensure_k3s_dns_protection
+k3s_dns_protection_is_synced
+[[ "${DNS_PROTECTED}" == "true" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_k3s_dns_honors_vpn_dns_override_discovers_custom_cluster_dns_and_scopes_ipv6_guards():
+    result = run_bash(
+        r'''
+set -euo pipefail
+source "$1"
+K3S_MODE="true"
+SECURE_MODE="false"
+DOCKER_TARGET_IP="10.42.1.7"
+WG_IFACE="tunnelsatsv2"
+K3S_DNS_PROXY_PORT="15353"
+
+# 1. K3S_VPN_DNS override takes precedence over WG_CONF_PATH and filters local/cluster DNS
+WG_CONF_TMP="$(mktemp)"
+cat > "${WG_CONF_TMP}" <<'EOF_WG'
+[Interface]
+PrivateKey = dGVzdA==
+Address = 10.9.0.2/32
+DNS = 127.0.0.53, 10.43.0.10, 9.9.9.9
+EOF_WG
+WG_CONF_PATH="${WG_CONF_TMP}"
+K3S_VPN_DNS="127.0.0.53, 10.43.0.10, 10.9.0.1, 1.0.0.1"
+[[ "$(resolve_k3s_vpn_dns_servers)" == "10.9.0.1,1.0.0.1" ]]
+K3S_VPN_DNS="127.0.0.53, 169.254.169.254, 10.43.0.10"
+[[ "$(resolve_k3s_vpn_dns_servers)" == "9.9.9.9" ]]
+unset K3S_VPN_DNS
+[[ "$(resolve_k3s_vpn_dns_servers)" == "9.9.9.9" ]]
+cat > "${WG_CONF_TMP}" <<'EOF_WG'
+[Interface]
+PrivateKey = dGVzdA==
+Address = 10.9.0.2/32
+DNS = 127.0.0.53, 10.43.0.10, 0.0.0.0, 224.0.0.1
+EOF_WG
+[[ "$(resolve_k3s_vpn_dns_servers)" == "1.1.1.1,9.9.9.9" ]]
+rm -f "${WG_CONF_TMP}"
+
+# 2. Custom cluster DNS discovery works when normalize_k3s_bypass_cidrs sorts 10.96.0.0/12 before 10.244.0.0/16
+unset K3S_CLUSTER_DNS_IP
+DOCKER_TARGET_IP="10.244.1.7"
+K3S_BYPASS_CIDRS="10.244.0.0/16,10.96.0.0/12"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "10.96.0.0/12,10.244.0.0/16" ]]
+RESOLV_TMP="$(mktemp)"
+printf 'nameserver 10.96.0.10\n' > "${RESOLV_TMP}"
+K3S_RESOLV_CONF_PATH="${RESOLV_TMP}"
+[[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.96.0.10:53" ]]
+printf 'nameserver 192.168.1.1\n' > "${RESOLV_TMP}"
+[[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.96.0.10:53" ]]
+DOCKER_TARGET_IP="172.20.1.7"
+K3S_BYPASS_CIDRS="172.20.0.0/16,172.16.0.0/16"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "172.16.0.0/16,172.20.0.0/16" ]]
+[[ "$(resolve_k3s_cluster_dns_endpoint)" == "172.16.0.10:53" ]]
+DOCKER_TARGET_IP="10.42.1.7"
+K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16,192.168.1.25/32"
+normalize_k3s_bypass_cidrs
+[[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.43.0.10:53" ]]
+rm -f "${RESOLV_TMP}"
+
+# 3. IPv4-only pod does not install node-wide ip6tables drops; MAC/IPv6-scoped pods do,
+# and unknown/replacement pods in pod CIDR without non-target fwmark are blocked on port 53/853
+NAT_PREROUTING=""
+FILTER_INPUT=""
+FILTER_FORWARD=""
+V6_INPUT=$'-A INPUT ! -i tunnelsatsv2 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP\n'
+V6_FORWARD=$'-A FORWARD -s 2001:db8:42::dead -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP\n'
+
+iptables() {
+    local table="filter"
+    if [[ "${1:-}" == "-t" ]]; then
+        table="$2"
+        shift 2
+    fi
+    local op="$1"
+    local chain="$2"
+    shift 2
+    if [[ "${op}" == "-S" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) printf '%s' "${NAT_PREROUTING}" ;;
+            filter/INPUT) printf '%s' "${FILTER_INPUT}" ;;
+            filter/FORWARD) printf '%s' "${FILTER_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-C" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) [[ "${NAT_PREROUTING}" == *"-A PREROUTING $*"* ]] ;;
+            filter/INPUT) [[ "${FILTER_INPUT}" == *"-A INPUT $*"* ]] ;;
+            filter/FORWARD) [[ "${FILTER_FORWARD}" == *"-A FORWARD $*"* ]] ;;
+            *) return 1 ;;
+        esac
+        return
+    fi
+    if [[ "${op}" == "-I" ]]; then
+        shift
+        case "${table}/${chain}" in
+            nat/PREROUTING) NAT_PREROUTING="-A PREROUTING $*"$'\n'"${NAT_PREROUTING}" ;;
+            filter/INPUT) FILTER_INPUT="-A INPUT $*"$'\n'"${FILTER_INPUT}" ;;
+            filter/FORWARD) FILTER_FORWARD="-A FORWARD $*"$'\n'"${FILTER_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-D" ]]; then
+        case "${table}/${chain}" in
+            nat/PREROUTING) NAT_PREROUTING="${NAT_PREROUTING//"-A PREROUTING $*"$'\n'/}" ;;
+            filter/INPUT) FILTER_INPUT="${FILTER_INPUT//"-A INPUT $*"$'\n'/}" ;;
+            filter/FORWARD) FILTER_FORWARD="${FILTER_FORWARD//"-A FORWARD $*"$'\n'/}" ;;
+        esac
+        return 0
+    fi
+    return 0
+}
+
+ip6tables() {
+    local op="$1"
+    local chain="$2"
+    shift 2
+    if [[ "${op}" == "-S" ]]; then
+        case "${chain}" in
+            INPUT) printf '%s' "${V6_INPUT}" ;;
+            FORWARD) printf '%s' "${V6_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-C" ]]; then
+        case "${chain}" in
+            INPUT) [[ "${V6_INPUT}" == *"-A INPUT $*"* ]] ;;
+            FORWARD) [[ "${V6_FORWARD}" == *"-A FORWARD $*"* ]] ;;
+            *) return 1 ;;
+        esac
+        return
+    fi
+    if [[ "${op}" == "-I" ]]; then
+        shift
+        case "${chain}" in
+            INPUT) V6_INPUT="-A INPUT $*"$'\n'"${V6_INPUT}" ;;
+            FORWARD) V6_FORWARD="-A FORWARD $*"$'\n'"${V6_FORWARD}" ;;
+        esac
+        return 0
+    fi
+    if [[ "${op}" == "-D" ]]; then
+        case "${chain}" in
+            INPUT) V6_INPUT="${V6_INPUT//"-A INPUT $*"$'\n'/}" ;;
+            FORWARD) V6_FORWARD="${V6_FORWARD//"-A FORWARD $*"$'\n'/}" ;;
+        esac
+        return 0
+    fi
+    return 0
+}
+
+TARGET_IPV6_ADDRESSES=()
+TARGET_IPV6_MACS=()
+ensure_k3s_dns_protection
+k3s_dns_protection_is_synced
+[[ "${V6_INPUT}" == "" ]]
+[[ "${V6_FORWARD}" == "" ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.0.0/16 -i cni+ -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.0.0/16 -i cni+ ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+
+# Multi-node CNI routing table narrows unknown-pod DNS guard to local node pod CIDR (10.42.1.0/24) and local bridge (cni0)
+ip() {
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cni0 src 10.42.1.1 uid 0\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]] || [[ "${1:-}" == "route" && "${2:-}" == "show" ]]; then
+        cat <<'EOF_ROUTES'
+default via 192.168.1.1 dev eth0
+10.42.0.0/24 via 10.42.0.0 dev flannel.1 onlink
+10.42.1.0/24 dev cni0 proto kernel scope link src 10.42.1.1
+10.42.2.0/24 via 10.42.2.0 dev flannel.1 onlink
+EOF_ROUTES
+        return 0
+    fi
+    return 0
+}
+[[ "$(resolve_k3s_local_pod_cidrs "10.42.1.7")" == "10.42.1.0/24" ]]
+[[ "$(resolve_k3s_local_pod_interfaces "10.42.1.7")" == "cni0" ]]
+
+TARGET_IPV6_MACS=("02:42:0a:2a:01:07")
+ensure_k3s_dns_protection
+k3s_dns_protection_is_synced
+[[ "${FILTER_INPUT}" != *"-s 10.42.0.0/16"* ]]
+[[ "${FILTER_FORWARD}" != *"-s 10.42.0.0/16"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.0/24 -i cni0 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.0/24 -i cni0 ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${V6_INPUT}" == *"-A INPUT -m mac --mac-source 02:42:0a:2a:01:07 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+[[ "${V6_FORWARD}" == *"-A FORWARD -m mac --mac-source 02:42:0a:2a:01:07 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+
+# Per-pod veth CNI (Calico) normalizes interface to cali+ wildcard
+ip() {
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cali9f8e7d scope link src 192.168.1.10\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]]; then
+        printf '10.42.1.7 dev cali9f8e7d scope link\n10.42.2.0/24 via 192.168.1.12 dev tunl0 proto bird onlink\n'
+        return 0
+    fi
+    return 0
+}
+[[ "$(resolve_k3s_local_pod_interfaces "10.42.1.7")" == "cali+" ]]
+
+# 4. Proxy startup failures preserve stderr diagnostics in K3S_DNS_PROXY_LOG_FILE and LAST_ERROR,
+# while ensure_k3s_dns_protection still installs fail-closed DNS/DoT guard rules and strips stale PREROUTING redirects.
+BAD_PROXY_SCRIPT="$(mktemp)"
+cat > "${BAD_PROXY_SCRIPT}" <<'EOF_BAD_PROXY'
+import sys
+sys.stderr.write("OSError: [Errno 98] Address already in use\n")
+sys.exit(1)
+EOF_BAD_PROXY
+K3S_DNS_PROXY_SCRIPT="${BAD_PROXY_SCRIPT}"
+K3S_DNS_PROXY_PID_FILE="$(mktemp -u)"
+K3S_DNS_PROXY_LOG_FILE="$(mktemp)"
+K3S_DNS_ENFORCE_PROXY_PROCESS="true"
+FILTER_INPUT=""
+FILTER_FORWARD=""
+V6_INPUT=""
+V6_FORWARD=""
+NAT_PREROUTING=$'-A PREROUTING -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns -j REDIRECT --to-ports 15353\n'
+if ensure_k3s_dns_protection; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Address already in use"* ]]
+grep -Fq "Address already in use" "${K3S_DNS_PROXY_LOG_FILE}"
+[[ "${NAT_PREROUTING}" == "" ]]
+[[ "${FILTER_INPUT}" != *"tunnelsats-k3s-dns-in"* ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.1.7 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.1.7 ! -o tunnelsatsv2 -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${V6_INPUT}" == *"-A INPUT -m mac --mac-source 02:42:0a:2a:01:07 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+rm -f "${BAD_PROXY_SCRIPT}" "${K3S_DNS_PROXY_LOG_FILE}" "${K3S_DNS_PROXY_PID_FILE}" "${K3S_DNS_PROXY_PID_FILE}.args"
+
+# 5. cleanup_k3s_dns_protection "true" (--keep-tunnel) removes nat PREROUTING redirect and proxy INPUT rules
+# while preserving fail-closed tunnelsats-k3s-dns-guard and tunnelsats-k3s-ipv6-dns-guard rules.
+K3S_DNS_ENFORCE_PROXY_PROCESS="false"
+ensure_k3s_dns_protection
+[[ "${NAT_PREROUTING}" == *"tunnelsats-k3s-dns"* ]]
+[[ "${FILTER_INPUT}" == *"tunnelsats-k3s-dns-in"* ]]
+cleanup_k3s_dns_protection "true"
+[[ "${NAT_PREROUTING}" == "" ]]
+[[ "${FILTER_INPUT}" != *"tunnelsats-k3s-dns-in"* ]]
+[[ "${FILTER_INPUT}" == *"tunnelsats-k3s-dns-guard"* ]]
+[[ "${FILTER_FORWARD}" == *"tunnelsats-k3s-dns-guard"* ]]
+[[ "${V6_INPUT}" == *"tunnelsats-k3s-ipv6-dns-guard"* ]]
+
+# 6. k3s_dns_protection_is_synced verifies the oif ${WG_IFACE} lookup 51820 rule when K3S_DNS_ENFORCE_OIF_RULE=true
+OIF_RULE_PRESENT="1"
+ip() {
+    if [[ "${1:-}" == "rule" && "${2:-}" == "show" ]]; then
+        if [[ "${OIF_RULE_PRESENT}" == "1" ]]; then
+            printf '32764:\tfrom all oif tunnelsatsv2 lookup 51820\n'
+        fi
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+        printf '10.42.1.7 dev cni0 src 10.42.1.1 uid 0\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "show" ]]; then
+        printf '10.42.1.0/24 dev cni0 proto kernel scope link src 10.42.1.1\n'
+        return 0
+    fi
+    return 0
+}
+K3S_DNS_ENFORCE_OIF_RULE="true"
+ensure_k3s_dns_protection
+k3s_dns_protection_is_synced
+OIF_RULE_PRESENT="0"
+if k3s_dns_protection_is_synced; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Tunnel oif policy rule"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
 

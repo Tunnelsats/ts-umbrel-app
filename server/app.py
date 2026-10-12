@@ -2323,6 +2323,7 @@ def read_dataplane_state():
         "rules_synced": False,
         "ipv4_rules_synced": False,
         "ipv6_rules_synced": False,
+        "dns_protected": False,
         "decommissioned": False,
         "ipv6_policy": "deny",
         "target_ipv6_addresses": [],
@@ -3323,6 +3324,7 @@ def local_status():
                         announcement_verified = v_ok
             verification_source = "live_gossip"
 
+    dns_protected = bool(dataplane.get("dns_protected", False))
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
     if target_switch_pending:
@@ -3334,6 +3336,9 @@ def local_status():
     elif verification_required and not announcement_verified:
         effective_rules_synced = False
         effective_error = ANNOUNCEMENT_VERIFICATION_ERROR
+    elif (K3S_MODE or dataplane.get("dataplane_mode") == "k3s") and effective_rules_synced and not dns_protected:
+        effective_rules_synced = False
+        effective_error = effective_error or "k3s: External DNS protection is not active"
 
     # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
@@ -3383,6 +3388,7 @@ def local_status():
             "rules_synced": effective_rules_synced,
             "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
             "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
+            "dns_protected": dns_protected,
             "decommissioned": dataplane.get("decommissioned", False),
             "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
             "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),

@@ -816,18 +816,19 @@ async function fetchStatus() {
         const hasNode = lndDetected || clnDetected;
         const routingActive = targetImpl === 'cln' ? clnRouting : lndRouting;
         const rulesSynced = data.rules_synced === true;
+        const dnsProtected = data.dataplane_mode !== 'k3s' || data.dns_protected !== false;
         const targetSwitchPending = data.target_switch_pending === true;
         const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
             ? data.last_error.trim()
             : (targetSwitchPending
                 ? 'Lightning target switch is pending dataplane reconciliation.'
-                : (hasNode && !rulesSynced ? 'Dataplane protection is not fully synced.' : ''));
+                : (hasNode && (!rulesSynced || !dnsProtected) ? 'Dataplane protection is not fully synced.' : ''));
         const verificationSource = data.announcement_verification_source || null;
         const isConfigFileVerification = verificationSource === 'config_file';
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (vpnActive && hasNode && routingActive && rulesSynced && !dataplaneError) {
+        if (vpnActive && hasNode && routingActive && rulesSynced && dnsProtected && !dataplaneError) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');

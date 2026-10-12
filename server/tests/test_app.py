@@ -3932,3 +3932,43 @@ def test_restore_node_secure_mode_requires_confirmation_before_decommissioning_d
         reconcile_mock.assert_called_once_with("lnd")
 
 
+def test_k3s_status_exposes_dns_protected_and_withholds_complete_protection_when_unprotected(client):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        with open(lnd_path, "w") as f:
+            f.write("[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\nnat=false\n")
+        with open(os.path.join(tmp_dir, app_module.META_FILE), "w") as f:
+            json.dump({"vpnPort": 35825, "serverDomain": "de2.tunnelsats.com"}, f)
+
+        dataplane = app_module.read_dataplane_state()
+        dataplane.update(
+            {
+                "dataplane_mode": "k3s",
+                "rules_synced": True,
+                "ipv4_rules_synced": True,
+                "ipv6_rules_synced": True,
+                "dns_protected": False,
+                "last_error": None,
+            }
+        )
+        with patch("app.DATA_DIR", tmp_dir), \
+                patch("app.LND_CONFIG_PATH", lnd_path), \
+                patch("app.K3S_MODE", True), \
+                patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                patch("app.lnd_exists", return_value=True), \
+                patch("app.cln_exists", return_value=False), \
+                patch("app.read_dataplane_state", return_value=dataplane), \
+                patch("app.subprocess.run", return_value=MagicMock(returncode=0, stdout="inet 10.9.0.2/32")):
+            unprotected_res = json.loads(client.get("/api/local/status").data)
+            assert unprotected_res["dns_protected"] is False
+            assert unprotected_res["rules_synced"] is False
+            assert "DNS" in (unprotected_res["last_error"] or "")
+
+            dataplane["dns_protected"] = True
+            protected_res = json.loads(client.get("/api/local/status").data)
+            assert protected_res["dns_protected"] is True
+            assert protected_res["rules_synced"] is True
+            assert protected_res["last_error"] is None
+
+
+
