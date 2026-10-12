@@ -250,6 +250,41 @@ completes:
   unowned `ip rule` shadows the target pod and that `ip -4 route get` from the
   pod IP resolves via the TunnelSats WireGuard interface.
 
+### Split-horizon DNS protection (`dns_protected`)
+
+Because the Kubernetes cluster DNS service IP (for example `10.43.0.10` inside
+`10.43.0.0/16`) is part of `K3S_BYPASS_CIDRS`, ordinary routing alone would send
+pod DNS lookups to `kube-dns` / CoreDNS, which forwards external queries over
+the node's upstream resolvers. To keep external DNS resolution on the protected
+WireGuard path while preserving Kubernetes service discovery, TunnelSats runs a
+local split-horizon DNS forwarder (`server/k3s_dns_proxy.py`) and intercepts pod
+DNS traffic in `iptables` before `KUBE-SERVICES`:
+
+- **Cluster-internal queries** (`*.svc.<cluster-domain>` and
+  `*.pod.<cluster-domain>`, where `<cluster-domain>` is configured via
+  `K3S_CLUSTER_DOMAIN` or auto-discovered from `/etc/resolv.conf` `search`
+  domains, defaulting to `cluster.local`) are forwarded to the cluster DNS
+  endpoint (`K3S_CLUSTER_DNS_IP`, or auto-discovered from
+  `KUBE_DNS_SERVICE_HOST` / `COREDNS_SERVICE_HOST`, `/etc/resolv.conf`, or the
+  configured service CIDR in `K3S_BYPASS_CIDRS`). Reverse lookups
+  (`*.in-addr.arpa` / `*.ip6.arpa`) for internal/cluster/private addresses,
+  unexpanded `*.svc` queries, and invalid search-path expansions are answered
+  locally with `NXDOMAIN` so CoreDNS reverse fallthrough can never forward them
+  to the node's upstream resolvers.
+- **External queries** (all other domains, including bare single-label queries)
+  are forwarded over sockets bound directly to the WireGuard interface
+  (`SO_BINDTODEVICE` on `tunnelsatsv2`, routed via policy table `51820` using an
+  `oif tunnelsatsv2` rule) to the VPN DNS servers (`K3S_VPN_DNS`, `[Interface]
+  DNS = ...` in `tunnelsatsv2.conf`, or fallback `1.1.1.1,9.9.9.9`).
+- **Fail-closed DNS & DoT / IPv6 guards**: If `tunnelsatsv2` or all upstream VPN
+  DNS servers are unavailable, external queries immediately return `SERVFAIL`
+  (`RCODE=2`) and never fall back to cluster DNS or host clearnet resolvers.
+  Direct clearnet DNS (`53/udp`, `53/tcp`), DNS-over-TLS (`853/udp`, `853/tcp`)
+  outside `tunnelsatsv2`, and IPv6 DNS (`53`/`853`) from the target pod are
+  blocked by `iptables`/`ip6tables` guards. Aggregate `rules_synced: true` (and
+  the UI `Protected` status) requires `dns_protected: true` at
+  `/api/local/status`.
+
 Useful route checks on the node are:
 
 ```sh
