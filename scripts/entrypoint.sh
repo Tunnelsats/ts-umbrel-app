@@ -1882,11 +1882,91 @@ k3s_watch_state_file_path() {
     printf '%s\n' "${K3S_WATCH_STATE_FILE:-${K3S_POLICY_STATE_FILE:-/tmp/tunnelsats-k3s-policy-state.json}.tmp.watch}"
 }
 
+k3s_watch_state_lock_path() {
+    printf '%s.lock\n' "$(k3s_watch_state_file_path)"
+}
+
+K3S_WATCH_LOCK_OWNER_PID=""
+K3S_WATCH_LOCK_DEPTH=0
+K3S_WATCH_LOCK_METHOD=""
+K3S_WATCH_LOCK_PATH=""
+
+k3s_acquire_watch_state_lock() {
+    local current_pid="${BASHPID:-$$}"
+    local lock_file lock_dir attempt=0
+    lock_file="$(k3s_watch_state_lock_path)"
+    if [ "${K3S_WATCH_LOCK_OWNER_PID:-}" = "${current_pid}" ] && \
+       [ "${K3S_WATCH_LOCK_DEPTH:-0}" -gt 0 ] && \
+       [ "${K3S_WATCH_LOCK_PATH:-}" = "${lock_file}" ]; then
+        K3S_WATCH_LOCK_DEPTH=$((K3S_WATCH_LOCK_DEPTH + 1))
+        return 0
+    fi
+
+    K3S_WATCH_LOCK_DEPTH=0
+    K3S_WATCH_LOCK_METHOD=""
+    K3S_WATCH_LOCK_PATH=""
+    lock_dir="${lock_file%/*}"
+    [ "${lock_dir}" != "${lock_file}" ] || lock_dir="."
+    mkdir -p "${lock_dir}" 2>/dev/null || return 1
+
+    if command -v flock >/dev/null 2>&1; then
+        if ! ( : >> "${lock_file}" ) 2>/dev/null; then
+            return 1
+        fi
+        exec {K3S_WATCH_LOCK_FD}>"${lock_file}" || return 1
+        if ! flock -w 10 "${K3S_WATCH_LOCK_FD}" 2>/dev/null; then
+            exec {K3S_WATCH_LOCK_FD}>&- || true
+            unset K3S_WATCH_LOCK_FD
+            return 1
+        fi
+        K3S_WATCH_LOCK_METHOD="flock"
+    else
+        while ! mkdir "${lock_file}.d" 2>/dev/null; do
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -ge 100 ]; then
+                return 1
+            fi
+            sleep 0.05 2>/dev/null || sleep 1
+        done
+        K3S_WATCH_LOCK_METHOD="mkdir"
+    fi
+
+    K3S_WATCH_LOCK_OWNER_PID="${current_pid}"
+    K3S_WATCH_LOCK_PATH="${lock_file}"
+    K3S_WATCH_LOCK_DEPTH=1
+    return 0
+}
+
+k3s_release_watch_state_lock() {
+    local current_pid="${BASHPID:-$$}"
+    if [ "${K3S_WATCH_LOCK_OWNER_PID:-}" != "${current_pid}" ] || [ "${K3S_WATCH_LOCK_DEPTH:-0}" -le 0 ]; then
+        return 0
+    fi
+    K3S_WATCH_LOCK_DEPTH=$((K3S_WATCH_LOCK_DEPTH - 1))
+    if [ "${K3S_WATCH_LOCK_DEPTH}" -eq 0 ]; then
+        if [ "${K3S_WATCH_LOCK_METHOD:-}" = "flock" ] && [ -n "${K3S_WATCH_LOCK_FD:-}" ]; then
+            flock -u "${K3S_WATCH_LOCK_FD}" 2>/dev/null || true
+            exec {K3S_WATCH_LOCK_FD}>&- || true
+            unset K3S_WATCH_LOCK_FD
+        elif [ "${K3S_WATCH_LOCK_METHOD:-}" = "mkdir" ] && [ -n "${K3S_WATCH_LOCK_PATH:-}" ]; then
+            rmdir "${K3S_WATCH_LOCK_PATH}.d" 2>/dev/null || true
+        fi
+        K3S_WATCH_LOCK_OWNER_PID=""
+        K3S_WATCH_LOCK_METHOD=""
+        K3S_WATCH_LOCK_PATH=""
+    fi
+    return 0
+}
+
 load_k3s_pod_watch_state() {
     local state_file
     local -a state_lines=()
     state_file="$(k3s_watch_state_file_path)"
     [ -f "${state_file}" ] || return 0
+    if ! k3s_acquire_watch_state_lock; then
+        LAST_ERROR="k3s: Failed to acquire pod watch state lock"
+        return 1
+    fi
     mapfile -t state_lines < <(
         jq -r '
             (.scope // ""),
@@ -1896,6 +1976,7 @@ load_k3s_pod_watch_state() {
             (if .unseen_replacement_pending == true then "true" else "false" end)
         ' "${state_file}" 2>/dev/null || true
     )
+    k3s_release_watch_state_lock
     [ "${#state_lines[@]}" -ge 5 ] || return 0
     K3S_WATCH_SCOPE="${state_lines[0]}"
     K3S_WATCH_RESOURCE_VERSION="${state_lines[1]}"
@@ -1906,26 +1987,81 @@ load_k3s_pod_watch_state() {
 }
 
 persist_k3s_pod_watch_state() {
-    local state_file tmp_file
+    local state_file state_dir tmp_file pending_json
     state_file="$(k3s_watch_state_file_path)"
-    mkdir -p "$(dirname "${state_file}")" 2>/dev/null || return 0
-    tmp_file="${state_file}.$$"
-    if jq -cn \
+    state_dir="${state_file%/*}"
+    [ "${state_dir}" != "${state_file}" ] || state_dir="."
+    if ! k3s_acquire_watch_state_lock; then
+        LAST_ERROR="k3s: Failed to acquire pod watch state lock"
+        return 1
+    fi
+    if ! mkdir -p "${state_dir}" 2>/dev/null; then
+        k3s_release_watch_state_lock
+        LAST_ERROR="k3s: Failed to create pod watch state directory"
+        return 1
+    fi
+    if ! tmp_file="$(mktemp "${state_file}.tmp.XXXXXX" 2>/dev/null)"; then
+        k3s_release_watch_state_lock
+        LAST_ERROR="k3s: Failed to create temporary pod watch state file"
+        return 1
+    fi
+    if [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" = "true" ]; then
+        pending_json="true"
+    else
+        pending_json="false"
+    fi
+    if ! jq -cn \
         --arg scope "${K3S_WATCH_SCOPE:-}" \
         --arg rv "${K3S_WATCH_RESOURCE_VERSION:-}" \
         --arg ips "${K3S_WATCHED_CANDIDATE_POD_IPS:-}" \
         --arg ipv6 "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES:-}" \
-        --argjson pending "$( [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" = "true" ] && printf 'true' || printf 'false' )" \
+        --argjson pending "${pending_json}" \
         '{
             scope: $scope,
             resource_version: $rv,
             watched_ips: $ips,
             watched_ipv6: $ipv6,
             unseen_replacement_pending: $pending
-        }' > "${tmp_file}" 2>/dev/null; then
-        mv -f "${tmp_file}" "${state_file}" 2>/dev/null || rm -f "${tmp_file}"
-    else
-        rm -f "${tmp_file}"
+        }' > "${tmp_file}" 2>/dev/null || \
+       ! chmod 600 "${tmp_file}" 2>/dev/null || \
+       ! mv -f "${tmp_file}" "${state_file}" 2>/dev/null; then
+        rm -f "${tmp_file}" 2>/dev/null || true
+        k3s_release_watch_state_lock
+        LAST_ERROR="k3s: Failed to persist pod watch state"
+        return 1
+    fi
+    k3s_release_watch_state_lock
+    return 0
+}
+
+sync_k3s_watched_candidate_addresses() {
+    [[ "${K3S_MODE}" == "true" ]] || return 0
+    load_k3s_pod_watch_state || return 1
+    local item
+    local -a items=()
+    if [ -n "${K3S_WATCHED_CANDIDATE_POD_IPS:-}" ]; then
+        IFS=',' read -r -a items <<< "${K3S_WATCHED_CANDIDATE_POD_IPS}"
+        for item in "${items[@]}"; do
+            [ -n "${item}" ] || continue
+            k3s_append_unique_csv K3S_CANDIDATE_POD_IPS "${item}"
+            k3s_append_unique_csv K3S_ALL_MATCHING_LOCAL_POD_IPS "${item}"
+        done
+    fi
+    if [ -n "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES:-}" ]; then
+        IFS=',' read -r -a items <<< "${K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES}"
+        for item in "${items[@]}"; do
+            [ -n "${item}" ] || continue
+            k3s_append_unique_csv K3S_CANDIDATE_POD_IPV6_ADDRESSES "${item}"
+        done
+    fi
+    if [ -n "${K3S_CANDIDATE_POD_IPV6_ADDRESSES:-}" ]; then
+        IFS=',' read -r -a items <<< "${K3S_CANDIDATE_POD_IPV6_ADDRESSES}"
+        for item in "${items[@]}"; do
+            [ -n "${item}" ] || continue
+            TARGET_IPV6_ADDRESSES+=("${item}")
+            TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
+        done
+        normalize_target_ipv6_addresses || return 1
     fi
     return 0
 }
@@ -1938,8 +2074,18 @@ pre_guard_colocated_k3s_candidate_pods() {
     local guard_error=""
     local rc=0
 
+    if ! k3s_acquire_watch_state_lock; then
+        K3S_CANDIDATE_PODS_GUARDED="false"
+        LAST_ERROR="k3s: Failed to acquire pod watch state lock"
+        return 1
+    fi
+
     if [ "${replace_existing}" != "true" ]; then
-        load_k3s_pod_watch_state
+        if ! load_k3s_pod_watch_state; then
+            k3s_release_watch_state_lock
+            K3S_CANDIDATE_PODS_GUARDED="false"
+            return 1
+        fi
     else
         K3S_CANDIDATE_PODS_GUARDED="true"
         K3S_UNSEEN_REPLACEMENT_PENDING="false"
@@ -1952,7 +2098,10 @@ pre_guard_colocated_k3s_candidate_pods() {
         fi
     fi
 
-    [ -n "${TUNNELSATS_K8S_NODE_NAME:-}" ] || return 0
+    if [ -z "${TUNNELSATS_K8S_NODE_NAME:-}" ]; then
+        k3s_release_watch_state_lock
+        return 0
+    fi
     if [ "${replace_existing}" = "true" ]; then
         K3S_CANDIDATE_POD_IPS=""
         K3S_CANDIDATE_POD_IPV6_ADDRESSES=""
@@ -2115,7 +2264,11 @@ for _, state, version, addr_str in sorted(entries):
         fi
     fi
 
-    persist_k3s_pod_watch_state
+    if ! persist_k3s_pod_watch_state; then
+        guard_error="${guard_error:-${LAST_ERROR:-k3s: Failed to persist pod watch state}}"
+        rc=1
+    fi
+    k3s_release_watch_state_lock
 
     if [ "${rc}" -eq 0 ]; then
         K3S_CANDIDATE_PODS_GUARDED="${K3S_CANDIDATE_PODS_GUARDED:-true}"
@@ -2894,6 +3047,14 @@ remove_stale_k3s_egress_guards() {
     local index
     local -a parts
 
+    if ! k3s_acquire_watch_state_lock; then
+        return 1
+    fi
+    if ! sync_k3s_watched_candidate_addresses; then
+        k3s_release_watch_state_lock
+        return 1
+    fi
+
     rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
     while IFS= read -r rule; do
         [ -n "${rule}" ] || continue
@@ -2910,7 +3071,10 @@ remove_stale_k3s_egress_guards() {
             continue
         fi
         parts[0]="-D"
-        iptables "${parts[@]}" >/dev/null 2>&1 || return 1
+        if ! iptables "${parts[@]}" >/dev/null 2>&1; then
+            k3s_release_watch_state_lock
+            return 1
+        fi
     done <<< "${rules}"
 
     rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
@@ -2926,9 +3090,11 @@ remove_stale_k3s_egress_guards() {
         done
         if [ "${source%/32}" != "${current_source}" ] && \
            ! k3s_ip_is_in_csv "${source%/32}" "${K3S_CANDIDATE_POD_IPS:-}"; then
+            k3s_release_watch_state_lock
             return 1
         fi
     done <<< "${rules}"
+    k3s_release_watch_state_lock
     return 0
 }
 
@@ -2937,6 +3103,17 @@ remove_k3s_egress_guards() {
     local marker="tunnelsats-k3s-egress-guard"
     local rules rule source index
     local -a parts
+
+    if [ "${preserve_candidates}" = "true" ]; then
+        if ! k3s_acquire_watch_state_lock; then
+            LAST_ERROR="k3s: Failed to acquire pod watch state lock"
+            return 1
+        fi
+        if ! sync_k3s_watched_candidate_addresses; then
+            k3s_release_watch_state_lock
+            return 1
+        fi
+    fi
 
     if [ "${preserve_candidates}" = "true" ] && [ -n "${K3S_CANDIDATE_POD_IPS:-}" ]; then
         rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
@@ -2956,6 +3133,7 @@ remove_k3s_egress_guards() {
             fi
             parts[0]="-D"
             iptables "${parts[@]}" >/dev/null 2>&1 || {
+                k3s_release_watch_state_lock
                 LAST_ERROR="k3s: Failed to remove temporary egress guard"
                 return 1
             }
@@ -2973,17 +3151,25 @@ remove_k3s_egress_guards() {
             done
             if [ -z "${source}" ] || [ "${source}" = "${DOCKER_TARGET_IP:-}" ] || \
                ! k3s_ip_is_in_csv "${source}" "${K3S_CANDIDATE_POD_IPS:-}"; then
+                k3s_release_watch_state_lock
                 LAST_ERROR="k3s: Failed to remove temporary egress guard"
                 return 1
             fi
         done <<< "${rules}"
+        k3s_release_watch_state_lock
         return 0
     fi
 
     remove_tagged_iptables_rules filter FORWARD "${marker}"
     if iptables -S FORWARD 2>/dev/null | grep -Fq -- "${marker}"; then
+        if [ "${preserve_candidates}" = "true" ]; then
+            k3s_release_watch_state_lock
+        fi
         LAST_ERROR="k3s: Failed to remove temporary egress guard"
         return 1
+    fi
+    if [ "${preserve_candidates}" = "true" ]; then
+        k3s_release_watch_state_lock
     fi
     return 0
 }
@@ -2993,6 +3179,14 @@ retire_stale_k3s_unmatched_ip_guards() {
     local marker="tunnelsats-k3s-egress-guard"
     local rules rule source index rule_line rule_spec rule_source
     local -a parts
+
+    if ! k3s_acquire_watch_state_lock; then
+        return 1
+    fi
+    if ! sync_k3s_watched_candidate_addresses; then
+        k3s_release_watch_state_lock
+        return 1
+    fi
 
     rules="$(iptables -S FORWARD 2>/dev/null | grep -F -- "--comment ${marker}" || true)"
     while IFS= read -r rule; do
@@ -3033,6 +3227,7 @@ retire_stale_k3s_unmatched_ip_guards() {
         fi
         delete_policy_rule_line "${rule_line}" || true
     done < <(ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null || true)
+    k3s_release_watch_state_lock
     return 0
 }
 
@@ -3123,15 +3318,7 @@ delete_ipv6_policy_rule_line() {
     ip -6 rule del "${rule_parts[@]}" pref "${priority}" >/dev/null 2>&1 || true
 }
 
-ensure_k3s_ipv6_subnet_quarantine() {
-    if ! k3s_ipv6_is_active; then
-        K3S_IPV6_QUARANTINE_CIDR=""
-        return 0
-    fi
-    if ! load_managed_ipv6_policy_state; then
-        return 1
-    fi
-
+resolve_k3s_ipv6_pod_cidrs() {
     local raw_cidrs="${K3S_IPV6_POD_CIDRS:-${K3S_IPV6_BYPASS_CIDRS:-}}"
     local route_lines=""
     route_lines="$(ip -6 route show 2>/dev/null || true)"
@@ -3256,12 +3443,25 @@ else:
 for net in selected:
     print(net)
 ' 2>/dev/null
-    )"; then
+    )" || [ -z "${matched_cidrs}" ]; then
         LAST_ERROR="k3s: Cannot determine IPv6 pod CIDR for emergency quarantine"
         return 1
     fi
+    printf '%s\n' "${matched_cidrs}"
+    return 0
+}
 
-    if [ -z "${matched_cidrs}" ]; then
+ensure_k3s_ipv6_subnet_quarantine() {
+    if ! k3s_ipv6_is_active; then
+        K3S_IPV6_QUARANTINE_CIDR=""
+        return 0
+    fi
+    if ! load_managed_ipv6_policy_state; then
+        return 1
+    fi
+
+    local matched_cidrs
+    if ! matched_cidrs="$(resolve_k3s_ipv6_pod_cidrs)" || [ -z "${matched_cidrs}" ]; then
         LAST_ERROR="k3s: Cannot determine IPv6 pod CIDR for emergency quarantine"
         return 1
     fi
@@ -3367,13 +3567,9 @@ remove_k3s_ipv6_subnet_quarantine() {
     return 0
 }
 
-ensure_k3s_subnet_quarantine() {
+resolve_k3s_pod_cidrs() {
     local source_ip="${1:-}"
     local matched_cidrs
-    local pod_cidr
-    local escaped_cidr
-    local exact_pattern
-    local quarantine_rule
     local route_lines=""
 
     if ! normalize_k3s_bypass_cidrs; then
@@ -3535,11 +3731,26 @@ else:
 for net in selected:
     print(net)
 ' 2>/dev/null
-    )"; then
+    )" || [ -z "${matched_cidrs}" ]; then
         LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
         return 1
     fi
-    if [ -z "${matched_cidrs}" ]; then
+    printf '%s\n' "${matched_cidrs}"
+    return 0
+}
+
+ensure_k3s_subnet_quarantine() {
+    local source_ip="${1:-}"
+    local matched_cidrs
+    local pod_cidr
+    local escaped_cidr
+    local exact_pattern
+    local quarantine_rule
+
+    if ! normalize_k3s_bypass_cidrs; then
+        return 1
+    fi
+    if ! matched_cidrs="$(resolve_k3s_pod_cidrs "${source_ip}")" || [ -z "${matched_cidrs}" ]; then
         LAST_ERROR="k3s: Cannot determine pod CIDR for emergency quarantine"
         return 1
     fi
@@ -3574,6 +3785,127 @@ for net in selected:
     K3S_QUARANTINE_CIDR="$(IFS=,; printf '%s' "${quarantined_list[*]}")"
     if ! ensure_k3s_ipv6_subnet_quarantine; then
         return 1
+    fi
+    return 0
+}
+
+ensure_k3s_unknown_pod_containment() {
+    local source_ip="${1:-${DOCKER_TARGET_IP:-}}"
+    if [ "${K3S_ENFORCE_UNKNOWN_POD_CONTAINMENT:-false}" != "true" ]; then
+        if declare -F ip >/dev/null 2>&1 || [ "$(id -u)" -ne 0 ]; then
+            return 0
+        fi
+    fi
+
+    local matched_cidrs pod_cidr escaped_cidr exact_pattern existing_rule
+    local bypass_cidr rule_line rule_spec destination bypass_csv
+    local -a bypass_cidrs=()
+    if ! normalize_k3s_bypass_cidrs; then
+        return 1
+    fi
+    if ! matched_cidrs="$(resolve_k3s_pod_cidrs "${source_ip}")" || [ -z "${matched_cidrs}" ]; then
+        LAST_ERROR="k3s: Cannot determine pod CIDR for unknown-pod containment"
+        return 1
+    fi
+    bypass_csv=",${K3S_BYPASS_CIDRS_NORMALIZED},"
+    if [ -n "${K3S_BYPASS_CIDRS_NORMALIZED:-}" ]; then
+        IFS=',' read -r -a bypass_cidrs <<< "${K3S_BYPASS_CIDRS_NORMALIZED}"
+    fi
+
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        escaped_cidr="${pod_cidr//./\\.}"
+
+        # 1. Install pod-CIDR fallback blackhole at K3S_BLACKHOLE_RULE_PREF (32765,
+        # below K3S_TUNNEL_RULE_PREF 32764) first so any newly allocated replacement
+        # pod IP is blocked from external clearnet egress in the kernel immediately
+        # upon CNI creation, before its podIP even appears in the Kubernetes API.
+        exact_pattern="^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${escaped_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+        existing_rule="$(ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+        if [ -n "${existing_rule}" ]; then
+            if ! k3s_policy_rule_is_owned "${existing_rule}"; then
+                LAST_ERROR="k3s: Pod-CIDR fallback blackhole preference is occupied by an unowned rule"
+                return 1
+            fi
+        else
+            if ! ip rule add from "${pod_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1; then
+                LAST_ERROR="k3s: Failed to install pod-CIDR fallback blackhole for ${pod_cidr}"
+                return 1
+            fi
+            existing_rule="$(ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${exact_pattern}" | head -n 1 || true)"
+            if [ -z "${existing_rule}" ] || ! k3s_policy_rule_is_owned "${existing_rule}"; then
+                LAST_ERROR="k3s: Pod-CIDR fallback blackhole was not installed for ${pod_cidr}"
+                return 1
+            fi
+            POLICY_CHANGED="1"
+        fi
+
+        # 2. Remove stale pod-CIDR cluster-local bypasses that are no longer configured.
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            [[ "${rule_spec}" == *"from ${pod_cidr} "* ]] || continue
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                continue
+            fi
+            destination="$(awk '{for (i = 1; i <= NF; i++) if ($i == "to") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+            if [ -z "${destination}" ] || [[ "${bypass_csv}" != *",${destination},"* ]]; then
+                delete_policy_rule_line "${rule_line}"
+                POLICY_CHANGED="1"
+            fi
+        done < <(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null || true)
+
+        # 3. Ensure cluster-local bypasses for the pod CIDR at K3S_BYPASS_RULE_PREF (32500).
+        for bypass_cidr in "${bypass_cidrs[@]}"; do
+            if ! ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -qE \
+                "from[[:space:]]+${escaped_cidr}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}"; then
+                if ! ip rule add from "${pod_cidr}" to "${bypass_cidr}" table main protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BYPASS_RULE_PREF}" >/dev/null 2>&1; then
+                    LAST_ERROR="k3s: Failed to add pod-CIDR local bypass for ${pod_cidr} to ${bypass_cidr}"
+                    return 1
+                fi
+                existing_rule="$(ip rule show pref "${K3S_BYPASS_RULE_PREF}" 2>/dev/null | grep -E \
+                    "from[[:space:]]+${escaped_cidr}[[:space:]]+to[[:space:]]+${bypass_cidr//./\\.}[[:space:]]+(lookup|table)[[:space:]]+main([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}" \
+                    | head -n 1 || true)"
+                if [ -z "${existing_rule}" ]; then
+                    LAST_ERROR="k3s: Pod-CIDR local bypass rule was not installed for ${pod_cidr} to ${bypass_cidr}"
+                    return 1
+                fi
+                POLICY_CHANGED="1"
+            fi
+        done
+    done <<< "${matched_cidrs}"
+
+    if k3s_ipv6_is_active; then
+        local ipv6_matched_cidrs ipv6_cidr v6_pattern v6_existing
+        if ! ipv6_matched_cidrs="$(resolve_k3s_ipv6_pod_cidrs)" || [ -z "${ipv6_matched_cidrs}" ]; then
+            LAST_ERROR="k3s: Cannot determine IPv6 pod CIDR for unknown-pod containment"
+            return 1
+        fi
+        while IFS= read -r ipv6_cidr; do
+            [ -n "${ipv6_cidr}" ] || continue
+            [[ "${ipv6_cidr}" == */* ]] && [[ "${ipv6_cidr}" != */128 ]] || continue
+            v6_pattern="^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${ipv6_cidr}[[:space:]]+blackhole([[:space:]].*)?[[:space:]]+proto(col)?[[:space:]]+${K3S_RULE_PROTOCOL}[[:space:]]*$"
+            v6_existing="$(ip -6 rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${v6_pattern}" | head -n 1 || true)"
+            if [ -n "${v6_existing}" ]; then
+                if ! k3s_policy_rule_is_owned "${v6_existing}"; then
+                    LAST_ERROR="k3s: IPv6 pod-CIDR fallback blackhole preference is occupied by an unowned rule"
+                    return 1
+                fi
+            else
+                if ! ip -6 rule add from "${ipv6_cidr}" blackhole protocol "${K3S_RULE_PROTOCOL}" pref "${K3S_BLACKHOLE_RULE_PREF}" >/dev/null 2>&1; then
+                    LAST_ERROR="k3s: Failed to install IPv6 pod-CIDR fallback blackhole for ${ipv6_cidr}"
+                    return 1
+                fi
+                v6_existing="$(ip -6 rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -E "${v6_pattern}" | head -n 1 || true)"
+                if [ -z "${v6_existing}" ] || ! k3s_policy_rule_is_owned "${v6_existing}"; then
+                    LAST_ERROR="k3s: IPv6 pod-CIDR fallback blackhole was not installed for ${ipv6_cidr}"
+                    return 1
+                fi
+                POLICY_CHANGED="1"
+            fi
+        done <<< "${ipv6_matched_cidrs}"
     fi
     return 0
 }
@@ -3715,6 +4047,12 @@ release_k3s_reconcile_guards() {
         local refresh_err="${LAST_ERROR}"
         ensure_k3s_pre_discovery_containment "${DOCKER_TARGET_IP:-}" || true
         LAST_ERROR="${refresh_err}"
+        return 1
+    fi
+    if ! ensure_k3s_unknown_pod_containment "${DOCKER_TARGET_IP:-}"; then
+        local contain_err="${LAST_ERROR}"
+        ensure_k3s_pre_discovery_containment "${DOCKER_TARGET_IP:-}" || true
+        LAST_ERROR="${contain_err}"
         return 1
     fi
     if ! remove_k3s_subnet_quarantine; then
@@ -4166,6 +4504,10 @@ remove_stale_k3s_policy_rules() {
     local rule_spec
     local rule_source
 
+    if k3s_acquire_watch_state_lock; then
+        sync_k3s_watched_candidate_addresses || true
+    fi
+
     for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}"; do
         while IFS= read -r rule_line; do
             [ -n "${rule_line}" ] || continue
@@ -4187,9 +4529,11 @@ remove_stale_k3s_policy_rules() {
             fi
 
             rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
-            if [ "${pref}" = "${K3S_BLACKHOLE_RULE_PREF}" ] && [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */32 ]]; then
-                # CIDR-wide emergency quarantine must survive ordinary stale
-                # per-pod cleanup; only explicit full cleanup may remove it.
+            if { [ "${pref}" = "${K3S_BLACKHOLE_RULE_PREF}" ] || [ "${pref}" = "${K3S_BYPASS_RULE_PREF}" ]; } && \
+               [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */32 ]]; then
+                # CIDR-wide emergency quarantine and pod-subnet bypasses must
+                # survive ordinary stale per-pod cleanup; only explicit full
+                # cleanup may remove them.
                 continue
             fi
             if [ "${pref}" = "${K3S_BLACKHOLE_RULE_PREF}" ] && \
@@ -4204,6 +4548,7 @@ remove_stale_k3s_policy_rules() {
             fi
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)
     done
+    k3s_release_watch_state_lock
 }
 
 remove_legacy_k3s_fwmark_rules() {
@@ -4663,7 +5008,7 @@ remove_stale_ipv6_filter_rules() {
     done <<< "${rules}"
 }
 
-ensure_ipv6_containment() {
+_ensure_ipv6_containment_inner() {
     local source mac managed_source current_source already_current was_managed
     local filter_ok=true
     local routing_ok=true
@@ -4796,6 +5141,25 @@ ensure_ipv6_containment() {
     fi
 }
 
+ensure_ipv6_containment() {
+    local rc=0
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        if ! k3s_acquire_watch_state_lock; then
+            LAST_ERROR="k3s: Failed to acquire pod watch state lock for IPv6 containment"
+            return 1
+        fi
+        if ! sync_k3s_watched_candidate_addresses; then
+            k3s_release_watch_state_lock
+            return 1
+        fi
+    fi
+    _ensure_ipv6_containment_inner || rc=$?
+    if [[ "${K3S_MODE}" == "true" ]]; then
+        k3s_release_watch_state_lock
+    fi
+    return "${rc}"
+}
+
 ipv6_containment_is_synced() {
     local source mac rules rule_count routes exact_blackhole_pattern exact_policy_pattern
     if [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
@@ -4918,6 +5282,13 @@ ensure_policy_routing() {
                 LAST_ERROR="k3s: Full-outbound rule was not installed"
                 return 1
             fi
+            changed=1
+        fi
+
+        if ! ensure_k3s_unknown_pod_containment "${DOCKER_TARGET_IP}"; then
+            return 1
+        fi
+        if [ "${POLICY_CHANGED}" = "1" ]; then
             changed=1
         fi
 
@@ -5861,6 +6232,17 @@ cleanup_k3s_policy_rules() {
             delete_policy_rule_line "${rule_line}"
         done < <(ip rule show pref "${pref}" 2>/dev/null || true)
     done
+
+    if [ "${keep_blackholes}" = "false" ]; then
+        while IFS= read -r rule_line; do
+            [ -n "${rule_line}" ] || continue
+            rule_spec="${rule_line#*:}"
+            [[ "${rule_spec}" == *"blackhole"* ]] || continue
+            [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
+            k3s_policy_rule_is_owned "${rule_line}" || continue
+            delete_ipv6_policy_rule_line "${rule_line}"
+        done < <(ip -6 rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null || true)
+    fi
 }
 
 cleanup_ipv6_containment() {
@@ -6464,7 +6846,8 @@ ensure_k3s_pre_discovery_containment() {
     if [ "${K3S_CNI_ENFORCES_NETWORK_POLICY:-false}" != "true" ] || \
        [ "${policy_ok}" = false ] || \
        [ "${K3S_POD_API_QUERY_OK:-false}" != "true" ] || \
-       [ "${K3S_CANDIDATE_PODS_GUARDED:-true}" != "true" ]; then
+       [ "${K3S_CANDIDATE_PODS_GUARDED:-true}" != "true" ] || \
+       [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" = "true" ]; then
         if ensure_k3s_subnet_quarantine "${quarantine_hint_ip}"; then
             quarantine_ok=true
         elif [ -n "${quarantine_hint_ip}" ] && ensure_k3s_subnet_quarantine ""; then
@@ -6550,9 +6933,10 @@ watch_k3s_target_pods_once() {
     local selector="${2:-}"
     local timeout_seconds="${K3S_POD_WATCH_TIMEOUT_SECONDS:-1}"
     local encoded_selector watch_scope watch_path event_line event_type event_rv pod_list is_full_list
+    local watch_fd="" watch_pid="" watch_rc=0 watch_failed=false
 
     refresh_k3s_watcher_runtime_state
-    load_k3s_pod_watch_state
+    load_k3s_pod_watch_state || true
 
     if [ -z "${namespace}" ]; then
         namespace="${K3S_TARGET_POD_NAMESPACE:-}"
@@ -6571,7 +6955,7 @@ watch_k3s_target_pods_once() {
     if [ "${K3S_WATCH_SCOPE:-}" != "${watch_scope}" ]; then
         K3S_WATCH_SCOPE="${watch_scope}"
         K3S_WATCH_RESOURCE_VERSION=""
-        persist_k3s_pod_watch_state
+        persist_k3s_pod_watch_state || return 1
     fi
 
     encoded_selector="$(urlencode "${selector}")"
@@ -6580,12 +6964,18 @@ watch_k3s_target_pods_once() {
         watch_path="${watch_path}&resourceVersion=$(urlencode "${K3S_WATCH_RESOURCE_VERSION}")"
     fi
 
-    while IFS= read -r event_line; do
+    exec {watch_fd}< <(k8s_watch_api "${watch_path}" "$((timeout_seconds + 2))")
+    watch_pid=$!
+
+    while IFS= read -r event_line <&"${watch_fd}"; do
         [ -n "${event_line}" ] || continue
         event_type="$(printf '%s' "${event_line}" | jq -r '.type // empty' 2>/dev/null || true)"
         if [ "${event_type}" = "ERROR" ]; then
+            watch_failed=true
             K3S_WATCH_RESOURCE_VERSION=""
-            persist_k3s_pod_watch_state
+            K3S_POD_API_QUERY_OK="false"
+            K3S_UNSEEN_REPLACEMENT_PENDING="true"
+            persist_k3s_pod_watch_state || true
             continue
         fi
         event_rv="$(printf '%s' "${event_line}" | jq -r '.object.metadata.resourceVersion // .metadata.resourceVersion // ([.items[]?.metadata.resourceVersion // empty] | last) // empty' 2>/dev/null || true)"
@@ -6593,7 +6983,9 @@ watch_k3s_target_pods_once() {
             K3S_WATCH_RESOURCE_VERSION="${event_rv}"
         fi
         if [ "${event_type}" = "BOOKMARK" ]; then
-            persist_k3s_pod_watch_state
+            if ! persist_k3s_pod_watch_state; then
+                watch_failed=true
+            fi
             continue
         fi
 
@@ -6610,18 +7002,26 @@ watch_k3s_target_pods_once() {
                 empty
             end
         ' 2>/dev/null || true)"
-        [ -n "${pod_list}" ] || continue
+        if [ -z "${pod_list}" ]; then
+            watch_failed=true
+            continue
+        fi
         refresh_k3s_watcher_runtime_state
         local watch_guard_ok=true
         if [ -n "${TUNNELSATS_K8S_NODE_NAME:-}" ]; then
             local K3S_WATCH_EVENT_GUARD="true"
             if ! pre_guard_colocated_k3s_candidate_pods "${pod_list}" "${is_full_list}"; then
                 watch_guard_ok=false
+                watch_failed=true
                 K3S_CANDIDATE_PODS_GUARDED="false"
-                ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP:-}" || ensure_k3s_subnet_quarantine "" || true
+                ensure_k3s_pre_discovery_containment "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}" || \
+                    ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP:-}" || \
+                    ensure_k3s_subnet_quarantine "" || true
             fi
         else
-            persist_k3s_pod_watch_state
+            if ! persist_k3s_pod_watch_state; then
+                watch_failed=true
+            fi
         fi
         if [ "${watch_guard_ok}" = true ] && \
            [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" != "true" ] && \
@@ -6644,7 +7044,28 @@ watch_k3s_target_pods_once() {
         fi
         ensure_reconcile_dirs
         printf 'k3s-pod-watch\n' > "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" 2>/dev/null || true
-    done < <(k8s_watch_api "${watch_path}" "$((timeout_seconds + 2))" || true)
+    done
+
+    exec {watch_fd}<&-
+    wait "${watch_pid}" 2>/dev/null || watch_rc=$?
+    if [ "${watch_rc}" -ne 0 ] || [ "${watch_failed}" = true ]; then
+        K3S_WATCH_RESOURCE_VERSION=""
+        K3S_POD_API_QUERY_OK="false"
+        K3S_UNSEEN_REPLACEMENT_PENDING="true"
+        persist_k3s_pod_watch_state || true
+        local saved_ns="${MANAGED_K3S_POD_NAMESPACE:-}"
+        local saved_sel="${MANAGED_K3S_POD_SELECTOR:-}"
+        ensure_k3s_pre_discovery_containment "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}" || \
+            ensure_k3s_subnet_quarantine "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}" || \
+            ensure_k3s_subnet_quarantine "" || true
+        if [ -n "${saved_ns}" ] && [ -n "${saved_sel}" ]; then
+            MANAGED_K3S_POD_NAMESPACE="${saved_ns}"
+            MANAGED_K3S_POD_SELECTOR="${saved_sel}"
+        fi
+        ensure_reconcile_dirs
+        printf 'k3s-pod-watch\n' > "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" 2>/dev/null || true
+        return 1
+    fi
     return 0
 }
 
@@ -6660,8 +7081,9 @@ k3s_pod_watch_loop() {
             sleep 1
             continue
         fi
-        watch_k3s_target_pods_once || true
-        sleep 0.2 2>/dev/null || sleep 1
+        if ! watch_k3s_target_pods_once; then
+            sleep "${K3S_WATCH_ERROR_BACKOFF_SECONDS:-0.05}" 2>/dev/null || sleep 1
+        fi
     done
 }
 

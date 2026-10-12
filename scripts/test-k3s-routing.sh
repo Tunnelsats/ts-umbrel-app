@@ -285,6 +285,32 @@ ip netns exec "${ROUTER_NS}" env \
         ensure_ipv6_containment
     '
 
+# Even after emergency pod-CIDR quarantine (32763) and egress guards are released,
+# a fast replacement pod IP (10.42.1.11 / 2001:db8:42::11) that finishes CNI setup
+# before its IP appears in the Kubernetes watch stream must remain blocked from
+# clearnet egress by the persistent kernel pod-CIDR fallback blackhole (32765)
+# while retaining cluster-local bypass access (32500) and active pod VPN routing.
+ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::11/64 dev pod0 nodad
+if ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
+    echo "FAIL: unseen post-CNI replacement pod IP 10.42.1.11 escaped to clearnet" >&2
+    exit 1
+fi
+if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::11 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
+    echo "FAIL: unseen post-CNI replacement pod IPv6 2001:db8:42::11 escaped to clearnet" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 2 10.42.1.1 >/dev/null; then
+    echo "FAIL: unseen replacement pod IP 10.42.1.11 lost cluster-local bypass" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.7 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: active pod IP 10.42.1.7 lost VPN routing under unknown-pod containment" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::11/64 dev pod0
+
 # Removing the WireGuard default leaves the table blackhole in place. External
 # traffic must fail instead of falling back to the clear interface.
 ip -n "${ROUTER_NS}" route del default dev tunnelsatsv2 metric 2 table 51820
