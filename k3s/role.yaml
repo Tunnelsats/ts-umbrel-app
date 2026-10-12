@@ -10,7 +10,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "create", "delete"]

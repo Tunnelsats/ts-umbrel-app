@@ -51,6 +51,12 @@ def test_k3s_role_can_install_last_resort_network_policy():
         (tuple(rule["apiGroups"]), tuple(rule["resources"])): set(rule["verbs"])
         for rule in role["rules"]
     }
+    assert rules[(("",), ("pods",))] == {
+        "get",
+        "list",
+        "watch",
+        "delete",
+    }
     assert rules[(("networking.k8s.io",), ("networkpolicies",))] == {
         "get",
         "list",
