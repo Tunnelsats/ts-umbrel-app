@@ -329,6 +329,8 @@ if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 1 2001:db8:100::
     exit 1
 fi
 ip -n "${POD_NS}" link set dev pod0 address "${ORIG_POD0_MAC}"
+ip -n "${ROUTER_NS}" neigh replace 10.42.1.50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+ip -n "${ROUTER_NS}" -6 neigh replace 2001:db8:42::50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
 if ! ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 2 10.42.1.1 >/dev/null; then
     echo "FAIL: unseen replacement pod IP 10.42.1.11 lost cluster-local bypass" >&2
     exit 1
