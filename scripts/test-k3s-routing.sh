@@ -283,21 +283,35 @@ ip netns exec "${ROUTER_NS}" env \
         TARGET_IPV6_MACS=()
         TARGET_HAS_IPV6_DEFAULT_ROUTE="true"
         ensure_ipv6_containment
+        K3S_NON_TARGET_POD_IPS="10.42.1.50"
+        K3S_NON_TARGET_POD_IPV6_ADDRESSES="2001:db8:42::50"
+        ensure_k3s_unknown_pod_containment "10.42.1.7"
     '
 
 # Even after emergency pod-CIDR quarantine (32763) and egress guards are released,
 # a fast replacement pod IP (10.42.1.11 / 2001:db8:42::11) that finishes CNI setup
 # before its IP appears in the Kubernetes watch stream must remain blocked from
 # clearnet egress by the persistent kernel pod-CIDR fallback blackhole (32765)
-# while retaining cluster-local bypass access (32500) and active pod VPN routing.
+# while retaining cluster-local bypass access (32500), known non-target pod
+# outbound access (10.42.1.50 / 2001:db8:42::50), and active pod VPN routing.
 ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
 ip -n "${POD_NS}" -6 addr add 2001:db8:42::11/64 dev pod0 nodad
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
 if ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 1 198.51.100.2 >/dev/null 2>&1; then
     echo "FAIL: unseen post-CNI replacement pod IP 10.42.1.11 escaped to clearnet" >&2
     exit 1
 fi
 if ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::11 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; then
     echo "FAIL: unseen post-CNI replacement pod IPv6 2001:db8:42::11 escaped to clearnet" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: known non-target pod IP 10.42.1.50 lost outbound Internet access" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
+    echo "FAIL: known non-target pod IPv6 2001:db8:42::50 lost outbound Internet access" >&2
     exit 1
 fi
 if ! ip netns exec "${POD_NS}" ping -I 10.42.1.11 -c 1 -W 2 10.42.1.1 >/dev/null; then
@@ -308,6 +322,8 @@ if ! ip netns exec "${POD_NS}" ping -I 10.42.1.7 -c 1 -W 2 198.51.100.2 >/dev/nu
     echo "FAIL: active pod IP 10.42.1.7 lost VPN routing under unknown-pod containment" >&2
     exit 1
 fi
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::50/64 dev pod0
 ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
 ip -n "${POD_NS}" -6 addr del 2001:db8:42::11/64 dev pod0
 

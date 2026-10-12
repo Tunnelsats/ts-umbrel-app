@@ -4651,6 +4651,10 @@ ip() {
         fi
         if [[ "${2:-} ${3:-}" == "rule add" ]]; then
             case "$*" in
+                "-6 rule add from 2001:cafe:42::50 table main protocol 200 pref 32500")
+                    V6_RULES+=$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200\n'
+                    return 0
+                    ;;
                 "-6 rule add from 2001:cafe:42::/56 blackhole protocol 200 pref 32765")
                     V6_RULES+=$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200\n'
                     return 0
@@ -4659,6 +4663,9 @@ ip() {
             return 1
         fi
         if [[ "${2:-} ${3:-}" == "rule del" ]]; then
+            if [[ "$*" == *"from 2001:cafe:42::50 lookup main proto 200 pref 32500"* || "$*" == *"from 2001:cafe:42::50 table main protocol 200 pref 32500"* ]]; then
+                V6_RULES="${V6_RULES//$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200\n'/}"
+            fi
             if [[ "$*" == *"from 2001:cafe:42::/56 blackhole proto 200 pref 32765"* ]]; then
                 V6_RULES="${V6_RULES//$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200\n'/}"
             fi
@@ -4692,6 +4699,9 @@ ip() {
             "rule add from 10.42.0.0/16 to 10.43.0.0/16 table main protocol 200 pref 32500")
                 RULES+=$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200\n'
                 ;;
+            "rule add from 10.42.1.50 table main protocol 200 pref 32500")
+                RULES+=$'32500:\tfrom 10.42.1.50 lookup main proto 200\n'
+                ;;
             "rule add from 10.42.1.7 table 51820 protocol 200 pref 32764")
                 RULES+=$'32764:\tfrom 10.42.1.7 lookup 51820 proto 200\n'
                 ;;
@@ -4724,14 +4734,56 @@ ip() {
     return 0
 }
 
-# 1. ensure_policy_routing installs pod-CIDR cluster-local bypasses at 32500
-# and pod-CIDR fallback blackholes at 32765 (IPv4 and IPv6) so any brand-new
-# replacement pod IP is blocked from clearnet egress in the kernel even before
-# its podIP appears in the Kubernetes API watch stream.
+k8s_api() {
+    printf '%s\n' '{
+        "items": [
+            {
+                "metadata": {"name": "lnd-0", "namespace": "lightning", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.7",
+                    "podIPs": [{"ip": "10.42.1.7"}, {"ip": "2001:cafe:42::7"}]
+                }
+            },
+            {
+                "metadata": {"name": "lnd-replacement", "namespace": "lightning", "labels": {"app": "lnd"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.8",
+                    "podIPs": [{"ip": "10.42.1.8"}, {"ip": "2001:cafe:42::8"}]
+                }
+            },
+            {
+                "metadata": {"name": "bitcoind-0", "namespace": "lightning", "labels": {"app": "bitcoind"}},
+                "spec": {"nodeName": "worker-a"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.42.1.50",
+                    "podIPs": [{"ip": "10.42.1.50"}, {"ip": "2001:cafe:42::50"}]
+                }
+            }
+        ]
+    }'
+    return 0
+}
+
+# 1. ensure_policy_routing installs pod-CIDR cluster-local bypasses at 32500,
+# normal table-main outbound rules at 32500 for known non-target pods on the
+# same node (10.42.1.50 / 2001:cafe:42::50), and pod-CIDR fallback blackholes
+# at 32765 (IPv4 and IPv6) so any brand-new replacement pod IP is blocked from
+# clearnet egress in the kernel even before its podIP appears in the watch stream.
 ensure_policy_routing
 [[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.42.0.0/16 lookup main proto 200'* ]]
 [[ "${RULES}" == *$'32500:\tfrom 10.42.0.0/16 to 10.43.0.0/16 lookup main proto 200'* ]]
+[[ "${RULES}" == *$'32500:\tfrom 10.42.1.50 lookup main proto 200'* ]]
+[[ "${RULES}" != *$'32500:\tfrom 10.42.1.7 lookup main'* ]]
+[[ "${RULES}" != *$'32500:\tfrom 10.42.1.8 lookup main'* ]]
 [[ "${RULES}" == *$'32765:\tfrom 10.42.0.0/16 blackhole proto 200'* ]]
+[[ "${V6_RULES}" == *$'32500:\tfrom 2001:cafe:42::50 lookup main proto 200'* ]]
+[[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::7 lookup main'* ]]
+[[ "${V6_RULES}" != *$'32500:\tfrom 2001:cafe:42::8 lookup main'* ]]
 [[ "${V6_RULES}" == *$'32765:\tfrom 2001:cafe:42::/56 blackhole proto 200'* ]]
 verify_k3s_target_routes
 
@@ -4778,6 +4830,11 @@ load_k3s_pod_watch_state
 [[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "true" ]]
 [[ "${CONTAINMENT_CALLS}" -ge 1 ]]
 [[ -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
+
+# 3. cleanup_k3s_policy_rules "false" must remove tab-indented IPv6 pod-CIDR
+# blackhole rules at pref 32765 and non-target pod IPv6 bypass rules at 32500.
+cleanup_k3s_policy_rules "false"
+[[ -z "${V6_RULES}" ]]
 '''
     )
     assert result.returncode == 0, result.stderr
