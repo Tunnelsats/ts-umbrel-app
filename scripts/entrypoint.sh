@@ -2145,8 +2145,10 @@ if raw_selector:
         target_selector = None
 
 def matches_selector(labels, selector):
-    if not isinstance(labels, dict) or not labels or not isinstance(selector, dict):
+    if not isinstance(selector, dict):
         return True
+    if not isinstance(labels, dict):
+        labels = {}
     match_labels = selector.get("matchLabels") or {}
     if isinstance(match_labels, dict):
         for k, v in match_labels.items():
@@ -2194,6 +2196,8 @@ for item in items:
         continue
     meta = item.get("metadata") or {}
     spec = item.get("spec") or {}
+    if spec.get("hostNetwork") is True:
+        continue
     status = item.get("status") or {}
     ev_type = str(item.get("_watchEventType") or "")
     phase = str(status.get("phase") or "")
@@ -4013,8 +4017,10 @@ if raw_selector:
         target_selector = None
 
 def matches_selector(labels, selector):
-    if not isinstance(labels, dict) or not isinstance(selector, dict):
+    if not isinstance(selector, dict):
         return True
+    if not isinstance(labels, dict):
+        labels = {}
     match_labels = selector.get("matchLabels") or {}
     if not isinstance(match_labels, dict):
         return True
@@ -4118,7 +4124,7 @@ if raw_pod_list:
                 continue
             if not target_ns or pod_ns == target_ns:
                 labels = meta.get("labels")
-                if target_selector is None or not isinstance(labels, dict) or not labels:
+                if target_selector is None:
                     continue
                 if matches_selector(labels, target_selector):
                     continue
@@ -4180,6 +4186,55 @@ k3s_lookup_non_target_v6_peer_v4() {
     return 1
 }
 
+probe_k3s_non_target_neighbor() {
+    local family="$1"
+    local address="${2%/*}"
+    local pod_dev="$3"
+    local host_ll=""
+
+    [ -n "${address}" ] && [ -n "${pod_dev}" ] || return 0
+    PROBE_FAMILY="${family}" PROBE_ADDR="${address}" PROBE_DEV="${pod_dev}" python3 -c '
+import os, socket
+fam = socket.AF_INET6 if os.environ.get("PROBE_FAMILY") == "6" else socket.AF_INET
+addr = os.environ["PROBE_ADDR"]
+dev = os.environ["PROBE_DEV"].encode()
+for stype in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+    s = None
+    try:
+        s = socket.socket(fam, stype)
+        s.setblocking(False)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, 25, dev)
+        except Exception:
+            pass
+        if stype == socket.SOCK_DGRAM:
+            s.sendto(b"\x00", (addr, 9))
+        else:
+            s.connect_ex((addr, 1))
+    except Exception:
+        pass
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+' >/dev/null 2>&1 || true
+
+    if command -v ping >/dev/null 2>&1; then
+        if [ "${family}" = "6" ]; then
+            ping -6 -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
+            host_ll="$(ip -6 -o addr show dev "${pod_dev}" scope link 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "inet6") {split($(i + 1), a, "/"); print a[1]; exit}}' || true)"
+            if [ -n "${host_ll}" ]; then
+                ping -6 -c 1 -W 1 -I "${host_ll}%${pod_dev}" "${address}" >/dev/null 2>&1 || true
+            fi
+        else
+            ping -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
 resolve_k3s_non_target_pod_attachment() {
     local family="$1"
     local address="${2%/*}"
@@ -4189,7 +4244,7 @@ resolve_k3s_non_target_pod_attachment() {
     local pod_dev=""
     local neigh_info=""
     local pod_mac=""
-    local host_ll=""
+    local attempt=0
 
     [ -n "${address}" ] || return 1
     if [ "${family}" = "6" ]; then
@@ -4269,17 +4324,17 @@ if best_line:
             neigh_info="$(ip -6 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
         fi
         pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
-        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1 && command -v ping >/dev/null 2>&1; then
-            ping -6 -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
-            host_ll="$(ip -6 -o addr show dev "${pod_dev}" scope link 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "inet6") {split($(i + 1), a, "/"); print a[1]; exit}}' || true)"
-            if [ -n "${host_ll}" ]; then
-                ping -6 -c 1 -W 1 -I "${host_ll}%${pod_dev}" "${address}" >/dev/null 2>&1 || true
-            fi
-            neigh_info="$(ip -6 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
-            if [ -z "${neigh_info}" ]; then
-                neigh_info="$(ip -6 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
-            fi
-            pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1; then
+            probe_k3s_non_target_neighbor "6" "${address}" "${pod_dev}"
+            for attempt in 1 2 3 4 5; do
+                neigh_info="$(ip -6 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                if [ -z "${neigh_info}" ]; then
+                    neigh_info="$(ip -6 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                fi
+                pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+                [ -n "${pod_mac}" ] && break
+                sleep 0.03 2>/dev/null || true
+            done
         fi
         if [ -z "${pod_mac}" ] && [ -n "${peer_v4}" ]; then
             neigh_info="$(ip -4 neigh show to "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
@@ -4287,6 +4342,18 @@ if best_line:
                 neigh_info="$(ip -4 neigh show "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
             fi
             pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+            if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1; then
+                probe_k3s_non_target_neighbor "4" "${peer_v4}" "${pod_dev}"
+                for attempt in 1 2 3 4 5; do
+                    neigh_info="$(ip -4 neigh show to "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                    if [ -z "${neigh_info}" ]; then
+                        neigh_info="$(ip -4 neigh show "${peer_v4}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                    fi
+                    pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+                    [ -n "${pod_mac}" ] && break
+                    sleep 0.03 2>/dev/null || true
+                done
+            fi
         fi
     else
         neigh_info="$(ip -4 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
@@ -4294,13 +4361,17 @@ if best_line:
             neigh_info="$(ip -4 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
         fi
         pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
-        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1 && command -v ping >/dev/null 2>&1; then
-            ping -c 1 -W 1 "${address}" >/dev/null 2>&1 || true
-            neigh_info="$(ip -4 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
-            if [ -z "${neigh_info}" ]; then
-                neigh_info="$(ip -4 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
-            fi
-            pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+        if [ -z "${pod_mac}" ] && ! declare -F ip >/dev/null 2>&1; then
+            probe_k3s_non_target_neighbor "4" "${address}" "${pod_dev}"
+            for attempt in 1 2 3 4 5; do
+                neigh_info="$(ip -4 neigh show to "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                if [ -z "${neigh_info}" ]; then
+                    neigh_info="$(ip -4 neigh show "${address}" dev "${pod_dev}" 2>/dev/null | head -n 1 || true)"
+                fi
+                pod_mac="$(awk '{for (i = 1; i <= NF; i++) if ($i == "lladdr") {print tolower($(i + 1)); exit}}' <<< "${neigh_info}")"
+                [ -n "${pod_mac}" ] && break
+                sleep 0.03 2>/dev/null || true
+            done
         fi
     fi
 
@@ -4407,12 +4478,14 @@ ensure_k3s_non_target_pod_exemption() {
     [ -n "${address}" ] || return 0
     if ! attachment="$(resolve_k3s_non_target_pod_attachment "${family}" "${address}" "${peer_v4}")" || [ -z "${attachment}" ]; then
         revoke_k3s_non_target_pod_exemption "${family}" "${address}"
-        return 0
+        LAST_ERROR="k3s: Cannot resolve live network attachment for non-target pod ${address}"
+        return 1
     fi
     IFS='|' read -r pod_dev pod_mac <<< "${attachment}"
     if [ -z "${pod_dev}" ] || [ -z "${pod_mac}" ]; then
         revoke_k3s_non_target_pod_exemption "${family}" "${address}"
-        return 0
+        LAST_ERROR="k3s: Cannot resolve live network attachment for non-target pod ${address}"
+        return 1
     fi
 
     if [ "${family}" = "6" ]; then
@@ -7082,8 +7155,11 @@ cleanup_k3s_policy_rules() {
     local pref
     local rule_line
     local rule_spec
+    local rule_source
 
-    cleanup_k3s_non_target_mangle_rules
+    if [ "${keep_blackholes}" = "false" ]; then
+        cleanup_k3s_non_target_mangle_rules
+    fi
 
     for pref in "${K3S_BYPASS_RULE_PREF}" "${K3S_TUNNEL_RULE_PREF}" "${K3S_BLACKHOLE_RULE_PREF}"; do
         while IFS= read -r rule_line; do
@@ -7094,6 +7170,11 @@ cleanup_k3s_policy_rules() {
             if [ "${pref}" = "${K3S_BYPASS_RULE_PREF}" ]; then
                 [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
                 if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+                    continue
+                fi
+                rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+                if [ "${keep_blackholes}" != "false" ] && \
+                   { [[ "${rule_spec}" == *" fwmark "* ]] || { [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */32 ]]; }; }; then
                     continue
                 fi
             elif [ "${pref}" = "${K3S_TUNNEL_RULE_PREF}" ]; then
@@ -7128,6 +7209,11 @@ cleanup_k3s_policy_rules() {
         rule_spec="${rule_spec#"${rule_spec%%[![:space:]]*}"}"
         [[ "${rule_spec}" == *" from "* || "${rule_spec}" == from\ * ]] || continue
         if [[ "${rule_spec}" != *" lookup main"* ]] && [[ "${rule_spec}" != *" table main"* ]]; then
+            continue
+        fi
+        rule_source="$(awk '{for (i = 1; i <= NF; i++) if ($i == "from") {print $(i + 1); exit}}' <<< "${rule_spec}")"
+        if [ "${keep_blackholes}" != "false" ] && \
+           { [[ "${rule_spec}" == *" fwmark "* ]] || { [[ "${rule_source}" == */* ]] && [[ "${rule_source}" != */128 ]]; }; }; then
             continue
         fi
         k3s_policy_rule_is_owned "${rule_line}" || continue

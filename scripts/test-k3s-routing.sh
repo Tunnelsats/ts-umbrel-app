@@ -409,6 +409,18 @@ if ip netns exec "${POD_NS}" ping -6 -c 1 -W 1 2001:db8:100::2 >/dev/null 2>&1; 
     echo "FAIL: IPv6 traffic escaped during fail-closed SIGTERM preservation" >&2
     exit 1
 fi
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr add 2001:db8:42::50/64 dev pod0 nodad
+if ! ip netns exec "${POD_NS}" ping -I 10.42.1.50 -c 1 -W 2 198.51.100.2 >/dev/null; then
+    echo "FAIL: non-target pod IP 10.42.1.50 lost Internet access during SIGTERM preservation" >&2
+    exit 1
+fi
+if ! ip netns exec "${POD_NS}" ping -6 -I 2001:db8:42::50 -c 1 -W 2 2001:db8:100::2 >/dev/null; then
+    echo "FAIL: non-target pod IPv6 2001:db8:42::50 lost Internet access during SIGTERM preservation" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" -6 addr del 2001:db8:42::50/64 dev pod0
 
 # When emergency NetworkPolicy creation fails during SIGTERM, preserve_fail_closed_dataplane
 # must install and retain the pod-CIDR subnet quarantine and return non-zero.
