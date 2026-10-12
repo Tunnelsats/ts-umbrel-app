@@ -176,6 +176,17 @@ def test_upstream_dns_discovery_from_wireguard_and_resolv_conf(tmp_path):
     host_resolv = tmp_path / "host-resolv.conf"
     host_resolv.write_text("nameserver 8.8.8.8\nnameserver 192.168.1.1\n", encoding="utf-8")
     assert parse_resolv_conf_nameserver(str(host_resolv)) == ("10.43.0.10", 53)
+    # When cluster_cidrs is sorted (e.g. 10.96.0.0/12 before 10.244.0.0/16), must pick service CIDR 10.96.0.10
+    assert parse_resolv_conf_nameserver(
+        str(host_resolv),
+        cluster_cidrs=("10.96.0.0/12", "10.244.0.0/16"),
+    ) == ("10.96.0.10", 53)
+    assert parse_resolv_conf_nameserver(
+        str(host_resolv),
+        cluster_cidrs=("172.16.0.0/16", "172.20.0.0/16"),
+        pod_cidrs=("172.20.0.0/16",),
+    ) == ("172.16.0.10", 53)
+
 
 
 def test_bind_socket_to_interface_and_fail_closed_servfail_without_cluster_fallback(tmp_path):

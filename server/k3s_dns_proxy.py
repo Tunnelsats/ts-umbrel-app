@@ -450,6 +450,7 @@ def parse_resolv_conf_nameserver(
     default_host: str = "10.43.0.10",
     default_port: int = 53,
     cluster_cidrs: tuple[str, ...] = DEFAULT_CLUSTER_CIDRS,
+    pod_cidrs: tuple[str, ...] = (),
 ) -> tuple[str, int]:
     """Discover the first cluster-internal IPv4 nameserver in resolv.conf."""
     cluster_nets = [
@@ -482,11 +483,64 @@ def parse_resolv_conf_nameserver(
     if fallback is not None and cluster_nets:
         fallback_addr = ipaddress.IPv4Address(fallback[0])
         if not any(fallback_addr in net for net in cluster_nets):
-            service_candidates = cluster_nets[1:] if len(cluster_nets) >= 2 else cluster_nets
+            k8s_svc_host = os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()
+            if k8s_svc_host:
+                try:
+                    svc_host_addr = ipaddress.IPv4Address(k8s_svc_host)
+                    for net in cluster_nets:
+                        if svc_host_addr in net and net.num_addresses > 10:
+                            return (str(net.network_address + 10), default_port)
+                except ValueError:
+                    pass
+
+            raw_pod_tokens = list(pod_cidrs) + [
+                tok.strip()
+                for tok in os.environ.get("K3S_POD_CIDRS", "").split(",")
+                if tok.strip()
+            ]
+            explicit_pod_nets = {
+                net
+                for net in _parse_cidr_networks(tuple(raw_pod_tokens))
+                if net.version == 4 and net.prefixlen < 32
+            }
+            target_ip = os.environ.get("DOCKER_TARGET_IP", "").strip()
+            if target_ip:
+                try:
+                    target_addr = ipaddress.IPv4Address(target_ip)
+                    for net in cluster_nets:
+                        if target_addr in net:
+                            explicit_pod_nets.add(net)
+                except ValueError:
+                    pass
+
+            known_pod_defaults = {
+                ipaddress.IPv4Network("10.42.0.0/16"),
+                ipaddress.IPv4Network("10.244.0.0/16"),
+                ipaddress.IPv4Network("192.168.0.0/16"),
+            }
+            known_svc_defaults = {
+                ipaddress.IPv4Network("10.43.0.0/16"),
+                ipaddress.IPv4Network("10.96.0.0/12"),
+            }
+            service_candidates = (
+                [
+                    net
+                    for net in cluster_nets
+                    if net in known_svc_defaults and net not in explicit_pod_nets
+                ]
+                + [
+                    net
+                    for net in cluster_nets
+                    if net not in explicit_pod_nets and net not in known_pod_defaults
+                ]
+                + [net for net in cluster_nets if net not in explicit_pod_nets]
+                + list(cluster_nets)
+            )
             for net in service_candidates:
                 if net.num_addresses > 10:
                     return (str(net.network_address + 10), default_port)
     return fallback if fallback is not None else ("10.43.0.10", default_port)
+
 
 
 def parse_resolv_conf_cluster_domain(

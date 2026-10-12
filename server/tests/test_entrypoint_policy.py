@@ -5252,22 +5252,31 @@ EOF_WG
 [[ "$(resolve_k3s_vpn_dns_servers)" == "1.1.1.1,9.9.9.9" ]]
 rm -f "${WG_CONF_TMP}"
 
-# 2. Custom cluster DNS discovery works under set -u for custom service CIDR (10.96.0.0/12)
+# 2. Custom cluster DNS discovery works when normalize_k3s_bypass_cidrs sorts 10.96.0.0/12 before 10.244.0.0/16
 unset K3S_CLUSTER_DNS_IP
+DOCKER_TARGET_IP="10.244.1.7"
 K3S_BYPASS_CIDRS="10.244.0.0/16,10.96.0.0/12"
-K3S_BYPASS_CIDRS_NORMALIZED="10.244.0.0/16,10.96.0.0/12"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "10.96.0.0/12,10.244.0.0/16" ]]
 RESOLV_TMP="$(mktemp)"
 printf 'nameserver 10.96.0.10\n' > "${RESOLV_TMP}"
 K3S_RESOLV_CONF_PATH="${RESOLV_TMP}"
 [[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.96.0.10:53" ]]
 printf 'nameserver 192.168.1.1\n' > "${RESOLV_TMP}"
 [[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.96.0.10:53" ]]
+DOCKER_TARGET_IP="172.20.1.7"
+K3S_BYPASS_CIDRS="172.20.0.0/16,172.16.0.0/16"
+normalize_k3s_bypass_cidrs
+[[ "${K3S_BYPASS_CIDRS_NORMALIZED}" == "172.16.0.0/16,172.20.0.0/16" ]]
+[[ "$(resolve_k3s_cluster_dns_endpoint)" == "172.16.0.10:53" ]]
+DOCKER_TARGET_IP="10.42.1.7"
 K3S_BYPASS_CIDRS="10.42.0.0/16,10.43.0.0/16,192.168.1.25/32"
-K3S_BYPASS_CIDRS_NORMALIZED="10.42.0.0/16,10.43.0.0/16,192.168.1.25/32"
+normalize_k3s_bypass_cidrs
 [[ "$(resolve_k3s_cluster_dns_endpoint)" == "10.43.0.10:53" ]]
 rm -f "${RESOLV_TMP}"
 
-# 3. IPv4-only pod does not install node-wide ip6tables drops; MAC/IPv6-scoped pods do
+# 3. IPv4-only pod does not install node-wide ip6tables drops; MAC/IPv6-scoped pods do,
+# and unknown/replacement pods in pod CIDR without non-target fwmark are blocked on port 53/853
 NAT_PREROUTING=""
 FILTER_INPUT=""
 FILTER_FORWARD=""
@@ -5363,12 +5372,32 @@ ensure_k3s_dns_protection
 k3s_dns_protection_is_synced
 [[ "${V6_INPUT}" == "" ]]
 [[ "${V6_FORWARD}" == "" ]]
+[[ "${FILTER_INPUT}" == *"-A INPUT -s 10.42.0.0/16 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
+[[ "${FILTER_FORWARD}" == *"-A FORWARD -s 10.42.0.0/16 ! -o tunnelsatsv2 -m mark ! --mark ${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK} -p udp --dport 53 -m comment --comment tunnelsats-k3s-dns-guard -j DROP"* ]]
 
 TARGET_IPV6_MACS=("02:42:0a:2a:01:07")
 ensure_k3s_dns_protection
 k3s_dns_protection_is_synced
 [[ "${V6_INPUT}" == *"-A INPUT -m mac --mac-source 02:42:0a:2a:01:07 -p udp --dport 53 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
 [[ "${V6_FORWARD}" == *"-A FORWARD -m mac --mac-source 02:42:0a:2a:01:07 -p tcp --dport 853 -m comment --comment tunnelsats-k3s-ipv6-dns-guard -j DROP"* ]]
+
+# 4. Proxy startup failures preserve stderr diagnostics in K3S_DNS_PROXY_LOG_FILE and LAST_ERROR
+BAD_PROXY_SCRIPT="$(mktemp)"
+cat > "${BAD_PROXY_SCRIPT}" <<'EOF_BAD_PROXY'
+import sys
+sys.stderr.write("OSError: [Errno 98] Address already in use\n")
+sys.exit(1)
+EOF_BAD_PROXY
+K3S_DNS_PROXY_SCRIPT="${BAD_PROXY_SCRIPT}"
+K3S_DNS_PROXY_PID_FILE="$(mktemp -u)"
+K3S_DNS_PROXY_LOG_FILE="$(mktemp)"
+K3S_DNS_ENFORCE_PROXY_PROCESS="true"
+if ensure_k3s_dns_proxy_running; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Address already in use"* ]]
+grep -Fq "Address already in use" "${K3S_DNS_PROXY_LOG_FILE}"
+rm -f "${BAD_PROXY_SCRIPT}" "${K3S_DNS_PROXY_LOG_FILE}" "${K3S_DNS_PROXY_PID_FILE}" "${K3S_DNS_PROXY_PID_FILE}.args"
 '''
     )
     assert result.returncode == 0, result.stderr

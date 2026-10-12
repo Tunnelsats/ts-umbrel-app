@@ -460,22 +460,23 @@ pod_dns_query() {
     local proto="$1"
     local server_ip="$2"
     local qname="$3"
+    local src_ip="${4:-10.42.1.7}"
     ip netns exec "${POD_NS}" python3 -c '
 import socket, struct, sys
-proto, server_ip, qname = sys.argv[1], sys.argv[2], sys.argv[3]
+proto, server_ip, qname, src_ip = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 labels = b"".join(bytes([len(p)]) + p.encode("ascii") for p in qname.split(".")) + b"\x00"
 pkt = struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", 1, 1)
 if proto == "udp":
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(2.0)
-    s.bind(("10.42.1.7", 0))
+    s.settimeout(1.0)
+    s.bind((src_ip, 0))
     s.sendto(pkt, (server_ip, 53))
     resp, _ = s.recvfrom(4096)
     s.close()
 else:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(2.0)
-    s.bind(("10.42.1.7", 0))
+    s.settimeout(1.0)
+    s.bind((src_ip, 0))
     s.connect((server_ip, 53))
     s.sendall(struct.pack("!H", len(pkt)) + pkt)
     (rlen,) = struct.unpack("!H", s.recv(2))
@@ -485,7 +486,7 @@ _, flags, _, ancount, _, _ = struct.unpack("!HHHHHH", resp[:12])
 rcode = flags & 0x000F
 ip_str = socket.inet_ntoa(resp[-4:]) if rcode == 0 and ancount >= 1 else ""
 print(f"{rcode}:{ip_str}")
-' "${proto}" "${server_ip}" "${qname}"
+' "${proto}" "${server_ip}" "${qname}" "${src_ip}"
 }
 
 cluster_dns_res="$(pod_dns_query udp 10.43.0.10 kubernetes.default.svc.cluster.local)"
@@ -508,6 +509,24 @@ if [ "${direct_clear_res}" != "0:198.51.100.77" ]; then
     echo "FAIL: direct clearnet DNS query to 192.0.2.2:53 was not redirected to VPN DNS (${direct_clear_res})" >&2
     exit 1
 fi
+# Verify that an undiscovered replacement pod IP (10.42.1.11) in the pod CIDR
+# cannot reach CoreDNS (10.43.0.10:53) before its IP appears in the watch stream,
+# while a verified non-target pod (10.42.1.50 with MAC-bound fwmark) retains
+# direct CoreDNS access.
+ip -n "${POD_NS}" addr add 10.42.1.11/24 dev pod0
+ip -n "${POD_NS}" addr add 10.42.1.50/24 dev pod0
+ip -n "${ROUTER_NS}" neigh replace 10.42.1.50 lladdr "${ORIG_POD0_MAC}" dev pod-r nud reachable
+if pod_dns_query udp 10.43.0.10 nodes.lightning.directory 10.42.1.11 >/dev/null 2>&1; then
+    echo "FAIL: unseen replacement pod IP 10.42.1.11 bypassed DNS protection via CoreDNS" >&2
+    exit 1
+fi
+non_target_dns_res="$(pod_dns_query udp 10.43.0.10 kubernetes.default.svc.cluster.local 10.42.1.50)"
+if [ "${non_target_dns_res}" != "0:10.43.0.1" ]; then
+    echo "FAIL: verified non-target pod IP 10.42.1.50 lost CoreDNS access (${non_target_dns_res})" >&2
+    exit 1
+fi
+ip -n "${POD_NS}" addr del 10.42.1.50/24 dev pod0
+ip -n "${POD_NS}" addr del 10.42.1.11/24 dev pod0
 if grep -Fq "nodes.lightning.directory" "${CLUSTER_DNS_LOG_TMP}" 2>/dev/null; then
     echo "FAIL: external domain nodes.lightning.directory leaked to cluster DNS 10.43.0.10" >&2
     exit 1
@@ -516,6 +535,7 @@ if [ -s "${CLEAR_DNS_LOG_TMP}" ]; then
     echo "FAIL: DNS queries leaked to clearnet DNS 192.0.2.2" >&2
     exit 1
 fi
+
 
 # Removing the WireGuard default leaves the table blackhole in place. External
 # traffic must fail instead of falling back to the clear interface.

@@ -223,6 +223,7 @@ K3S_SHUTDOWN_RETRY_INTERVAL="${K3S_SHUTDOWN_RETRY_INTERVAL:-1}"
 K3S_DNS_PROXY_HOST="${K3S_DNS_PROXY_HOST:-0.0.0.0}"
 K3S_DNS_PROXY_PORT="${K3S_DNS_PROXY_PORT:-15353}"
 K3S_DNS_PROXY_PID_FILE="${K3S_DNS_PROXY_PID_FILE:-/run/tunnelsats-k3s-dns-proxy.pid}"
+K3S_DNS_PROXY_LOG_FILE="${K3S_DNS_PROXY_LOG_FILE:-/tmp/tunnelsats-k3s-dns-proxy.log}"
 K3S_DNS_UPSTREAM_FALLBACK="${K3S_DNS_UPSTREAM_FALLBACK:-1.1.1.1,9.9.9.9}"
 K3S_DNS_PROXY_SCRIPT="${K3S_DNS_PROXY_SCRIPT:-/app/server/k3s_dns_proxy.py}"
 if [ ! -f "${K3S_DNS_PROXY_SCRIPT}" ] && [ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/server/k3s_dns_proxy.py" ]; then
@@ -6555,9 +6556,17 @@ resolve_k3s_cluster_dns_endpoint() {
 
     local raw_cidrs="${K3S_BYPASS_CIDRS_NORMALIZED:-${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}}"
     local resolv_path="${K3S_RESOLV_CONF_PATH:-/etc/resolv.conf}"
+    local pod_cidrs=""
+    pod_cidrs="$(resolve_k3s_pod_cidrs "${DOCKER_TARGET_IP:-}" 2>/dev/null || true)"
     local discovered=""
     discovered="$(
-        RAW_CIDRS="${raw_cidrs}" RESOLV_PATH="${resolv_path}" python3 -c '
+        RAW_CIDRS="${raw_cidrs}" \
+        UNSORTED_CIDRS="${K3S_BYPASS_CIDRS:-}" \
+        POD_CIDRS="${pod_cidrs},${K3S_POD_CIDRS:-}" \
+        TARGET_IP="${DOCKER_TARGET_IP:-}" \
+        K8S_SERVICE_HOST="${KUBERNETES_SERVICE_HOST:-}" \
+        RESOLV_PATH="${resolv_path}" \
+        python3 -c '
 import ipaddress, os, sys
 raw_cidrs = os.environ.get("RAW_CIDRS", "10.42.0.0/16,10.43.0.0/16")
 resolv_path = os.environ.get("RESOLV_PATH", "/etc/resolv.conf")
@@ -6568,7 +6577,7 @@ for part in raw_cidrs.split(","):
         continue
     try:
         net = ipaddress.ip_network(token, strict=False)
-        if net.version == 4 and net.prefixlen < 32:
+        if net.version == 4 and net.prefixlen < 32 and net not in nets:
             nets.append(net)
     except ValueError:
         continue
@@ -6597,7 +6606,67 @@ if not nets or any(default_dns in net for net in nets):
     print("10.43.0.10:53")
     sys.exit(0)
 
-candidates = nets[1:] if len(nets) >= 2 else nets
+k8s_svc_host = os.environ.get("K8S_SERVICE_HOST", "").strip()
+if k8s_svc_host:
+    try:
+        svc_addr = ipaddress.IPv4Address(k8s_svc_host)
+        for net in nets:
+            if svc_addr in net and net.num_addresses > 10:
+                print(f"{net.network_address + 10}:53")
+                sys.exit(0)
+    except ValueError:
+        pass
+
+explicit_pod_nets = set()
+for raw in os.environ.get("POD_CIDRS", "").replace("\n", ",").split(","):
+    tok = raw.strip()
+    if not tok:
+        continue
+    try:
+        pnet = ipaddress.ip_network(tok, strict=False)
+        if pnet.version == 4 and pnet.prefixlen < 32:
+            explicit_pod_nets.add(pnet)
+    except ValueError:
+        pass
+
+target_ip = os.environ.get("TARGET_IP", "").strip()
+if target_ip:
+    try:
+        t_addr = ipaddress.IPv4Address(target_ip)
+        for net in nets:
+            if t_addr in net:
+                explicit_pod_nets.add(net)
+    except ValueError:
+        pass
+
+known_pod_defaults = {
+    ipaddress.IPv4Network("10.42.0.0/16"),
+    ipaddress.IPv4Network("10.244.0.0/16"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+}
+known_svc_defaults = {
+    ipaddress.IPv4Network("10.43.0.0/16"),
+    ipaddress.IPv4Network("10.96.0.0/12"),
+}
+unsorted_nets = []
+for part in os.environ.get("UNSORTED_CIDRS", "").split(","):
+    token = part.strip()
+    if not token:
+        continue
+    try:
+        unet = ipaddress.ip_network(token, strict=False)
+        if unet.version == 4 and unet.prefixlen < 32 and unet not in unsorted_nets:
+            unsorted_nets.append(unet)
+    except ValueError:
+        pass
+
+candidates = (
+    [net for net in nets if net in known_svc_defaults and net not in explicit_pod_nets]
+    + [net for net in nets if net not in explicit_pod_nets and net not in known_pod_defaults]
+    + [net for net in nets if net not in explicit_pod_nets]
+    + (unsorted_nets[1:] if len(unsorted_nets) >= 2 else [])
+    + nets
+)
 for net in candidates:
     if net.num_addresses > 10:
         print(f"{net.network_address + 10}:53")
@@ -6699,6 +6768,7 @@ ensure_k3s_dns_proxy_running() {
     local -a source_args=()
     local desired_args
     local current_args=""
+    local log_file="${K3S_DNS_PROXY_LOG_FILE:-/tmp/tunnelsats-k3s-dns-proxy.log}"
     cluster_dns="$(resolve_k3s_cluster_dns_endpoint)"
     cluster_cidrs="${K3S_BYPASS_CIDRS_NORMALIZED:-${K3S_BYPASS_CIDRS:-10.42.0.0/16,10.43.0.0/16}}"
     cluster_domain="$(resolve_k3s_cluster_domain)"
@@ -6718,7 +6788,8 @@ ensure_k3s_dns_proxy_running() {
     fi
 
     stop_k3s_dns_proxy
-    mkdir -p "$(dirname "${K3S_DNS_PROXY_PID_FILE}")" 2>/dev/null || true
+    mkdir -p "$(dirname "${K3S_DNS_PROXY_PID_FILE}")" "$(dirname "${log_file}")" 2>/dev/null || true
+    : > "${log_file}" 2>/dev/null || true
     python3 "${K3S_DNS_PROXY_SCRIPT}" \
         --listen-host "${K3S_DNS_PROXY_HOST}" \
         --listen-port "${K3S_DNS_PROXY_PORT}" \
@@ -6728,7 +6799,7 @@ ensure_k3s_dns_proxy_running() {
         --vpn-dns "${vpn_dns}" \
         --vpn-interface "${WG_IFACE}" \
         "${source_args[@]}" \
-        --pid-file "${K3S_DNS_PROXY_PID_FILE}" >/dev/null 2>&1 &
+        --pid-file "${K3S_DNS_PROXY_PID_FILE}" > "${log_file}" 2>&1 &
 
     local attempts=0
     while [ "${attempts}" -lt 30 ]; do
@@ -6741,7 +6812,12 @@ ensure_k3s_dns_proxy_running() {
         attempts=$((attempts + 1))
     done
 
-    LAST_ERROR="k3s: Failed to start split-horizon DNS proxy on ${K3S_DNS_PROXY_HOST}:${K3S_DNS_PROXY_PORT}"
+    local startup_err=""
+    if [ -s "${log_file}" ]; then
+        startup_err="$(tail -n 5 "${log_file}" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || true)"
+    fi
+    LAST_ERROR="k3s: Failed to start split-horizon DNS proxy on ${K3S_DNS_PROXY_HOST}:${K3S_DNS_PROXY_PORT}${startup_err:+ (${startup_err})}"
+    log ERROR "${LAST_ERROR}"
     return 1
 }
 
@@ -6804,15 +6880,44 @@ k3s_nat_dns_rules_precede_kube_services() {
     return 0
 }
 
+k3s_ipv4_dns_rule_is_current() {
+    local rule="$1"
+    local target_ip="$2"
+    local pod_cidrs="$3"
+    local pod_cidr=""
+
+    if [[ "${rule}" == *" -s ${target_ip}/32 "* ]] || [[ "${rule}" == *" -s ${target_ip} "* ]] || \
+       [[ "${rule}" == *" ! -s ${target_ip}/32 "* ]] || [[ "${rule}" == *" ! -s ${target_ip} "* ]]; then
+        return 0
+    fi
+
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        if [[ "${rule}" == *" -s ${pod_cidr} "* ]] && [[ "${rule}" == *"tunnelsats-k3s-dns-guard"* ]]; then
+            return 0
+        fi
+    done <<< "${pod_cidrs}"
+    return 1
+}
+
 ensure_k3s_dns_protection() {
     local target_ip="${1:-${DOCKER_TARGET_IP:-}}"
     local changed=0
+    local matched_pod_cidrs=""
+    local pod_cidr=""
+    local rule_line=""
     K3S_DNS_CHANGED="0"
     DNS_PROTECTED="false"
 
     if ! is_valid_ipv4_address "${target_ip}"; then
         LAST_ERROR="k3s: Invalid target IP '${target_ip}' for DNS protection"
         return 1
+    fi
+
+    matched_pod_cidrs="$(resolve_k3s_pod_cidrs "${target_ip}" 2>/dev/null || true)"
+    if [ -z "${matched_pod_cidrs}" ]; then
+        matched_pod_cidrs="10.42.0.0/16"
     fi
 
     if ! ensure_k3s_dns_oif_policy_rule; then
@@ -6874,14 +6979,45 @@ ensure_k3s_dns_protection() {
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
         need_input_sync=1
     fi
-    local stale_input_count
-    stale_input_count="$(iptables -S INPUT 2>/dev/null | grep -E "tunnelsats-k3s-dns-(in|guard)" | grep -vcF -- "${target_ip}" || true)"
-    if [ "${stale_input_count}" -gt 0 ]; then
-        need_input_sync=1
-    fi
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        if ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
+            need_input_sync=1
+        fi
+    done <<< "${matched_pod_cidrs}"
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        if ! k3s_ipv4_dns_rule_is_current "${rule_line}" "${target_ip}" "${matched_pod_cidrs}"; then
+            need_input_sync=1
+            break
+        fi
+    done < <(iptables -S INPUT 2>/dev/null | grep -E "tunnelsats-k3s-dns-(in|guard)" || true)
     if [ "${need_input_sync}" -eq 1 ]; then
         remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-in"
         remove_tagged_iptables_rules filter INPUT "tunnelsats-k3s-dns-guard"
+        while IFS= read -r pod_cidr; do
+            [ -n "${pod_cidr}" ] || continue
+            [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+            if ! iptables -I INPUT 1 -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I INPUT 1 -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I INPUT 1 -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I INPUT 1 -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP; then
+                LAST_ERROR="k3s: Failed to add pod-CIDR DNS INPUT guard rules for ${pod_cidr}"
+                return 1
+            fi
+        done <<< "${matched_pod_cidrs}"
         if ! iptables -I INPUT 1 -s "${target_ip}" -p tcp --dport 853 \
             -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
            ! iptables -I INPUT 1 -s "${target_ip}" -p udp --dport 853 \
@@ -6915,13 +7051,44 @@ ensure_k3s_dns_protection() {
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
         need_fwd_dns_sync=1
     fi
-    local stale_fwd_dns_count
-    stale_fwd_dns_count="$(iptables -S FORWARD 2>/dev/null | grep "tunnelsats-k3s-dns-guard" | grep -vcF -- "-s ${target_ip}" || true)"
-    if [ "${stale_fwd_dns_count}" -gt 0 ]; then
-        need_fwd_dns_sync=1
-    fi
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        if ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
+            need_fwd_dns_sync=1
+        fi
+    done <<< "${matched_pod_cidrs}"
+    while IFS= read -r rule_line; do
+        [ -n "${rule_line}" ] || continue
+        if ! k3s_ipv4_dns_rule_is_current "${rule_line}" "${target_ip}" "${matched_pod_cidrs}"; then
+            need_fwd_dns_sync=1
+            break
+        fi
+    done < <(iptables -S FORWARD 2>/dev/null | grep "tunnelsats-k3s-dns-guard" || true)
     if [ "${need_fwd_dns_sync}" -eq 1 ]; then
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-k3s-dns-guard"
+        while IFS= read -r pod_cidr; do
+            [ -n "${pod_cidr}" ] || continue
+            [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+            if ! iptables -I FORWARD 1 -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I FORWARD 1 -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I FORWARD 1 -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
+               ! iptables -I FORWARD 1 -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+                -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP; then
+                LAST_ERROR="k3s: Failed to add pod-CIDR FORWARD DNS/DoT guard rules for ${pod_cidr}"
+                return 1
+            fi
+        done <<< "${matched_pod_cidrs}"
         if ! iptables -I FORWARD 1 -s "${target_ip}" ! -o "${WG_IFACE}" -p tcp --dport 853 \
             -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP || \
            ! iptables -I FORWARD 1 -s "${target_ip}" ! -o "${WG_IFACE}" -p udp --dport 853 \
@@ -7066,6 +7233,13 @@ k3s_dns_protection_is_synced() {
         return 1
     fi
 
+    local matched_pod_cidrs=""
+    local pod_cidr=""
+    matched_pod_cidrs="$(resolve_k3s_pod_cidrs "${DOCKER_TARGET_IP}" 2>/dev/null || true)"
+    if [ -z "${matched_pod_cidrs}" ]; then
+        matched_pod_cidrs="10.42.0.0/16"
+    fi
+
     if { [ "${K3S_DNS_ENFORCE_PROXY_PROCESS:-false}" = "true" ] || ! declare -F iptables >/dev/null 2>&1; } && \
        ! k3s_dns_proxy_is_running; then
         DNS_PROTECTED="false"
@@ -7107,6 +7281,24 @@ k3s_dns_protection_is_synced() {
         return 1
     fi
 
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        if ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C INPUT -s "${pod_cidr}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
+            DNS_PROTECTED="false"
+            LAST_ERROR="k3s: Pod-CIDR DNS INPUT guard rules are missing for ${pod_cidr}"
+            log WARN "rules_are_synced: ${LAST_ERROR}"
+            return 1
+        fi
+    done <<< "${matched_pod_cidrs}"
+
     if ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" ! -o "${WG_IFACE}" -p udp --dport 53 \
         -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
        ! iptables -C FORWARD -s "${DOCKER_TARGET_IP}" ! -o "${WG_IFACE}" -p tcp --dport 53 \
@@ -7120,6 +7312,24 @@ k3s_dns_protection_is_synced() {
         log WARN "rules_are_synced: ${LAST_ERROR}"
         return 1
     fi
+
+    while IFS= read -r pod_cidr; do
+        [ -n "${pod_cidr}" ] || continue
+        [[ "${pod_cidr}" == */* ]] && [[ "${pod_cidr}" != */32 ]] || continue
+        if ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 53 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p udp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null || \
+           ! iptables -C FORWARD -s "${pod_cidr}" ! -o "${WG_IFACE}" -m mark ! --mark "${K3S_NON_TARGET_FWMARK}/${K3S_NON_TARGET_FWMARK_MASK}" -p tcp --dport 853 \
+            -m comment --comment "tunnelsats-k3s-dns-guard" -j DROP 2>/dev/null; then
+            DNS_PROTECTED="false"
+            LAST_ERROR="k3s: Pod-CIDR FORWARD DNS/DoT guard rules are missing for ${pod_cidr}"
+            log WARN "rules_are_synced: ${LAST_ERROR}"
+            return 1
+        fi
+    done <<< "${matched_pod_cidrs}"
 
     if command -v ip6tables >/dev/null 2>&1 && \
        { declare -F ip6tables >/dev/null 2>&1 || ! declare -F iptables >/dev/null 2>&1; }; then
