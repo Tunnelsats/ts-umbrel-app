@@ -4411,7 +4411,8 @@ ip() {
     return 0
 }
 WATCH_EVENT_FILE="${TEST_TMP}/watch-event.json"
-printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-bg","resourceVersion":"555","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.11","podIPs":[{"ip":"10.42.1.11"}]}}}' > "${WATCH_EVENT_FILE}"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-bg","resourceVersion":"555","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Pending","podIP":"10.42.1.11","podIPs":[{"ip":"10.42.1.11"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
 k8s_watch_api() {
     cat "${WATCH_EVENT_FILE}"
     sleep 0.2
@@ -4419,7 +4420,7 @@ k8s_watch_api() {
 ensure_k3s_pod_watcher_running
 [[ -n "${K3S_WATCHER_PID}" ]]
 kill -0 "${K3S_WATCHER_PID}"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     load_k3s_pod_watch_state
     if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "555" ]]; then
         break
@@ -4439,11 +4440,11 @@ MANAGED_K3S_POD_NAMESPACE="lightning"
 MANAGED_K3S_POD_SELECTOR="app=lnd"
 K3S_POLICY_STATE_LOADED="true"
 persist_managed_k3s_policy_state
-jq -n '{target_ip:"10.42.1.8", rules_synced:true}' > "${STATE_FILE}"
-: > "${BG_GUARD_LOG}"
-rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
-printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"556","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+jq -n '{target_ip:"10.42.1.8", rules_synced:true}' > "${STATE_FILE}.tmp"
+mv -f "${STATE_FILE}.tmp" "${STATE_FILE}"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"556","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     load_k3s_pod_watch_state
     if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]; then
         break
@@ -4451,6 +4452,19 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     sleep 0.1
 done
 [[ "${K3S_WATCH_RESOURCE_VERSION}" == "556" ]]
+
+: > "${BG_GUARD_LOG}"
+rm -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger"
+printf '%s\n' '{"type":"MODIFIED","object":{"metadata":{"name":"lnd-replacement","resourceVersion":"557","labels":{"app":"lnd"}},"spec":{"nodeName":"worker-a"},"status":{"phase":"Running","podIP":"10.42.1.8","podIPs":[{"ip":"10.42.1.8"}],"conditions":[{"type":"Ready","status":"True"}]}}}' > "${WATCH_EVENT_FILE}.tmp"
+mv -f "${WATCH_EVENT_FILE}.tmp" "${WATCH_EVENT_FILE}"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    load_k3s_pod_watch_state
+    if [[ "${K3S_WATCH_RESOURCE_VERSION}" == "557" ]]; then
+        break
+    fi
+    sleep 0.1
+done
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "557" ]]
 ! grep -Fxq "10.42.1.8" "${BG_GUARD_LOG}"
 [[ ! -f "${RECONCILE_TRIGGER_DIR}/k3s-pod-watch.trigger" ]]
 
