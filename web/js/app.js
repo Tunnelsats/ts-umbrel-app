@@ -1219,7 +1219,9 @@ function renderAnnouncementDiagnostics(container, data, diagnostics, ctx) {
 
     const actions = createUiElement('div', 'ts-diag-actions');
     actions.appendChild(createRecheckButton());
-    if (!ctx.onlyPending && (affectsProtected || diagnostics.length === 0)) {
+    // k3s: the configure flow cannot finish for LND there (live verification is unavailable),
+    // so k3s users get the manual steps and the k3s note instead of an automatic action.
+    if (!ctx.onlyPending && !ctx.isK3s && (affectsProtected || diagnostics.length === 0)) {
         const baseLabel = ctx.isSecureMode ? 'Show step-by-step fix' : 'Fix automatically';
         const fixButton = createUiElement('button', 'ts-btn ts-btn-secondary', affectsOther ? `${baseLabel} (${protectedName})` : baseLabel);
         fixButton.type = 'button';
@@ -2033,11 +2035,16 @@ async function confirmRestartModal(nodeType) {
 
         svg.appendChild(path);
         titleIconContainer.appendChild(svg);
-        title.append(titleIconContainer, ' Restart Required');
+        // Configuring LND updates lnd.conf and live gossip without restarting it; only Core
+        // Lightning configuration and Restore (nodeType "Lightning") restart containers.
+        const appliesWithoutRestart = String(nodeType).toLowerCase() === 'lnd';
+        title.append(titleIconContainer, appliesWithoutRestart ? ' Apply TunnelSats Settings' : ' Restart Required');
 
         const body = document.createElement('p');
         body.className = 'text-gray-300 leading-relaxed mb-8';
-        body.textContent = `Applying these settings requires a restart of your ${nodeType.toUpperCase()} container. This will cause a brief (10-20s) downtime for your Lightning node while it re-initializes with the new TunnelSats configuration.`;
+        body.textContent = appliesWithoutRestart
+            ? 'TunnelSats will back up and update your LND announcement settings and refresh its live gossip announcements. LND keeps running; restart it when convenient so it also loads the saved file. Lightning traffic may pause briefly while routing is reconciled.'
+            : `Applying these settings requires a restart of your ${nodeType.toUpperCase()} container. This will cause a brief (10-20s) downtime for your Lightning node while it re-initializes with the new TunnelSats configuration.`;
 
         const actions = document.createElement('div');
         actions.className = 'flex flex-col sm:flex-row gap-3';
@@ -2050,7 +2057,7 @@ async function confirmRestartModal(nodeType) {
         const confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
         confirmBtn.className = 'flex-1 rounded-xl bg-gradient-to-r from-tsyellow to-yellow-500 px-6 py-3.5 text-sm font-bold text-black hover:from-yellow-400 hover:to-yellow-300 transition-all shadow-lg hover:shadow-tsyellow/20 cursor-pointer';
-        confirmBtn.textContent = 'Yes, Restart Node';
+        confirmBtn.textContent = appliesWithoutRestart ? 'Yes, Apply' : 'Yes, Restart Node';
 
         actions.append(cancelBtn, confirmBtn);
         panel.append(title, body, actions);

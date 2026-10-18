@@ -2386,6 +2386,18 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(cards[1].dataset.otherNode).toBe('true');
     });
 
+    test('k3s shows manual guidance instead of an automatic fix that cannot complete there', async () => {
+        mockStatus({ ...SECURE_WRONG_PORT, secure_mode: false, dataplane_mode: 'k3s', target_impl: 'lnd' });
+        await window.fetchStatus();
+
+        expect(document.getElementById('btn-goto-instructions')).toBeNull();
+        expect(document.getElementById('btn-recheck-status')).toBeTruthy();
+        const panel = document.getElementById('announcement-diagnostics-panel');
+        expect(panel.textContent).toContain('k3s: TunnelSats checks your node config file');
+        expect(panel.textContent).not.toContain('Fix automatically');
+        expect(panel.querySelector('.ts-diag-card').textContent).toContain('restart the LND pod');
+    });
+
     test('a new install without a subscription gets a friendly hint and a shortcut', async () => {
         mockStatus({
             vpn_active: false, lnd_detected: true, wg_status: 'Disconnected', target_impl: 'lnd',
@@ -2545,5 +2557,24 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(toasts).toContain('not protected yet');
         expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
         expect(document.getElementById('txt-routing-status').textContent).toBe('Hybrid Lightning Connectivity');
+    });
+
+    test('the configure confirmation does not promise an LND restart but keeps the Core Lightning warning', async () => {
+        const lndChoice = window.confirmRestartModal('lnd');
+        let modal = document.getElementById('restart-confirmation-modal');
+        expect(modal.querySelector('h3').textContent).toContain('Apply TunnelSats Settings');
+        expect(modal.textContent).toContain('LND keeps running');
+        expect(modal.textContent).not.toContain('requires a restart');
+        const buttons = Array.from(modal.querySelectorAll('button')).map((btn) => btn.textContent);
+        expect(buttons).toEqual(['No, Cancel', 'Yes, Apply']);
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Yes, Apply').click();
+        await expect(lndChoice).resolves.toBe(true);
+
+        const clnChoice = window.confirmRestartModal('cln');
+        modal = document.getElementById('restart-confirmation-modal');
+        expect(modal.querySelector('h3').textContent).toContain('Restart Required');
+        expect(modal.textContent).toContain('requires a restart of your CLN container');
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'No, Cancel').click();
+        await expect(clnChoice).resolves.toBe(false);
     });
 });
