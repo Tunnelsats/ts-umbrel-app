@@ -2559,6 +2559,26 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('txt-routing-status').textContent).toBe('Hybrid Lightning Connectivity');
     });
 
+    test('the auto-discovery fix also adds the TunnelSats line when no missing-endpoint card is shown', async () => {
+        // Standard mode with nat=true and no externalhosts line: routing is not active yet, so the
+        // backend reports only the auto-discovery conflict and no separate missing-endpoint card.
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            lnd_routing_active: false,
+            last_error: 'Conflicting node announcement setting detected in node configuration.',
+            last_error_code: 'announcement_conflict',
+            announcement_diagnostics: [diag({ kind: 'auto-discovery', setting: 'nat', value: 'true', line: 'nat=true', line_number: 7 })]
+        }));
+        await window.fetchStatus();
+
+        const cards = document.querySelectorAll('.ts-diag-card');
+        expect(cards).toHaveLength(1);
+        const steps = cards[0].querySelector('.ts-diag-steps').textContent;
+        expect(steps).toContain('nat=false');
+        expect(steps).toContain('Make sure this line exists exactly once');
+        expect(steps).toContain(`externalhosts=${EXPECTED}`);
+    });
+
     test('the configure confirmation does not promise an LND restart but keeps the Core Lightning warning', async () => {
         const lndChoice = window.confirmRestartModal('lnd');
         let modal = document.getElementById('restart-confirmation-modal');

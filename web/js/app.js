@@ -1048,7 +1048,9 @@ function announcementGuidance(diag, ctx) {
             guidance.summary = impl === 'cln'
                 ? [shown, ' lets Core Lightning discover and announce your public IP, which can reveal your home IP.']
                 : [shown, ' lets LND discover your public IP through your router (UPnP or NAT-PMP) and announce it, which can reveal your home IP.'];
-            guidance.steps = [openStep, ['Change ', lineRef, ' to ', { code: disabledLine, copy: 'Configuration line' }], restartStep, recheckStep];
+            // Without a TunnelSats line routing stays inactive, so no separate missing-endpoint
+            // card appears; the manual fix must add the line as well as disable discovery.
+            guidance.steps = [openStep, ['Change ', lineRef, ' to ', { code: disabledLine, copy: 'Configuration line' }], ensureStep, restartStep, recheckStep].filter(Boolean);
             break;
         }
         case 'missing-endpoint':

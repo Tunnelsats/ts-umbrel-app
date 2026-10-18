@@ -120,6 +120,10 @@ do not need SSH.
 | TunnelSats endpoint not announced | The TunnelSats line is missing. | Add the line shown on the dashboard. |
 | Node config file not readable / Waiting for your Lightning node | TunnelSats cannot check yet. | Make sure the Lightning app is installed, running, synced and unlocked, then re-check. |
 
+Whatever the label, finish with exactly one TunnelSats line, as shown on the dashboard:
+`externalhosts=<server>:<forwarded-port>` (LND) or `announce-addr=<server>:<forwarded-port>`
+(Core Lightning). Without it, the dashboard cannot show your node as protected.
+
 **Where was it found?** *Config file* means TunnelSats read `lnd.conf` (or the Core
 Lightning `config`). This check runs in every mode, and it is the only check in Secure
 Mode, where TunnelSats can read the file but cannot change it or ask your node directly.
