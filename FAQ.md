@@ -129,7 +129,9 @@ there it also withdraws old addresses automatically on every check.
 **Fix it without SSH**
 
 1. Standard mode: click **Fix automatically** on the dashboard. TunnelSats backs up and
-   disables the conflicting lines, withdraws old addresses from live gossip, and restarts LND.
+   disables the conflicting lines in your config file and withdraws old addresses from
+   live gossip right away. LND keeps running (Core Lightning is restarted). Restart LND
+   when convenient so it also loads the saved file, especially after `nat=true` was disabled.
 2. Secure Mode: click **Show step-by-step fix**. It lists the exact lines from your config
    file. Edit the file in the Umbrel **Files** app, save it, and restart the Lightning Node
    (or Core Lightning) app.

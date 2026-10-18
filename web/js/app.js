@@ -1105,6 +1105,16 @@ function renderDiagnosticCard(diag, ctx) {
         ssh.appendChild(createCommandBlock(guidance.ssh.command, 'Withdrawal command'));
         card.appendChild(ssh);
     }
+    // Both node configs are audited, but the dashboard buttons only act on the protected node.
+    const cardImpl = diag.impl === 'cln' ? 'cln' : 'lnd';
+    const protectedImpl = ctx.targetImpl === 'cln' ? 'cln' : 'lnd';
+    if (cardImpl !== protectedImpl && diag.source === 'config_file') {
+        const protectedName = protectedImpl === 'cln' ? 'Core Lightning' : 'LND';
+        const cardName = cardImpl === 'cln' ? 'Core Lightning' : 'LND';
+        card.dataset.otherNode = 'true';
+        card.appendChild(createUiElement('p', 'ts-diag-meta',
+            `TunnelSats is protecting ${protectedName}, so its buttons never change ${cardName} settings. Fix this ${cardName} line manually with the steps above.`));
+    }
     return card;
 }
 
@@ -1154,10 +1164,22 @@ function renderAnnouncementDiagnostics(container, data, diagnostics, ctx) {
     if (expected) {
         panel.appendChild(appendRichText(createUiElement('p', 'ts-diag-meta'), ['Expected announcement: ', { code: expected, copy: 'Expected announcement' }]));
     }
-    let modeNote = ctx.onlyPending
-        ? 'Nothing to change in your configuration right now. Once your node answers, click Re-check now.'
-        : 'TunnelSats can fix configuration conflicts for you with Fix automatically, or you can follow the steps yourself.';
-    if (ctx.isSecureMode) {
+
+    // Fix actions call configure-node, which also selects the protected node. Only offer them
+    // for the node TunnelSats protects, so a conflict in the other node's config never
+    // silently switches the protected target.
+    const protectedImpl = ctx.targetImpl === 'cln' ? 'cln' : 'lnd';
+    const protectedName = protectedImpl === 'cln' ? 'Core Lightning' : 'LND';
+    const actionable = diagnostics.filter((diag) => diag.kind !== 'verification-pending');
+    const affectsProtected = actionable.some((diag) => (diag.impl === 'cln' ? 'cln' : 'lnd') === protectedImpl);
+    const affectsOther = actionable.some((diag) => (diag.impl === 'cln' ? 'cln' : 'lnd') !== protectedImpl);
+
+    let modeNote = 'TunnelSats can fix configuration conflicts for you with Fix automatically, or you can follow the steps yourself.';
+    if (ctx.onlyPending) {
+        modeNote = 'Nothing to change in your configuration right now. Once your node answers, click Re-check now.';
+    } else if (affectsOther && !affectsProtected) {
+        modeNote = `These settings belong to a Lightning node that TunnelSats is not protecting right now (it protects ${protectedName}). Fix them manually with the steps below, then click Re-check now.`;
+    } else if (ctx.isSecureMode) {
         modeNote = 'Secure Mode: TunnelSats can read your node config file but cannot change it or query your node, so you apply the fix and click Re-check now.';
     } else if (ctx.isK3s) {
         modeNote = 'k3s: TunnelSats checks your node config file. Apply the fix where you manage that file, then click Re-check now.';
@@ -1174,11 +1196,12 @@ function renderAnnouncementDiagnostics(container, data, diagnostics, ctx) {
 
     const actions = createUiElement('div', 'ts-diag-actions');
     actions.appendChild(createRecheckButton());
-    if (!ctx.onlyPending) {
-        const fixButton = createUiElement('button', 'ts-btn ts-btn-secondary', ctx.isSecureMode ? 'Show step-by-step fix' : 'Fix automatically');
+    if (!ctx.onlyPending && (affectsProtected || diagnostics.length === 0)) {
+        const baseLabel = ctx.isSecureMode ? 'Show step-by-step fix' : 'Fix automatically';
+        const fixButton = createUiElement('button', 'ts-btn ts-btn-secondary', affectsOther ? `${baseLabel} (${protectedName})` : baseLabel);
         fixButton.type = 'button';
         fixButton.id = 'btn-goto-instructions';
-        fixButton.dataset.impl = ctx.targetImpl === 'cln' ? 'cln' : 'lnd';
+        fixButton.dataset.impl = protectedImpl;
         actions.appendChild(fixButton);
     }
     actions.appendChild(createFaqLink('faq-8', 'Troubleshooting guide'));

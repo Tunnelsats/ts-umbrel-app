@@ -995,7 +995,7 @@
 
                                 <h4 class="text-white font-semibold mt-4 mb-2">Fix it without SSH</h4>
                                 <ol class="list-decimal pl-5 space-y-2">
-                                    <li><strong>Standard mode:</strong> on the Dashboard, click <strong>Fix automatically</strong>. TunnelSats backs up and disables the conflicting lines, withdraws old addresses from live gossip, and restarts LND.</li>
+                                    <li><strong>Standard mode:</strong> on the Dashboard, click <strong>Fix automatically</strong>. TunnelSats backs up and disables the conflicting lines in your config file and withdraws old addresses from live gossip right away. LND keeps running (Core Lightning is restarted). Restart LND when convenient so it also loads the saved file, especially after <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nat=true</code> was disabled.</li>
                                     <li><strong>Secure Mode:</strong> click <strong>Show step-by-step fix</strong>. It lists the exact lines from your config file. Edit the file in the Umbrel <strong>Files</strong> app, save it, and restart the <strong>Lightning Node</strong> (or <strong>Core Lightning</strong>) app from the Umbrel dashboard.</li>
                                     <li>Click <strong>Re-check now</strong> on the Dashboard. The card clears once your node announces only your TunnelSats endpoint.</li>
                                 </ol>

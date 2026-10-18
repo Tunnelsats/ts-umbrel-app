@@ -2331,20 +2331,58 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('toast-container').textContent).toContain('All checks passed');
     });
 
-    test('the fix button opens the configure flow for the affected implementation', async () => {
+    const CLN_CONFLICT = {
+        impl: 'cln', kind: 'real-ip', setting: 'announce-addr', value: '203.0.113.5',
+        line: 'announce-addr=203.0.113.5', line_number: 1, address: '203.0.113.5:9735', port_defaulted: true,
+        expected_line: `announce-addr=${EXPECTED}`, config_path: '/home/umbrel/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config'
+    };
+
+    test('the fix button opens the configure flow for the protected implementation', async () => {
         jest.useFakeTimers();
-        mockStatus({ ...SECURE_WRONG_PORT, target_impl: 'cln' });
+        mockStatus({ ...SECURE_WRONG_PORT, target_impl: 'cln', announcement_diagnostics: [diag(CLN_CONFLICT)] });
         await window.fetchStatus();
         window.configureNode = jest.fn();
 
         const fix = document.getElementById('btn-goto-instructions');
         expect(fix.dataset.impl).toBe('cln');
+        expect(fix.textContent).toBe('Show step-by-step fix');
         fix.click();
         jest.advanceTimersByTime(150);
 
         expect(document.getElementById('node-type-selected').value).toBe('cln');
         expect(document.getElementById('view-import').classList.contains('hidden')).toBe(false);
         expect(window.configureNode).toHaveBeenCalledTimes(1);
+    });
+
+    test('a conflict in the unprotected node never offers an action that would switch the protected target', async () => {
+        mockStatus({ ...SECURE_WRONG_PORT, secure_mode: false, target_impl: 'lnd', announcement_diagnostics: [diag(CLN_CONFLICT)] });
+        await window.fetchStatus();
+
+        expect(document.getElementById('btn-goto-instructions')).toBeNull();
+        const panel = document.getElementById('announcement-diagnostics-panel');
+        expect(panel.textContent).toContain('not protecting right now (it protects LND)');
+        const card = panel.querySelector('.ts-diag-card');
+        expect(card.dataset.otherNode).toBe('true');
+        expect(card.textContent).toContain('TunnelSats is protecting LND, so its buttons never change Core Lightning settings');
+        expect(card.textContent).toContain('# announce-addr=203.0.113.5');
+        expect(card.textContent).toContain('restart the Core Lightning app');
+    });
+
+    test('conflicts in both nodes label the fix button with the node it changes', async () => {
+        mockStatus({
+            ...SECURE_WRONG_PORT,
+            secure_mode: false,
+            target_impl: 'lnd',
+            announcement_diagnostics: [...SECURE_WRONG_PORT.announcement_diagnostics, diag(CLN_CONFLICT)]
+        });
+        await window.fetchStatus();
+
+        const fix = document.getElementById('btn-goto-instructions');
+        expect(fix.textContent).toBe('Fix automatically (LND)');
+        expect(fix.dataset.impl).toBe('lnd');
+        const cards = document.querySelectorAll('.ts-diag-card');
+        expect(cards[0].dataset.otherNode).toBeUndefined();
+        expect(cards[1].dataset.otherNode).toBe('true');
     });
 
     test('a new install without a subscription gets a friendly hint and a shortcut', async () => {
