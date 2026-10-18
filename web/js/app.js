@@ -1274,8 +1274,13 @@ function clearStatusHelp(container) {
 }
 
 function renderStatusUnavailable(res, data) {
-    const code = res && (res.status === 401 || res.status === 403) ? 'session_expired' : 'daemon_unavailable';
-    const message = (data && (data.error || data.message)) || 'TunnelSats status is unavailable.';
+    // An HTTP success without a status body is almost always the Umbrel sign-in page, served
+    // after the app session expired; 401 and 403 say the same explicitly.
+    const notStatusBody = Boolean(res) && res.ok !== false;
+    const code = res && (res.status === 401 || res.status === 403 || notStatusBody) ? 'session_expired' : 'daemon_unavailable';
+    const message = notStatusBody
+        ? 'The dashboard received another page instead of the TunnelSats status, usually the Umbrel sign-in page.'
+        : ((data && (data.error || data.message)) || 'TunnelSats status is unavailable.');
 
     const badge = document.getElementById('statusBadge');
     if (badge) {
@@ -1375,7 +1380,11 @@ async function fetchStatus() {
     try {
         const res = await managementFetch('/api/local/status');
         const data = await safeFetchJson(res);
-        if (res && res.ok === false) {
+        // The status payload never has a `success` field. An error object or a non-object body
+        // means this was not a status at all (for example the Umbrel sign-in page, served with
+        // HTTP 200 after the session expired), so it must never be rendered as node status.
+        const isStatusPayload = Boolean(data) && typeof data === 'object' && !Array.isArray(data) && data.success !== false;
+        if ((res && res.ok === false) || !isStatusPayload) {
             renderStatusUnavailable(res, data);
             return null;
         }

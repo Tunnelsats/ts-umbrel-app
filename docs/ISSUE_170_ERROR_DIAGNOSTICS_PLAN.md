@@ -228,7 +228,7 @@ Additive API and UI only, with no migrations or persisted state. Revert the PR.
 5. Optional gentle auto-recheck in Secure Mode only (the config audit is cheap), with backoff.
 6. k3s: make LND configure-node verification work in K3S_MODE (pre-existing limitation), then offer the automatic fix there again.
 
-## 12. Review refinements (local Greptile rounds 1 to 5)
+## 12. Review refinements (local Greptile review)
 
 - The fix button only acts on the protected node. A conflict in the other implementation gets manual guidance and never switches the protected target; with conflicts in both, the button names the node it changes.
 - Core Lightning guidance says CLN only changes what it announces when it restarts (no automatic live withdrawal).
@@ -237,3 +237,5 @@ Additive API and UI only, with no migrations or persisted state. Revert the PR.
 - Fixing a foreign real-IP entry always ensures the TunnelSats line is present.
 - k3s shows manual steps only, because configure-node cannot finish live verification for LND in K3S_MODE (see Phase 2 item 6).
 - The Standard Mode confirmation for LND no longer says "Restart Required": configure-node edits `lnd.conf` and refreshes live gossip without restarting LND. Core Lightning and Restore keep the restart warning.
+- The auto-discovery fix also ensures the TunnelSats line: without it routing is never detected, so no separate missing-endpoint card appears. FAQ 8 and `FAQ.md` say every fix ends with exactly one TunnelSats line.
+- A response that is not a status payload (for example the Umbrel sign-in page served with HTTP 200) shows **Session Expired** with **Reload page**, never "Tunnel Down", and Re-check says it could not read the status.

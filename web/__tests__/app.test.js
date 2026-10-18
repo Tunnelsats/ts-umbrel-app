@@ -2457,6 +2457,39 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('btn-recheck-status')).toBeNull();
     });
 
+    const SIGN_IN_PAGE = {
+        __response: {
+            ok: true,
+            status: 200,
+            headers: { get: (h) => (h.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+            text: () => Promise.resolve('<!DOCTYPE html><html><body>Umbrel sign in</body></html>')
+        }
+    };
+
+    test('a sign-in page served with HTTP 200 is reported as an expired session, not as node status', async () => {
+        mockStatus(SIGN_IN_PAGE);
+        const result = await window.fetchStatus();
+
+        expect(result).toBeNull();
+        expect(document.getElementById('statusBadge').textContent).toBe('Status Unavailable');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Session Expired');
+        expect(document.getElementById('txt-routing-error').textContent).toContain('instead of the TunnelSats status');
+        expect(document.getElementById('btn-reload-page')).toBeTruthy();
+    });
+
+    test('Re-check never reports "no blocking errors" when the session has expired', async () => {
+        mockStatus(SECURE_WRONG_PORT, SIGN_IN_PAGE);
+        await window.fetchStatus();
+
+        document.getElementById('btn-recheck-status').click();
+        await flush();
+
+        const toasts = document.getElementById('toast-container').textContent;
+        expect(toasts).toContain('Could not read the TunnelSats status');
+        expect(toasts).not.toContain('No blocking errors');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Session Expired');
+    });
+
     test('the Secure Mode manual modal lists the actual lines and pre-filled commands', async () => {
         window.showManualConfigModal(
             'lnd', LND_CONF, [`externalhosts=${EXPECTED}`, 'nat=false'], ['externalip=', 'nat=true'],
