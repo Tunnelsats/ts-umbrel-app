@@ -2490,6 +2490,21 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('txt-routing-status').textContent).toBe('Session Expired');
     });
 
+    test('the umbrelOS sign-in redirect to another origin is reported as an expired session', async () => {
+        // Live validation (#172, C1): umbrelOS answers an expired session with a 302 from the app
+        // port to :2000/app-auth. With redirect: 'manual' the browser returns an opaque redirect
+        // instead of failing the request like a network error.
+        mockStatus({ __response: { ok: false, status: 0, type: 'opaqueredirect' } });
+        const result = await window.fetchStatus();
+
+        const statusCall = global.fetch.mock.calls.find(([url]) => url === '/api/local/status');
+        expect(statusCall[1]).toEqual(expect.objectContaining({ redirect: 'manual' }));
+        expect(result).toBeNull();
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Session Expired');
+        expect(document.getElementById('txt-routing-error').textContent).toContain('sign-in page');
+        expect(document.getElementById('btn-reload-page')).toBeTruthy();
+    });
+
     test('the Secure Mode manual modal lists the actual lines and pre-filled commands', async () => {
         window.showManualConfigModal(
             'lnd', LND_CONF, [`externalhosts=${EXPECTED}`, 'nat=false'], ['externalip=', 'nat=true'],

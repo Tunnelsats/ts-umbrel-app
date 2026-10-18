@@ -1289,14 +1289,14 @@ const STATUS_UNAVAILABLE_TITLES = {
 };
 
 function renderStatusUnavailable(res, data) {
-    // No response at all is a network problem between the browser and the Umbrel. An HTTP
-    // success without a status body is almost always the Umbrel sign-in page, served after
-    // the app session expired; 401 and 403 say the same explicitly.
+    // No response at all is a network problem between the browser and the Umbrel. A redirect
+    // (umbrelOS sends expired sessions to its sign-in page) or an HTTP success without a status
+    // body (a sign-in page served directly) means the session expired; 401 and 403 say the same.
     const notStatusBody = Boolean(res) && res.ok !== false;
     let code = 'daemon_unavailable';
     if (!res) {
         code = 'connection_lost';
-    } else if (res.status === 401 || res.status === 403 || notStatusBody) {
+    } else if (res.type === 'opaqueredirect' || res.status === 401 || res.status === 403 || notStatusBody) {
         code = 'session_expired';
     }
     const message = notStatusBody
@@ -1412,11 +1412,18 @@ async function fetchStatus() {
     try {
         let res;
         try {
-            res = await managementFetch('/api/local/status');
+            // umbrelOS answers an expired session with a 302 to its sign-in page on another
+            // origin (:2000/app-auth), which a followed fetch reports as a network error.
+            // Not following redirects lets the dashboard recognise it as an expired session.
+            res = await managementFetch('/api/local/status', { redirect: 'manual' });
         } catch (networkError) {
             console.error("Failed to fetch status", networkError);
             // A network failure must not leave the previous verdict (for example "Protected") on screen.
             renderStatusUnavailable(null, { error: 'No response from your Umbrel.' });
+            return null;
+        }
+        if (res && res.type === 'opaqueredirect') {
+            renderStatusUnavailable(res, { error: 'Umbrel redirected this request to its sign-in page.' });
             return null;
         }
         const data = await safeFetchJson(res);
