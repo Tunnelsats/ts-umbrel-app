@@ -998,6 +998,7 @@ DOCKER_CONTAINER_LOOKUP_COMMAND = (
 # Withdrawing a pinned TunnelSats address would drop a valid route, so it is excluded.
 ANNOUNCEMENT_WITHDRAWABLE_KINDS = frozenset({"real-ip", "wrong-port", "stale-endpoint"})
 _ANNOUNCED_HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
+_ANNOUNCED_PORT_PATTERN = re.compile(r"^[0-9]{1,5}$")
 _CONTAINER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 STATUS_ERROR_TARGET_SWITCH_PENDING = "target_switch_pending"
@@ -1100,7 +1101,8 @@ def split_announced_endpoint(
             return None
 
     if port_text:
-        if not port_text.isdigit():
+        # str.isdigit() also accepts characters such as "²" that int() rejects.
+        if not _ANNOUNCED_PORT_PATTERN.fullmatch(port_text):
             return None
         port = int(port_text)
         port_defaulted = False
@@ -1424,18 +1426,35 @@ def build_live_announcement_diagnostics(
     return diagnostics
 
 
+def _diagnostics_or_empty(build: Callable[[], List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Diagnostics explain the fail-closed verdict; failing to explain must never break it."""
+    try:
+        return build()
+    except Exception:
+        app.logger.exception("Failed to build announcement diagnostics; continuing without them")
+        return []
+
+
+def _announcement_help_or_empty(node_type: str, dns: str, port: Any, target_container: str = "") -> Dict[str, Any]:
+    try:
+        return build_announcement_help(node_type, dns, port, target_container)
+    except Exception:
+        app.logger.exception("Failed to build announcement help; continuing without it")
+        return {}
+
+
 def _confirmation_diagnostics(
     node_type: str, audit: Dict[str, Any], dns: str, port: Any, meta: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
     """Diagnostics shown before standard mode backs up and disables conflicting lines."""
-    return build_config_announcement_diagnostics(
+    return _diagnostics_or_empty(lambda: build_config_announcement_diagnostics(
         node_type, audit, dns, port,
         config_path=None if K3S_MODE else resolve_node_config(node_type)[1],
         cli_prefix=_node_cli_prefix(node_type, str(read_dataplane_state().get("target_container") or "")),
         is_server_host=_server_host_matcher(
             dns, extra_hosts=[_address_host(str(meta.get("wgEndpoint") or ""))]
         ),
-    )
+    ))
 
 
 def _write_config_lines_atomic(path: str, lines: List[str]) -> bool:
@@ -3808,37 +3827,41 @@ def local_status():
                         _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
                         announcement_verified = v_ok
                 if not v_ok:
-                    live_announcement_diagnostics = build_live_announcement_diagnostics(
+                    live_announcement_diagnostics = _diagnostics_or_empty(lambda: build_live_announcement_diagnostics(
                         active_target_impl, v_conf, str(server_domain), expected_port,
                         config_path=_diagnostics_config_path(active_target_impl),
                         cli_prefix=_node_cli_prefix(active_target_impl, target_container),
                         is_server_host=server_host_matcher,
-                    )
+                    ))
             elif not announcement_verified:
-                live_announcement_diagnostics = [_announcement_diagnostic(
+                live_announcement_diagnostics = _diagnostics_or_empty(lambda: [_announcement_diagnostic(
                     active_target_impl, "missing-endpoint", "live_gossip",
                     detail="endpoint_unknown",
                     config_path=_diagnostics_config_path(active_target_impl),
-                )]
+                )])
             verification_source = "live_gossip"
 
-    announcement_diagnostics: List[Dict[str, Any]] = []
-    for impl, audited, audit, detected in (
-        ("lnd", lnd_audited, lnd_audit, lnd_detected),
-        ("cln", cln_audited, cln_audit, cln_detected),
-    ):
-        if not audited:
-            continue
-        announcement_diagnostics.extend(build_config_announcement_diagnostics(
-            impl, audit, str(server_domain), expected_port,
-            detected=detected,
-            config_path=_diagnostics_config_path(impl),
-            cli_prefix=_node_cli_prefix(impl, target_container),
-            is_server_host=server_host_matcher,
-            check_missing_endpoint=bool(
-                (SECURE_MODE or K3S_MODE) and verification_required and impl == active_target_impl
-            ),
-        ))
+    def _build_config_diagnostics() -> List[Dict[str, Any]]:
+        collected: List[Dict[str, Any]] = []
+        for impl, audited, audit, detected in (
+            ("lnd", lnd_audited, lnd_audit, lnd_detected),
+            ("cln", cln_audited, cln_audit, cln_detected),
+        ):
+            if not audited:
+                continue
+            collected.extend(build_config_announcement_diagnostics(
+                impl, audit, str(server_domain), expected_port,
+                detected=detected,
+                config_path=_diagnostics_config_path(impl),
+                cli_prefix=_node_cli_prefix(impl, target_container),
+                is_server_host=server_host_matcher,
+                check_missing_endpoint=bool(
+                    (SECURE_MODE or K3S_MODE) and verification_required and impl == active_target_impl
+                ),
+            ))
+        return collected
+
+    announcement_diagnostics = _diagnostics_or_empty(_build_config_diagnostics)
     announcement_diagnostics.extend(live_announcement_diagnostics)
 
     dns_protected = bool(dataplane.get("dns_protected", False))
@@ -3923,7 +3946,7 @@ def local_status():
             "last_error_code": last_error_code,
             "announcement_conflicts": announcement_conflicts,
             "announcement_diagnostics": announcement_diagnostics,
-            "announcement_help": build_announcement_help(
+            "announcement_help": _announcement_help_or_empty(
                 active_target_impl, str(server_domain), expected_port, target_container
             ),
             "announcement_verification_required": verification_required,
@@ -4237,7 +4260,7 @@ def configure_node():
         container_config_path, config_path = resolve_node_config(node_type)
         cli_prefix = _node_cli_prefix(node_type)
         # Read-only audit: Secure Mode can read the node config but never writes it.
-        diagnostics = build_config_announcement_diagnostics(
+        diagnostics = _diagnostics_or_empty(lambda: build_config_announcement_diagnostics(
             node_type,
             audit_node_announcement_config(node_type, container_config_path, dns, port),
             dns,
@@ -4249,8 +4272,8 @@ def configure_node():
                 dns, extra_hosts=[_address_host(str(meta.get("wgEndpoint") or ""))]
             ),
             check_missing_endpoint=True,
-        )
-        gossip_commands = [entry["withdraw_command"] for entry in diagnostics if entry["withdraw_command"]]
+        ))
+        gossip_commands = [entry["withdraw_command"] for entry in diagnostics if entry.get("withdraw_command")]
         if node_type == "lnd":
             config_lines = [
                 f"externalhosts={dns}:{port}",

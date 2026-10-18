@@ -114,6 +114,8 @@ class TestEndpointParsing:
         '', '   ', 'host:port', '1.2.3.4:0', '1.2.3.4:70000', '1.2.3.4;rm -rf ~',
         '$(id):9735', '[not-ipv6]:9735', '-bad.example.com:9735', 'a b:9735',
         '[fe80::1%eth0]:9735', "[fe80::1%$(reboot)]:9735", 'fe80::1%eth0', '[2001:db8::1]:',
+        # str.isdigit() accepts these, int() does not (or they are not ASCII ports at all).
+        '203.0.113.5:\u00b2', '203.0.113.5:\u0669\u0667\u0663\u0665', '[2001:db8::1]:\u00b9', '203.0.113.5:0009735',
     ])
     def test_rejects_values_that_cannot_be_announced_safely(self, value):
         assert app_module.split_announced_endpoint(value) is None
@@ -430,6 +432,61 @@ class TestStatusDiagnostics:
         assert payload['announcement_conflicts'] == [f'lnd:missing-externalhosts={EXPECTED}']
         assert payload['last_error_code'] == 'announcement_conflict'
         assert payload['announcement_diagnostics'] == [_diag('missing-endpoint', setting='externalhosts')]
+
+    def _secure_status(self, client, lnd_conf, extra_patches=()):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path = os.path.join(tmp_dir, 'lnd.conf')
+            _write(lnd_path, lnd_conf)
+            _write(os.path.join(tmp_dir, app_module.META_FILE),
+                   json.dumps({'vpnPort': PORT, 'serverDomain': SERVER}))
+            patches = [
+                patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path),
+                patch('app.SECURE_MODE', True), patch('app.lnd_exists', return_value=True),
+                patch('app.cln_exists', return_value=False),
+                patch('app._get_wireguard_state', return_value=('Connected', '')),
+                patch('app.read_dataplane_state', return_value=_dataplane()),
+                patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')),
+                *extra_patches,
+            ]
+            for active in patches:
+                active.start()
+            try:
+                response = client.get('/api/local/status')
+            finally:
+                for active in reversed(patches):
+                    active.stop()
+        return response
+
+    def test_malformed_port_is_explained_without_breaking_status(self, client):
+        response = self._secure_status(
+            client, f'[Application Options]\nexternalhosts={EXPECTED}\nexternalip=203.0.113.5:\u00b2\n'
+        )
+        payload = response.get_json()
+        assert response.status_code == 200
+        assert payload['last_error_code'] == 'announcement_conflict'
+        assert payload['announcement_conflicts'] == ['lnd:externalip=203.0.113.5:\u00b2']
+        assert payload['announcement_diagnostics'] == [
+            _diag('real-ip', setting='externalip', value='203.0.113.5:\u00b2',
+                  line='externalip=203.0.113.5:\u00b2', line_number=3),
+        ]
+
+    def test_diagnostics_failure_never_changes_the_fail_closed_verdict(self, client):
+        response = self._secure_status(
+            client,
+            f'[Application Options]\nexternalhosts={EXPECTED}\nexternalip={SERVER_IP}\n',
+            extra_patches=(
+                patch('app.build_config_announcement_diagnostics', side_effect=RuntimeError('boom')),
+                patch('app.build_announcement_help', side_effect=RuntimeError('boom')),
+            ),
+        )
+        payload = response.get_json()
+        assert response.status_code == 200
+        assert payload['rules_synced'] is False
+        assert payload['last_error'] == app_module.ANNOUNCEMENT_CONFLICT_ERROR
+        assert payload['last_error_code'] == 'announcement_conflict'
+        assert payload['announcement_conflicts'] == [f'lnd:externalip={SERVER_IP}']
+        assert payload['announcement_diagnostics'] == []
+        assert payload['announcement_help'] == {}
 
     def test_standard_mode_reports_live_gossip_leftovers_with_the_real_container(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:
