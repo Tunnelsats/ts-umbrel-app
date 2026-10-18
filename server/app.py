@@ -1017,6 +1017,9 @@ _SERVER_IP_CACHE_TTL_SECONDS = 60.0
 _SERVER_IP_NEGATIVE_CACHE_TTL_SECONDS = 15.0
 _SERVER_IP_RESOLVE_TIMEOUT_SECONDS = 1.5
 _server_ip_cache: Dict[str, Tuple[float, Tuple[str, ...]]] = {}
+# Lookups that are still running, so a hanging resolver is awaited again instead of
+# having another lookup queued behind it on the single worker.
+_server_ip_inflight: Dict[str, "concurrent.futures.Future[Any]"] = {}
 _server_ip_cache_lock = threading.Lock()
 # Dedicated worker so a hanging resolver can never starve the status probe pool.
 _diagnostics_dns_executor = concurrent.futures.ThreadPoolExecutor(
@@ -1115,7 +1118,12 @@ def split_announced_endpoint(
 
 
 def _tunnelsats_server_ips(dns: str) -> Tuple[str, ...]:
-    """Resolve the TunnelSats server's addresses with a bounded wait and a short cache."""
+    """Resolve the TunnelSats server's addresses with a bounded wait and a short cache.
+
+    A lookup that is still running is awaited again instead of queueing another one, and a
+    failed refresh keeps the last good answer: a transient DNS failure must not make the
+    server's own IP look like a foreign address.
+    """
     host = _normalize_host(dns)
     if not host:
         return ()
@@ -1129,13 +1137,23 @@ def _tunnelsats_server_ips(dns: str) -> Tuple[str, ...]:
             return cached_ips
 
     ips: Tuple[str, ...] = ()
+    future: Optional["concurrent.futures.Future[Any]"] = None
     try:
-        future = _diagnostics_dns_executor.submit(socket.gethostbyname_ex, host)
+        with _server_ip_cache_lock:
+            future = _server_ip_inflight.get(host)
+            if future is None:
+                future = _diagnostics_dns_executor.submit(socket.gethostbyname_ex, host)
+                _server_ip_inflight[host] = future
         _name, _aliases, addresses = future.result(timeout=_SERVER_IP_RESOLVE_TIMEOUT_SECONDS)
         ips = tuple(sorted({literal for literal in map(_ip_literal, addresses) if literal}))
     except Exception as exc:
-        app.logger.info(f"Could not resolve TunnelSats server {host} for diagnostics: {exc}")
+        app.logger.info(f"Could not resolve TunnelSats server {host} for diagnostics: {exc!r}")
     with _server_ip_cache_lock:
+        if future is not None and future.done() and _server_ip_inflight.get(host) is future:
+            del _server_ip_inflight[host]
+        previous = _server_ip_cache.get(host)
+        if not ips and previous is not None and previous[1]:
+            ips = previous[1]
         _server_ip_cache[host] = (now, ips)
     return ips
 
@@ -1312,6 +1330,23 @@ def _announced_host_is_ip(address: Optional[str]) -> bool:
     return bool(parsed and _ip_literal(parsed[0]))
 
 
+ANNOUNCEMENT_DETAIL_SERVER_UNRESOLVED = "server_unresolved"
+
+
+def _server_attribution_unknown(kind: str, address: Optional[str], dns: str) -> bool:
+    """True when a "real-ip" IP literal may still be the TunnelSats server itself.
+
+    Without the server domain's DNS records an IP literal cannot be told apart from the
+    server's own address, so it must never be offered for withdrawal.
+    """
+    return (
+        kind == "real-ip"
+        and bool(_normalize_host(dns))
+        and _announced_host_is_ip(address)
+        and not _tunnelsats_server_ips(dns)
+    )
+
+
 def build_config_announcement_diagnostics(
     node_type: str,
     audit: Dict[str, Any],
@@ -1355,14 +1390,21 @@ def build_config_announcement_diagnostics(
             diagnostics.append(_announcement_diagnostic(node_type, "auto-discovery", "config_file", **fields))
             continue
         kind, address, port_defaulted = classify_announced_address(value, dns, port, matcher)
+        unattributed = _server_attribution_unknown(kind, address, dns)
         withdraw_command = None
         # LND announces configured hostnames as resolved IPs, so only IP literals map
         # one-to-one onto a live gossip entry that can be withdrawn exactly.
-        if node_type == "lnd" and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS and _announced_host_is_ip(address):
+        if (
+            node_type == "lnd"
+            and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS
+            and _announced_host_is_ip(address)
+            and not unattributed
+        ):
             withdraw_command = _withdraw_command(cli_prefix, address)
         diagnostics.append(_announcement_diagnostic(
             node_type, kind, "config_file",
-            address=address, port_defaulted=port_defaulted, withdraw_command=withdraw_command, **fields,
+            address=address, port_defaulted=port_defaulted, withdraw_command=withdraw_command,
+            detail=ANNOUNCEMENT_DETAIL_SERVER_UNRESOLVED if unattributed else None, **fields,
         ))
 
     if check_missing_endpoint and not audit.get("has_expected_tunnelsats"):
@@ -1413,15 +1455,17 @@ def build_live_announcement_diagnostics(
         if matcher is None:
             matcher = _server_host_matcher(dns)
         kind, address, port_defaulted = classify_announced_address(text, dns, port, matcher)
+        unattributed = _server_attribution_unknown(kind, address, dns)
         withdraw_command = (
             _withdraw_command(cli_prefix, address)
-            if node_type == "lnd" and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS
+            if node_type == "lnd" and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS and not unattributed
             else None
         )
         diagnostics.append(_announcement_diagnostic(
             node_type, kind, "live_gossip",
             value=text, address=address, port_defaulted=port_defaulted,
-            withdraw_command=withdraw_command, **common,
+            withdraw_command=withdraw_command,
+            detail=ANNOUNCEMENT_DETAIL_SERVER_UNRESOLVED if unattributed else None, **common,
         ))
     return diagnostics
 

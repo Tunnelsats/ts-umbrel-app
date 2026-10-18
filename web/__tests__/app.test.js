@@ -2630,4 +2630,105 @@ describe('Issue #170: actionable status diagnostics', () => {
         Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'No, Cancel').click();
         await expect(clnChoice).resolves.toBe(false);
     });
+
+    test('the LND conflict confirmation does not promise a restart, Core Lightning keeps it', async () => {
+        const lndChoice = window.confirmAnnouncementChanges('lnd', ['externalip=178.156.167.202'], SECURE_WRONG_PORT.announcement_diagnostics);
+        let modal = document.getElementById('announcement-confirmation-modal');
+        expect(modal.textContent).not.toContain('before restarting the node');
+        expect(modal.textContent).toContain('LND keeps running');
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Cancel').click();
+        await lndChoice;
+
+        const clnChoice = window.confirmAnnouncementChanges('cln', ['announce-addr=203.0.113.5:9735'], []);
+        modal = document.getElementById('announcement-confirmation-modal');
+        expect(modal.textContent).toContain('before restarting the node');
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Cancel').click();
+        await clnChoice;
+    });
+
+    const PROTECTED = {
+        vpn_active: true, lnd_detected: true, lnd_routing_active: true, target_impl: 'lnd', wg_status: 'Connected',
+        rules_synced: true, last_error: null, last_error_code: null, announcement_diagnostics: []
+    };
+
+    test('a network failure replaces a previous Protected verdict with a connection problem', async () => {
+        jest.spyOn(console, 'error').mockImplementation(() => {});
+        mockStatus(PROTECTED);
+        await window.fetchStatus();
+        expect(document.getElementById('statusBadge').textContent).toBe('Protected');
+        expect(document.getElementById('ping-tunnel').classList.contains('hidden')).toBe(false);
+
+        global.fetch = csrfFetchMock((url) => (url === '/api/local/status'
+            ? Promise.reject(new TypeError('Failed to fetch'))
+            : Promise.resolve({ ok: true, json: () => Promise.resolve({}) })));
+        const result = await window.fetchStatus();
+
+        expect(result).toBeNull();
+        expect(document.getElementById('statusBadge').textContent).toBe('Status Unavailable');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Connection Problem');
+        expect(document.getElementById('status-help-panel').dataset.code).toBe('connection_lost');
+        expect(document.getElementById('btn-recheck-status')).toBeTruthy();
+        expect(document.getElementById('ping-tunnel').classList.contains('hidden')).toBe(true);
+    });
+
+    test('Status Unavailable clears the green tunnel pulse of an earlier Protected render', async () => {
+        mockStatus(PROTECTED, {
+            __response: { ok: false, status: 503, json: () => Promise.resolve({ success: false, error: 'TunnelSats daemon is unavailable.' }) }
+        });
+        await window.fetchStatus();
+        await window.fetchStatus();
+
+        expect(document.getElementById('txt-routing-status').textContent).toBe('TunnelSats Service Unavailable');
+        expect(document.getElementById('ping-tunnel').classList.contains('hidden')).toBe(true);
+        const icon = document.querySelector('#icon-tunnel-state svg');
+        expect(icon.classList.contains('text-tsgreen')).toBe(false);
+        expect(icon.classList.contains('animate-pulse')).toBe(false);
+    });
+
+    test('k3s is recognised from the help payload before the daemon has reported its mode', async () => {
+        mockStatus({ ...SECURE_WRONG_PORT, secure_mode: false, announcement_help: { ...SECURE_WRONG_PORT.announcement_help, mode: 'k3s' } });
+        await window.fetchStatus();
+
+        expect(document.getElementById('btn-goto-instructions')).toBeNull();
+        expect(document.getElementById('announcement-diagnostics-panel').textContent).toContain('k3s: TunnelSats checks your node config file');
+    });
+
+    test('Re-check does not count items that only wait for the node', async () => {
+        const waiting = blockedStatus({
+            secure_mode: false,
+            last_error: 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.',
+            last_error_code: 'announcement_unverified',
+            announcement_diagnostics: [diag({ kind: 'verification-pending', source: 'live_gossip', detail: 'lnd_initializing' })]
+        });
+        mockStatus(waiting, waiting);
+        await window.fetchStatus();
+
+        document.getElementById('btn-recheck-status').click();
+        await flush();
+
+        const toasts = document.getElementById('toast-container').textContent;
+        expect(toasts).not.toContain('needs attention');
+        expect(toasts).toContain('Still verifying');
+    });
+
+    test('an IP that cannot be attributed is not called a home IP and gets no withdraw step', async () => {
+        mockStatus(blockedStatus({
+            secure_mode: true,
+            announcement_verification_source: 'config_file',
+            last_error: 'Conflicting node announcement setting detected in node configuration.',
+            last_error_code: 'announcement_conflict',
+            announcement_diagnostics: [diag({
+                kind: 'real-ip', setting: 'externalip', value: '178.156.167.202:23217',
+                line: 'externalip=178.156.167.202:23217', line_number: 3,
+                address: '178.156.167.202:23217', detail: 'server_unresolved'
+            })]
+        }));
+        await window.fetchStatus();
+
+        const card = document.querySelector('.ts-diag-card');
+        expect(card.textContent).toContain('could not look up your TunnelSats server');
+        expect(card.textContent).not.toContain('usually your home or ISP IP');
+        expect(card.querySelector('.ts-diag-ssh')).toBeNull();
+        expect(card.querySelector('.ts-diag-steps').textContent).toContain(`externalhosts=${EXPECTED}`);
+    });
 });

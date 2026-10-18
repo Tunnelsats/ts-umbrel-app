@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,9 +36,11 @@ def hermetic_server_resolution():
     """Never hit real DNS; individual tests opt into the original resolver."""
     original = app_module._tunnelsats_server_ips
     app_module._server_ip_cache.clear()
+    app_module._server_ip_inflight.clear()
     with patch('app._tunnelsats_server_ips', return_value=(SERVER_IP,)) as mocked:
         yield mocked, original
     app_module._server_ip_cache.clear()
+    app_module._server_ip_inflight.clear()
 
 
 @pytest.fixture
@@ -178,6 +181,43 @@ class TestAnnouncementClassification:
             assert original(SERVER) == ()
         assert original('') == ()
 
+    def test_failed_refresh_keeps_the_last_good_server_addresses(self, hermetic_server_resolution):
+        _mock, original = hermetic_server_resolution
+        with patch('socket.gethostbyname_ex', return_value=(SERVER, [], [SERVER_IP])):
+            assert original(SERVER) == (SERVER_IP,)
+        stamp, ips = app_module._server_ip_cache[SERVER]
+        app_module._server_ip_cache[SERVER] = (stamp - 3600, ips)  # expire the positive entry
+
+        with patch('socket.gethostbyname_ex', side_effect=OSError('resolver down')) as dns:
+            # A transient failure must not make the server's own IP look like a foreign address.
+            assert original(SERVER) == (SERVER_IP,)
+            assert original(SERVER) == (SERVER_IP,)
+        dns.assert_called_once_with(SERVER)
+
+    def test_hanging_resolver_is_never_queued_twice(self, hermetic_server_resolution):
+        _mock, original = hermetic_server_resolution
+        release = threading.Event()
+        lookups = []
+
+        def hanging_lookup(host):
+            lookups.append(host)
+            release.wait(5)
+            return (SERVER, [], [SERVER_IP])
+
+        try:
+            with patch('socket.gethostbyname_ex', side_effect=hanging_lookup), \
+                    patch('app._SERVER_IP_RESOLVE_TIMEOUT_SECONDS', 0.05), \
+                    patch('app._SERVER_IP_NEGATIVE_CACHE_TTL_SECONDS', 0.0):
+                assert original(SERVER) == ()
+                assert original(SERVER) == ()  # waits on the same lookup instead of queueing another
+                release.set()
+                app_module._server_ip_inflight[SERVER].result(timeout=5)
+                assert original(SERVER) == (SERVER_IP,)
+        finally:
+            release.set()
+        assert lookups == [SERVER]
+        assert SERVER not in app_module._server_ip_inflight
+
 
 # --- Cycle 2: diagnostics builders and commands ---------------------------------------------
 
@@ -234,6 +274,29 @@ class TestConfigDiagnostics:
                   line='externalhosts=de2.tunnelsats.com:35825', line_number=7,
                   address='de2.tunnelsats.com:35825'),
             _diag('auto-discovery', setting='nat', value='true', line='nat=true', line_number=9),
+        ]
+
+    def test_unresolved_server_ip_is_never_offered_for_withdrawal(self, hermetic_server_resolution):
+        resolver, _original = hermetic_server_resolution
+        resolver.return_value = ()  # The TunnelSats domain did not resolve.
+        audit = self._audit(
+            '[Application Options]\n'
+            f'externalhosts={EXPECTED}\n'
+            f'externalip={SERVER_IP}:{PORT}\n'
+            'externalip=203.0.113.5:9735\n'
+            'externalhosts=myhome.example.com:9735\n'
+        )
+        diagnostics = app_module.build_config_announcement_diagnostics(
+            'lnd', audit, SERVER, PORT,
+            config_path=LND_HOST_PATH,
+            cli_prefix='sudo docker exec lightning_lnd_1',
+        )
+        assert [(d['kind'], d['address'], d['withdraw_command'], d['detail']) for d in diagnostics] == [
+            # Either IP may be the TunnelSats server itself, so never suggest withdrawing it.
+            ('real-ip', f'{SERVER_IP}:{PORT}', None, 'server_unresolved'),
+            ('real-ip', '203.0.113.5:9735', None, 'server_unresolved'),
+            # Hostnames are compared by name, so DNS does not matter for them.
+            ('real-ip', 'myhome.example.com:9735', None, None),
         ]
 
     def test_cln_conflicts_never_offer_lnd_withdraw_commands(self):
@@ -365,6 +428,18 @@ class TestLiveGossipDiagnostics:
             _diag('wrong-port', 'live_gossip', value=f'{SERVER_IP}:9735', address=f'{SERVER_IP}:9735',
                   withdraw_command=_withdraw(f'{SERVER_IP}:9735')),
             _diag('missing-endpoint', 'live_gossip'),
+        ]
+
+    def test_unresolved_server_live_addresses_get_no_withdraw_command(self, hermetic_server_resolution):
+        resolver, _original = hermetic_server_resolution
+        resolver.return_value = ()  # The TunnelSats domain did not resolve.
+        diagnostics = app_module.build_live_announcement_diagnostics(
+            'lnd', [f'{SERVER_IP}:{PORT}', '203.0.113.5:9735'], SERVER, PORT,
+            config_path=LND_HOST_PATH, cli_prefix='sudo docker exec lightning_lnd_1',
+        )
+        assert [(d['kind'], d['withdraw_command'], d['detail']) for d in diagnostics] == [
+            ('real-ip', None, 'server_unresolved'),
+            ('real-ip', None, 'server_unresolved'),
         ]
 
     def test_initializing_node_is_pending_not_a_conflict(self):

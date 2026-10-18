@@ -897,6 +897,7 @@ const STATUS_ERROR_HINTS = {
     rules_not_synced: 'TunnelSats has not finished applying its protection rules yet. This can take a moment after a restart. If it does not clear, restart the TunnelSats app from the Umbrel dashboard.',
     dataplane_error: 'The TunnelSats background service reported this problem while protecting your node. Traffic stays blocked until it is resolved. Restart the TunnelSats app from the Umbrel dashboard, then re-check. If it keeps happening, open an issue and include the TunnelSats logs (see the FAQ).',
     daemon_unavailable: 'The TunnelSats background service is not responding, so the dashboard cannot read your protection status. Restart the TunnelSats app from the Umbrel dashboard, then re-check.',
+    connection_lost: 'The dashboard could not reach your Umbrel, so it cannot show your protection status. Check your network connection, then click Re-check now or reload this page.',
     session_expired: 'Your Umbrel session may have expired. Reload this page and sign in to Umbrel again.'
 };
 
@@ -1021,9 +1022,16 @@ function announcementGuidance(diag, ctx) {
             guidance.steps = live ? liveRetrySteps : configFix(true);
             break;
         }
-        case 'real-ip':
+        case 'real-ip': {
+            // Without the server's DNS records TunnelSats cannot tell an IP literal apart from
+            // the TunnelSats server itself, so it must not call it a home IP.
+            const unresolvedNote = diag.detail === 'server_unresolved'
+                ? ' TunnelSats could not look up your TunnelSats server\'s IP addresses right now, so it cannot tell whether this is your server or another address, such as your home IP.'
+                : '';
             if (live) {
-                guidance.summary = [nodeName, ' still announces ', { code: address || diag.value || '' }, ' in live gossip. That is not your TunnelSats endpoint', expectedRef, '.'];
+                guidance.summary = [nodeName, ' still announces ', { code: address || diag.value || '' }, ' in live gossip. That is not your TunnelSats endpoint', expectedRef, '.', unresolvedNote];
+            } else if (address && unresolvedNote) {
+                guidance.summary = [shown, ' announces ', { code: address }, ', which is not your TunnelSats endpoint', expectedRef, '.', unresolvedNote];
             } else if (address) {
                 guidance.summary = [shown, ' announces ', { code: address }, ', which is not your TunnelSats endpoint', expectedRef, '. This is usually your home or ISP IP, or a leftover from an earlier setup, and it can reveal where your node runs.'];
             } else {
@@ -1033,6 +1041,7 @@ function announcementGuidance(diag, ctx) {
             // line would otherwise leave the node announcing no TunnelSats endpoint at all.
             guidance.steps = live ? liveRetrySteps : configFix(true);
             break;
+        }
         case 'pinned-ip':
             guidance.summary = [shown, ' points at your TunnelSats server by a fixed address. TunnelSats only accepts the hostname form', expectedLine ? [' ', { code: expectedLine }] : '', ', so your announcement keeps working if the server IP changes.'];
             guidance.steps = configFix(true);
@@ -1273,11 +1282,23 @@ function clearStatusHelp(container) {
     container.classList.add('hidden');
 }
 
+const STATUS_UNAVAILABLE_TITLES = {
+    session_expired: 'Session Expired',
+    connection_lost: 'Connection Problem',
+    daemon_unavailable: 'TunnelSats Service Unavailable'
+};
+
 function renderStatusUnavailable(res, data) {
-    // An HTTP success without a status body is almost always the Umbrel sign-in page, served
-    // after the app session expired; 401 and 403 say the same explicitly.
+    // No response at all is a network problem between the browser and the Umbrel. An HTTP
+    // success without a status body is almost always the Umbrel sign-in page, served after
+    // the app session expired; 401 and 403 say the same explicitly.
     const notStatusBody = Boolean(res) && res.ok !== false;
-    const code = res && (res.status === 401 || res.status === 403 || notStatusBody) ? 'session_expired' : 'daemon_unavailable';
+    let code = 'daemon_unavailable';
+    if (!res) {
+        code = 'connection_lost';
+    } else if (res.status === 401 || res.status === 403 || notStatusBody) {
+        code = 'session_expired';
+    }
     const message = notStatusBody
         ? 'The dashboard received another page instead of the TunnelSats status, usually the Umbrel sign-in page.'
         : ((data && (data.error || data.message)) || 'TunnelSats status is unavailable.');
@@ -1287,6 +1308,11 @@ function renderStatusUnavailable(res, data) {
         badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400";
         badge.textContent = "Status Unavailable";
     }
+    // Clear the green tunnel indicators that an earlier "Protected" render may have left behind.
+    const pingDot = document.getElementById('ping-tunnel');
+    if (pingDot) pingDot.classList.add('hidden');
+    const tunnelIcon = document.querySelector('#icon-tunnel-state svg');
+    if (tunnelIcon) tunnelIcon.classList.remove('animate-pulse', 'text-tsgreen', 'text-tsyellow', 'text-red-500');
     const wgStatus = document.getElementById('txt-wg-status');
     if (wgStatus) {
         wgStatus.className = "text-2xl font-mono text-gray-500 font-bold";
@@ -1305,7 +1331,7 @@ function renderStatusUnavailable(res, data) {
         badgeRouting.removeAttribute('title');
     }
     const routingStatus = document.getElementById('txt-routing-status');
-    if (routingStatus) routingStatus.textContent = code === 'session_expired' ? 'Session Expired' : 'TunnelSats Service Unavailable';
+    if (routingStatus) routingStatus.textContent = STATUS_UNAVAILABLE_TITLES[code];
     const routingSubtitle = document.getElementById('txt-routing-subtitle');
     if (routingSubtitle) {
         routingSubtitle.textContent = '';
@@ -1361,8 +1387,14 @@ async function recheckStatus(button) {
         if (flags.isProtected) {
             showToast('All checks passed. Your node routing is protected.', 'success');
         } else if (flags.dataplaneError) {
-            const count = Array.isArray(status.announcement_diagnostics) ? status.announcement_diagnostics.length : 0;
-            showToast(count > 0 ? `Still blocked: ${count} item${count === 1 ? ' needs' : 's need'} attention.` : 'Still blocked. See the details on the dashboard.', 'error');
+            const diagnostics = Array.isArray(status.announcement_diagnostics) ? status.announcement_diagnostics : [];
+            // "Waiting for your Lightning node" needs no change, so it is not an item to fix.
+            const count = diagnostics.filter((diag) => diag && diag.kind !== 'verification-pending').length;
+            if (diagnostics.length > 0 && count === 0) {
+                showToast('Still verifying: TunnelSats is waiting for your Lightning node to answer.', 'info');
+            } else {
+                showToast(count > 0 ? `Still blocked: ${count} item${count === 1 ? ' needs' : 's need'} attention.` : 'Still blocked. See the details on the dashboard.', 'error');
+            }
         } else {
             showToast('No blocking errors, but node routing is not protected yet. See the dashboard for the next step.', 'info');
         }
@@ -1378,7 +1410,15 @@ async function recheckStatus(button) {
 // 1. Fetch Local Status
 async function fetchStatus() {
     try {
-        const res = await managementFetch('/api/local/status');
+        let res;
+        try {
+            res = await managementFetch('/api/local/status');
+        } catch (networkError) {
+            console.error("Failed to fetch status", networkError);
+            // A network failure must not leave the previous verdict (for example "Protected") on screen.
+            renderStatusUnavailable(null, { error: 'No response from your Umbrel.' });
+            return null;
+        }
         const data = await safeFetchJson(res);
         // The status payload never has a `success` field. An error object or a non-object body
         // means this was not a status at all (for example the Umbrel sign-in page, served with
@@ -1556,7 +1596,9 @@ async function fetchStatus() {
             if (isAnnouncementIssue) {
                 renderAnnouncementDiagnostics(routingDiagnostics, data, diagnostics, {
                     isSecureMode,
-                    isK3s: data.dataplane_mode === 'k3s',
+                    // dataplane_mode defaults to docker until the daemon's first state write;
+                    // announcement_help.mode comes from K3S_MODE itself.
+                    isK3s: data.dataplane_mode === 'k3s' || Boolean(data.announcement_help && data.announcement_help.mode === 'k3s'),
                     onlyPending,
                     targetImpl
                 });
@@ -2123,7 +2165,11 @@ async function confirmAnnouncementChanges(nodeType, conflicts, diagnostics) {
 
         const body = document.createElement('p');
         body.className = 'text-sm text-gray-300 leading-relaxed mb-4';
-        body.textContent = `TunnelSats found ${nodeType.toUpperCase()} settings that announce something other than your TunnelSats endpoint. Continuing will back up and disable these user-owned settings before restarting the node.`;
+        // configure-node never restarts LND; only Core Lightning is restarted to load its config.
+        const afterChange = String(nodeType).toLowerCase() === 'lnd'
+            ? 'and refresh its live gossip announcement. LND keeps running.'
+            : 'before restarting the node.';
+        body.textContent = `TunnelSats found ${nodeType.toUpperCase()} settings that announce something other than your TunnelSats endpoint. Continuing will back up and disable these user-owned settings ${afterChange}`;
 
         const list = document.createElement('ul');
         list.className = 'list-disc pl-5 space-y-1 text-sm font-mono text-red-300 mb-4 break-all';
