@@ -2496,4 +2496,53 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(message).toContain('Still announced: 203.0.113.5:9735.');
         expect(message).not.toContain('missing expected announcement');
     });
+
+    test('Core Lightning live guidance asks for a restart instead of promising automatic changes', async () => {
+        const clnExpectedLine = `announce-addr=${EXPECTED}`;
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            target_impl: 'cln',
+            lnd_detected: false,
+            cln_detected: true,
+            cln_routing_active: true,
+            last_error: 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.',
+            last_error_code: 'announcement_unverified',
+            announcement_diagnostics: [
+                diag({ impl: 'cln', source: 'live_gossip', value: '203.0.113.5:9735', address: '203.0.113.5:9735', expected_line: clnExpectedLine }),
+                diag({ impl: 'cln', kind: 'missing-endpoint', source: 'live_gossip', expected_line: clnExpectedLine }),
+                diag({ impl: 'cln', kind: 'verification-pending', source: 'live_gossip', detail: 'cln_initializing', expected_line: clnExpectedLine })
+            ]
+        }));
+        await window.fetchStatus();
+
+        const cards = document.querySelectorAll('.ts-diag-card');
+        expect(cards).toHaveLength(3);
+        const text = Array.from(cards).map((card) => card.textContent).join(' ');
+        expect(text).not.toContain('retries the automatic withdrawal');
+        expect(text).not.toContain('adds it automatically');
+        expect(text).not.toContain('unlocked');
+        expect(cards[0].textContent).toContain('only changes what it announces when it restarts');
+        expect(cards[0].textContent).toContain('Restart the Core Lightning app');
+        expect(cards[1].textContent).toContain('reads its announcement from config when it starts');
+        expect(cards[1].textContent).toContain(clnExpectedLine);
+        expect(cards[2].textContent).toContain('It is usually still starting or syncing.');
+    });
+
+    test('Re-check does not report protection while node routing is not enabled', async () => {
+        mockStatus(SECURE_WRONG_PORT, {
+            vpn_active: true, lnd_detected: true, cln_detected: false, lnd_routing_active: false,
+            target_impl: 'lnd', secure_mode: true, rules_synced: true, last_error: null, last_error_code: null,
+            announcement_diagnostics: []
+        });
+        await window.fetchStatus();
+
+        document.getElementById('btn-recheck-status').click();
+        await flush();
+
+        const toasts = document.getElementById('toast-container').textContent;
+        expect(toasts).not.toContain('All checks passed');
+        expect(toasts).toContain('not protected yet');
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Hybrid Lightning Connectivity');
+    });
 });

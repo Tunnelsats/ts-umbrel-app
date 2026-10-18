@@ -123,8 +123,9 @@ do not need SSH.
 **Where was it found?** *Config file* means TunnelSats read `lnd.conf` (or the Core
 Lightning `config`). This check runs in every mode, and it is the only check in Secure
 Mode, where TunnelSats can read the file but cannot change it or ask your node directly.
-*Live gossip* means TunnelSats asked LND what it announces right now (standard mode only);
-there it also withdraws old addresses automatically on every check.
+*Live gossip* means TunnelSats asked your node what it announces right now (standard mode
+only). For LND it also withdraws old addresses automatically on every check, without a
+restart; Core Lightning only changes its announcement after a restart.
 
 **Fix it without SSH**
 

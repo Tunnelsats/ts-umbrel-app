@@ -982,10 +982,21 @@ function announcementGuidance(diag, ctx) {
         ? ['Make sure this line exists exactly once', impl === 'lnd' ? ' (in the [Application Options] section)' : '', ': ', { code: expectedLine, copy: 'Configuration line' }]
         : null;
     const configFix = (needsExpectedLine) => [openStep, disableStep, needsExpectedLine ? ensureStep : null, restartStep, recheckStep].filter(Boolean);
-    const liveRetrySteps = [
-        ['Click ', { strong: 'Re-check now' }, '. Every check retries the automatic withdrawal.'],
-        ['If it keeps coming back, the address is still set in ', { code: fileName }, '. Use ', { strong: 'Fix automatically' }, ' or remove the matching line, then re-check.']
-    ];
+    const restartNodeStep = ctx.isK3s
+        ? ['Restart the ', nodeName, ' pod.']
+        : ['Restart the ', { strong: appName }, ' app from the Umbrel dashboard.'];
+    // Only LND's live check withdraws and adds addresses. Core Lightning reads its
+    // announcement from the config file at startup, so it needs a fixed file and a restart.
+    const liveRetrySteps = impl === 'cln'
+        ? [
+            ['Core Lightning only changes what it announces when it restarts. Make sure ', { code: fileName }, ' no longer announces this address (use ', { strong: 'Fix automatically' }, ' or edit the file).'],
+            restartNodeStep,
+            recheckStep
+        ]
+        : [
+            ['Click ', { strong: 'Re-check now' }, '. Every check retries the automatic withdrawal.'],
+            ['If it keeps coming back, the address is still set in ', { code: fileName }, '. Use ', { strong: 'Fix automatically' }, ' or remove the matching line, then re-check.']
+        ];
     const ssh = diag.withdraw_command
         ? {
             intro: live
@@ -1042,6 +1053,13 @@ function announcementGuidance(diag, ctx) {
             if (diag.detail === 'endpoint_unknown' || !expectedLine) {
                 guidance.summary = ['TunnelSats does not know your assigned server and port, so it cannot check what your node announces.'];
                 guidance.steps = [['Open the ', { strong: 'Subscribe / Import' }, ' tab and import your WireGuard configuration again, or renew an expired subscription.'], recheckStep];
+            } else if (live && impl === 'cln') {
+                guidance.summary = [nodeName, ' does not announce ', { code: expected }, '. Core Lightning reads its announcement from ', { code: fileName }, ' when it starts.'];
+                guidance.steps = [
+                    ['Make sure ', { code: fileName }, ' contains ', { code: expectedLine, copy: 'Configuration line' }, ' exactly once.'],
+                    restartNodeStep,
+                    recheckStep
+                ];
             } else if (live) {
                 guidance.summary = [nodeName, ' does not announce ', { code: expected }, ' yet. TunnelSats adds it automatically while it can reach ', nodeName, '.'];
                 guidance.steps = [
@@ -1067,8 +1085,11 @@ function announcementGuidance(diag, ctx) {
         case 'verification-pending':
             guidance.summary = String(diag.detail || '').endsWith('_not_found')
                 ? ['TunnelSats cannot find the ', nodeName, ' container, so it cannot check your live announcement yet.']
-                : [nodeName, ' is not answering yet. It is usually still starting, syncing, or waiting for its wallet to be unlocked. TunnelSats keeps traffic blocked until the live check passes.'];
-            guidance.steps = [['Open the ', { strong: appName }, ' app and make sure it is running, synced, and unlocked.'], recheckStep];
+                : [nodeName, impl === 'cln'
+                    ? ' is not answering yet. It is usually still starting or syncing.'
+                    : ' is not answering yet. It is usually still starting, syncing, or waiting for its wallet to be unlocked.',
+                ' TunnelSats keeps traffic blocked until the live check passes.'];
+            guidance.steps = [['Open the ', { strong: appName }, impl === 'cln' ? ' app and make sure it is running and synced.' : ' app and make sure it is running, synced, and unlocked.'], recheckStep];
             break;
         default:
             guidance.summary = [shown];
@@ -1292,6 +1313,30 @@ function renderStatusUnavailable(res, data) {
     if (diagnosticsContainer) renderStatusHelp(diagnosticsContainer, code);
 }
 
+// Single source of truth for the protection verdict shown by the header badge and Re-check.
+function deriveStatusFlags(data) {
+    const status = data && typeof data === 'object' ? data : {};
+    const vpnActive = status.vpn_active === true;
+    const lndDetected = status.lnd_detected === true;
+    const clnDetected = status.cln_detected === true;
+    const targetImpl = status.target_impl || (clnDetected && !lndDetected ? 'cln' : 'lnd');
+    const hasNode = lndDetected || clnDetected;
+    const routingActive = targetImpl === 'cln' ? status.cln_routing_active === true : status.lnd_routing_active === true;
+    const rulesSynced = status.rules_synced === true;
+    const dnsProtected = status.dataplane_mode !== 'k3s' || status.dns_protected !== false;
+    const targetSwitchPending = status.target_switch_pending === true;
+    const dataplaneError = typeof status.last_error === 'string' && status.last_error.trim() !== ''
+        ? status.last_error.trim()
+        : (targetSwitchPending
+            ? 'Lightning target switch is pending dataplane reconciliation.'
+            : (hasNode && (!rulesSynced || !dnsProtected) ? 'Dataplane protection is not fully synced.' : ''));
+    const isProtected = vpnActive && hasNode && routingActive && rulesSynced && dnsProtected && !dataplaneError;
+    return {
+        vpnActive, lndDetected, clnDetected, targetImpl, hasNode, routingActive,
+        rulesSynced, dnsProtected, targetSwitchPending, dataplaneError, isProtected
+    };
+}
+
 async function recheckStatus(button) {
     if (button) {
         button.disabled = true;
@@ -1300,13 +1345,16 @@ async function recheckStatus(button) {
     const status = await fetchStatus();
     if (!status) {
         showToast('Could not read the TunnelSats status. See the message on the dashboard.', 'error');
-    } else if (status.last_error || status.rules_synced !== true) {
-        const count = Array.isArray(status.announcement_diagnostics) ? status.announcement_diagnostics.length : 0;
-        showToast(count > 0 ? `Still blocked: ${count} item${count === 1 ? ' needs' : 's need'} attention.` : 'Still blocked. See the details on the dashboard.', 'error');
-    } else if (status.vpn_active === true) {
-        showToast('All checks passed. Your node routing is protected.', 'success');
     } else {
-        showToast('No blocking problems found, but the tunnel is not connected yet.', 'info');
+        const flags = deriveStatusFlags(status);
+        if (flags.isProtected) {
+            showToast('All checks passed. Your node routing is protected.', 'success');
+        } else if (flags.dataplaneError) {
+            const count = Array.isArray(status.announcement_diagnostics) ? status.announcement_diagnostics.length : 0;
+            showToast(count > 0 ? `Still blocked: ${count} item${count === 1 ? ' needs' : 's need'} attention.` : 'Still blocked. See the details on the dashboard.', 'error');
+        } else {
+            showToast('No blocking errors, but node routing is not protected yet. See the dashboard for the next step.', 'info');
+        }
     }
     // fetchStatus re-renders the panel; only restore the button if it is still mounted.
     if (button && button.isConnected) {
@@ -1326,28 +1374,16 @@ async function fetchStatus() {
             return null;
         }
 
-        const vpnActive = data.vpn_active === true;
-        const lndDetected = data.lnd_detected === true;
-        const clnDetected = data.cln_detected === true;
-        const targetImpl = data.target_impl || (clnDetected && !lndDetected ? 'cln' : 'lnd');
-        const lndRouting = data.lnd_routing_active === true;
-        const clnRouting = data.cln_routing_active === true;
-        const hasNode = lndDetected || clnDetected;
-        const routingActive = targetImpl === 'cln' ? clnRouting : lndRouting;
-        const rulesSynced = data.rules_synced === true;
-        const dnsProtected = data.dataplane_mode !== 'k3s' || data.dns_protected !== false;
-        const targetSwitchPending = data.target_switch_pending === true;
-        const dataplaneError = typeof data.last_error === 'string' && data.last_error.trim() !== ''
-            ? data.last_error.trim()
-            : (targetSwitchPending
-                ? 'Lightning target switch is pending dataplane reconciliation.'
-                : (hasNode && (!rulesSynced || !dnsProtected) ? 'Dataplane protection is not fully synced.' : ''));
+        const {
+            vpnActive, targetImpl, hasNode, routingActive,
+            rulesSynced, targetSwitchPending, dataplaneError, isProtected
+        } = deriveStatusFlags(data);
         const verificationSource = data.announcement_verification_source || null;
         const isConfigFileVerification = verificationSource === 'config_file';
 
         // Update Header Badge
         const badge = document.getElementById('statusBadge');
-        if (vpnActive && hasNode && routingActive && rulesSynced && dnsProtected && !dataplaneError) {
+        if (isProtected) {
             badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-green-900/50 text-tsgreen border border-green-700";
             badge.textContent = "Protected";
             const pingDot = document.getElementById('ping-tunnel');
