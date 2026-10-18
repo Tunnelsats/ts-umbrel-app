@@ -2325,7 +2325,9 @@ def _parse_cln_getinfo_addresses(raw: str) -> Optional[List[str]]:
             addr = str(item.get("address", "")).strip()
             port = item.get("port")
             if addr and port:
-                endpoint = f"{addr}:{port}"
+                # CLN lists IPv6 hosts without brackets. Bracket them (as LND URIs do) so the
+                # port stays unambiguous: "2001:db8::1:9735" is itself a valid IPv6 address.
+                endpoint = _format_endpoint(addr.strip("[]"), port)
                 if endpoint not in addresses:
                     addresses.append(endpoint)
     return addresses

@@ -376,6 +376,37 @@ class TestLiveGossipDiagnostics:
             'lnd', ['secure_mode_manual_required'], SERVER, PORT,
         ) == []
 
+    def test_cln_getinfo_parser_brackets_ipv6_hosts(self):
+        """CLN lists IPv6 hosts without brackets; '2001:db8::1:9735' is itself a valid IPv6 address."""
+        raw_getinfo = json.dumps({'address': [
+            {'type': 'ipv4', 'address': '203.0.113.5', 'port': 9735},
+            {'type': 'ipv6', 'address': '2001:db8::1', 'port': 9735},
+            {'type': 'ipv6', 'address': '[2001:db8::2]', 'port': 9736},
+            {'type': 'dns', 'address': SERVER, 'port': PORT},
+        ]})
+        assert app_module._parse_cln_getinfo_addresses(raw_getinfo) == [
+            '203.0.113.5:9735', '[2001:db8::1]:9735', '[2001:db8::2]:9736', EXPECTED,
+        ]
+
+    def test_cln_live_ipv6_announcement_keeps_its_real_port(self):
+        raw_getinfo = json.dumps({'address': [
+            {'type': 'ipv6', 'address': '2001:db8::1', 'port': 9735},
+            {'type': 'dns', 'address': SERVER, 'port': PORT},
+        ]})
+        with patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                patch('app.container_id_by_match', return_value='cln1'), \
+                patch('app.docker_exec', return_value=(True, raw_getinfo)):
+            verified, _removed, remaining = app_module.clean_and_verify_cln_announcements(SERVER, PORT, True)
+        assert verified is False
+        assert remaining == ['[2001:db8::1]:9735']
+
+        diagnostics = app_module.build_live_announcement_diagnostics(
+            'cln', remaining, SERVER, PORT, is_server_host=_server_matcher,
+        )
+        assert [(d['kind'], d['address'], d['port_defaulted'], d['withdraw_command']) for d in diagnostics] == [
+            ('real-ip', '[2001:db8::1]:9735', False, None),
+        ]
+
 
 # --- Cycle 3: /api/local/status integration -------------------------------------------------
 
