@@ -1029,7 +1029,9 @@ function announcementGuidance(diag, ctx) {
             } else {
                 guidance.summary = [shown, ' can publish an address other than your TunnelSats endpoint', expectedRef, '.'];
             }
-            guidance.steps = live ? liveRetrySteps : configFix(false);
+            // Also ensure the TunnelSats line: disabling the only externalhosts/announce-addr
+            // line would otherwise leave the node announcing no TunnelSats endpoint at all.
+            guidance.steps = live ? liveRetrySteps : configFix(true);
             break;
         case 'pinned-ip':
             guidance.summary = [shown, ' points at your TunnelSats server by a fixed address. TunnelSats only accepts the hostname form', expectedLine ? [' ', { code: expectedLine }] : '', ', so your announcement keeps working if the server IP changes.'];

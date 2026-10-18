@@ -2365,6 +2365,7 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(card.dataset.otherNode).toBe('true');
         expect(card.textContent).toContain('TunnelSats is protecting LND, so its buttons never change Core Lightning settings');
         expect(card.textContent).toContain('# announce-addr=203.0.113.5');
+        expect(card.textContent).toContain(`Make sure this line exists exactly once: announce-addr=${EXPECTED}`);
         expect(card.textContent).toContain('restart the Core Lightning app');
     });
 
