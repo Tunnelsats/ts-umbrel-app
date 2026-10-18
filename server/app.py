@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import uuid
@@ -9,7 +10,7 @@ import concurrent.futures
 from datetime import datetime, timezone
 import time
 from ipaddress import ip_address, ip_network
-from typing import Dict, Any, List, Optional, Tuple, Iterable
+from typing import Callable, Dict, Any, List, Optional, Tuple, Iterable
 from urllib.parse import quote
 
 import requests
@@ -128,10 +129,10 @@ CLN_CONTAINER_PATTERN = r"(^|[_-])(core-lightning|clightning|lightningd|cln)([_-
 WG_INTERFACE_NAME = "tunnelsatsv2"
 WG_HANDSHAKE_MAX_AGE_SECONDS = 180
 ANNOUNCEMENT_CONFLICT_ERROR = (
-    "Conflicting real-IP announcement setting detected in node configuration."
+    "Conflicting node announcement setting detected in node configuration."
 )
 ANNOUNCEMENT_VERIFICATION_ERROR = (
-    "LND gossip announcements have not been verified free of conflicting clearnet addresses."
+    "Lightning node gossip announcements have not been verified free of conflicting clearnet addresses."
 )
 TARGET_SWITCH_PENDING_ERROR = "Lightning target switch is pending dataplane reconciliation."
 RECONCILE_WAIT_TIMEOUT_SECONDS = 60.0
@@ -918,38 +919,50 @@ def audit_node_announcement_config(
     dns: str,
     port: int,
 ) -> Dict[str, Any]:
-    """Return active announcement settings and privacy conflicts for one node config."""
+    """Return active announcement settings and privacy conflicts for one node config.
+
+    ``conflicts`` keeps the historic ``key=value`` strings. ``conflict_entries`` carries
+    the parsed entries (including the zero-based line index) behind each conflict so
+    diagnostics can point users at the exact line to change.
+    """
     try:
         with open(path, "r", encoding="utf-8") as conf_fp:
             lines = conf_fp.readlines()
     except FileNotFoundError:
-        return {"readable": False, "settings": [], "conflicts": []}
+        return {"readable": False, "settings": [], "conflicts": [], "conflict_entries": []}
     except (IOError, OSError) as exc:
         app.logger.warning(f"Failed to audit {node_type.upper()} announcement config {path}: {exc}")
-        return {"readable": False, "settings": [], "conflicts": ["config-unreadable"]}
+        return {
+            "readable": False,
+            "settings": [],
+            "conflicts": ["config-unreadable"],
+            "conflict_entries": [],
+        }
 
     keys = set(_node_announcement_keys(node_type))
     entries = [entry for entry in _parse_active_config_entries(lines) if entry["key"] in keys]
     conflicts: List[str] = []
+    conflict_entries: List[Dict[str, str]] = []
     for entry in entries:
         key = entry["key"]
         value = entry["value"]
         if node_type == "lnd":
-            if key == "externalip" and not _is_onion_address(value):
-                conflicts.append(f"externalip={value}")
-            elif key == "externalhosts" and not (
-                _is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port)
-            ):
-                conflicts.append(f"externalhosts={value}")
-            elif key == "nat" and _config_bool(value) is True:
-                conflicts.append(f"nat={value}")
+            is_conflict = (
+                (key == "externalip" and not _is_onion_address(value))
+                or (
+                    key == "externalhosts"
+                    and not (_is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port))
+                )
+                or (key == "nat" and _config_bool(value) is True)
+            )
         else:
-            if key == "announce-addr" and not (
-                _is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port)
-            ):
-                conflicts.append(f"announce-addr={value}")
-            elif key == "ip-discovery" and _config_bool(value) is True:
-                conflicts.append(f"ip-discovery={value}")
+            is_conflict = (
+                key == "announce-addr"
+                and not (_is_onion_address(value) or _is_expected_tunnelsats_address(value, dns, port))
+            ) or (key == "ip-discovery" and _config_bool(value) is True)
+        if is_conflict:
+            conflicts.append(f"{key}={value}")
+            conflict_entries.append(entry)
 
     has_tunnelsats = False
     if dns and port:
@@ -964,8 +977,465 @@ def audit_node_announcement_config(
         "readable": True,
         "settings": entries,
         "conflicts": conflicts,
+        "conflict_entries": conflict_entries,
         "has_expected_tunnelsats": has_tunnelsats,
     }
+
+
+# --- Announcement diagnostics (issue #170) ----------------------------------------------
+# Diagnostics never change the fail-closed policy above. They explain every conflict the
+# config audit or the live gossip check found, so the dashboard can show users exactly
+# which setting is wrong, why, what to change it to, and how to verify the result.
+
+DEFAULT_LIGHTNING_PORT = 9735
+UMBREL_LND_CONTAINER = "lightning_lnd_1"
+UMBREL_CLN_CONTAINER = "core-lightning_lightningd_1"
+UMBREL_TUNNELSATS_COMPOSE = "/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml"
+TUNNELSATS_DOMAIN_SUFFIX = ".tunnelsats.com"
+DOCKER_CONTAINER_LOOKUP_COMMAND = (
+    "sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'"
+)
+# Withdrawing a pinned TunnelSats address would drop a valid route, so it is excluded.
+ANNOUNCEMENT_WITHDRAWABLE_KINDS = frozenset({"real-ip", "wrong-port", "stale-endpoint"})
+_ANNOUNCED_HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
+_CONTAINER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+STATUS_ERROR_TARGET_SWITCH_PENDING = "target_switch_pending"
+STATUS_ERROR_ANNOUNCEMENT_CONFLICT = "announcement_conflict"
+STATUS_ERROR_ANNOUNCEMENT_UNVERIFIED = "announcement_unverified"
+STATUS_ERROR_K3S_DNS_UNPROTECTED = "k3s_dns_unprotected"
+STATUS_ERROR_NO_WIREGUARD_CONFIG = "no_wireguard_config"
+STATUS_ERROR_NO_LIGHTNING_NODE = "no_lightning_node"
+STATUS_ERROR_DATAPLANE = "dataplane_error"
+_DATAPLANE_ERROR_CODE_PREFIXES = (
+    ("No WireGuard config found", STATUS_ERROR_NO_WIREGUARD_CONFIG),
+    ("SecureMode: No Lightning node detected", STATUS_ERROR_NO_LIGHTNING_NODE),
+)
+
+_SERVER_IP_CACHE_TTL_SECONDS = 60.0
+_SERVER_IP_NEGATIVE_CACHE_TTL_SECONDS = 15.0
+_SERVER_IP_RESOLVE_TIMEOUT_SECONDS = 1.5
+_server_ip_cache: Dict[str, Tuple[float, Tuple[str, ...]]] = {}
+_server_ip_cache_lock = threading.Lock()
+# Dedicated worker so a hanging resolver can never starve the status probe pool.
+_diagnostics_dns_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="tunnelsats-diagnostics-dns"
+)
+
+
+def dataplane_error_code(error: Any) -> Optional[str]:
+    """Map a daemon error string to a stable code the dashboard can explain."""
+    text = str(error or "").strip()
+    if not text:
+        return None
+    for prefix, code in _DATAPLANE_ERROR_CODE_PREFIXES:
+        if text.startswith(prefix):
+            return code
+    return STATUS_ERROR_DATAPLANE
+
+
+def _normalize_host(host: Any) -> str:
+    return str(host or "").strip().lower().rstrip(".")
+
+
+def _ip_literal(host: Any) -> Optional[str]:
+    """Return the canonical form of an IP literal, or None for hostnames.
+
+    Scoped IPv6 literals (``fe80::1%eth0``) are rejected: ``ipaddress`` accepts any scope
+    string, and Lightning announcements never carry one.
+    """
+    text = _normalize_host(host).strip("[]")
+    if "%" in text:
+        return None
+    try:
+        return str(ip_address(text))
+    except ValueError:
+        return None
+
+
+def _format_endpoint(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def split_announced_endpoint(
+    value: Any, default_port: int = DEFAULT_LIGHTNING_PORT
+) -> Optional[Tuple[str, int, bool]]:
+    """Parse an announced address into ``(host, port, port_defaulted)``.
+
+    LND and CLN announce ``DEFAULT_LIGHTNING_PORT`` when an address has no port. Anything
+    that is not a plain ``host[:port]`` returns None, so callers never build commands from
+    unexpected input.
+    """
+    raw = str(value or "").strip()
+    if "@" in raw:
+        raw = raw.rsplit("@", 1)[1].strip()
+    if not raw or any(char.isspace() for char in raw):
+        return None
+
+    port_text = ""
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end < 0:
+            return None
+        literal = _ip_literal(raw[1:end])
+        remainder = raw[end + 1:]
+        if literal is None or ":" not in literal:
+            return None
+        if remainder:
+            if not remainder.startswith(":") or len(remainder) == 1:
+                return None
+            port_text = remainder[1:]
+        host = literal
+    elif raw.count(":") > 1:
+        literal = _ip_literal(raw)
+        if literal is None:
+            return None
+        host = literal
+    else:
+        host_part, separator, port_text = raw.partition(":")
+        if separator and not port_text:
+            return None
+        host = _normalize_host(host_part)
+        if not _ANNOUNCED_HOSTNAME_PATTERN.fullmatch(host):
+            return None
+
+    if port_text:
+        if not port_text.isdigit():
+            return None
+        port = int(port_text)
+        port_defaulted = False
+    else:
+        port = int(default_port)
+        port_defaulted = True
+    if not 0 < port <= 65535:
+        return None
+    return host, port, port_defaulted
+
+
+def _tunnelsats_server_ips(dns: str) -> Tuple[str, ...]:
+    """Resolve the TunnelSats server's addresses with a bounded wait and a short cache."""
+    host = _normalize_host(dns)
+    if not host:
+        return ()
+    now = time.time()
+    with _server_ip_cache_lock:
+        cached = _server_ip_cache.get(host)
+    if cached is not None:
+        stamp, cached_ips = cached
+        ttl = _SERVER_IP_CACHE_TTL_SECONDS if cached_ips else _SERVER_IP_NEGATIVE_CACHE_TTL_SECONDS
+        if 0 <= now - stamp < ttl:
+            return cached_ips
+
+    ips: Tuple[str, ...] = ()
+    try:
+        future = _diagnostics_dns_executor.submit(socket.gethostbyname_ex, host)
+        _name, _aliases, addresses = future.result(timeout=_SERVER_IP_RESOLVE_TIMEOUT_SECONDS)
+        ips = tuple(sorted({literal for literal in map(_ip_literal, addresses) if literal}))
+    except Exception as exc:
+        app.logger.info(f"Could not resolve TunnelSats server {host} for diagnostics: {exc}")
+    with _server_ip_cache_lock:
+        _server_ip_cache[host] = (now, ips)
+    return ips
+
+
+def _server_host_matcher(dns: str, extra_hosts: Iterable[str] = ()) -> Callable[[str], bool]:
+    """Return a predicate telling whether a host is the current TunnelSats server.
+
+    A host matches when it is the server domain, a known endpoint host (for example the
+    WireGuard endpoint from the subscription metadata), or an IP literal found in the
+    server domain's DNS records. Only the TunnelSats domain is ever resolved, lazily and
+    at most once per matcher; user-controlled hostnames are never looked up.
+    """
+    server_name = _normalize_host(dns)
+    known = {server_name} if server_name else set()
+    for extra in extra_hosts or ():
+        normalized = _ip_literal(extra) or _normalize_host(extra)
+        if normalized:
+            known.add(normalized)
+    resolved: List[Tuple[str, ...]] = []
+
+    def is_server_host(host: str) -> bool:
+        literal = _ip_literal(host)
+        candidate = literal or _normalize_host(host)
+        if not candidate:
+            return False
+        if candidate in known:
+            return True
+        if literal is None or not server_name:
+            return False
+        if not resolved:
+            resolved.append(_tunnelsats_server_ips(server_name))
+        return literal in resolved[0]
+
+    return is_server_host
+
+
+def classify_announced_address(
+    value: Any,
+    dns: str,
+    port: Any,
+    is_server_host: Optional[Callable[[str], bool]] = None,
+) -> Tuple[str, Optional[str], bool]:
+    """Return ``(kind, effective_address, port_defaulted)`` for one announced address."""
+    parsed = split_announced_endpoint(value)
+    if parsed is None:
+        return "real-ip", None, False
+    host, announced_port, port_defaulted = parsed
+    address = _format_endpoint(host, announced_port)
+    matcher = is_server_host or _server_host_matcher(dns)
+    if _normalize_host(dns) and matcher(host):
+        try:
+            expected_port = int(port or 0)
+        except (TypeError, ValueError):
+            expected_port = 0
+        if expected_port > 0 and announced_port != expected_port:
+            return "wrong-port", address, port_defaulted
+        return "pinned-ip", address, port_defaulted
+    if host.endswith(TUNNELSATS_DOMAIN_SUFFIX):
+        return "stale-endpoint", address, port_defaulted
+    return "real-ip", address, port_defaulted
+
+
+def _withdraw_command(cli_prefix: str, address: Optional[str]) -> Optional[str]:
+    """Build a copy-paste LND gossip withdrawal for a validated ``host:port`` only."""
+    if not cli_prefix or not address:
+        return None
+    parsed = split_announced_endpoint(address)
+    if parsed is None or parsed[2]:
+        return None
+    endpoint = _format_endpoint(parsed[0], parsed[1])
+    return f"{cli_prefix} lncli peers updatenodeannouncement {shlex.quote(f'--address_remove={endpoint}')}"
+
+
+def _node_cli_prefix(node_type: str, target_container: str = "") -> str:
+    """Shell prefix that runs a Lightning CLI inside the node container for this mode."""
+    is_cln = node_type == "cln"
+    if K3S_MODE:
+        namespace = shlex.quote(CLN_K8S_NAMESPACE if is_cln else LND_K8S_NAMESPACE)
+        selector = shlex.quote(CLN_K8S_POD_SELECTOR if is_cln else LND_K8S_POD_SELECTOR)
+        return (
+            f"kubectl -n {namespace} exec "
+            f"$(kubectl -n {namespace} get pod -l {selector} -o name | head -n 1) --"
+        )
+    name = UMBREL_CLN_CONTAINER if is_cln else UMBREL_LND_CONTAINER
+    candidate = str(target_container or "").strip()
+    pattern = CLN_CONTAINER_PATTERN if is_cln else LND_CONTAINER_PATTERN
+    # Without the Docker socket (Secure Mode) the umbrelOS default is the best we know.
+    if not SECURE_MODE and _CONTAINER_NAME_PATTERN.fullmatch(candidate) and re.search(pattern, candidate):
+        name = candidate
+    return f"sudo docker exec {name}"
+
+
+def _expected_announcement(node_type: str, dns: str, port: Any) -> Tuple[Optional[str], Optional[str]]:
+    server = str(dns or "").strip()
+    try:
+        expected_port = int(port or 0)
+    except (TypeError, ValueError):
+        expected_port = 0
+    if not server or expected_port <= 0:
+        return None, None
+    expected = f"{server}:{expected_port}"
+    key = "announce-addr" if node_type == "cln" else "externalhosts"
+    return expected, f"{key}={expected}"
+
+
+def build_announcement_help(
+    node_type: str, dns: str, port: Any, target_container: str = ""
+) -> Dict[str, Any]:
+    """Mode-aware, copy-paste helpers for optional SSH verification."""
+    impl = "cln" if node_type == "cln" else "lnd"
+    cli = "lightning-cli" if impl == "cln" else "lncli"
+    expected, expected_line = _expected_announcement(impl, dns, port)
+    if K3S_MODE:
+        mode = "k3s"
+        config_path = None
+        namespace = shlex.quote(CLN_K8S_NAMESPACE if impl == "cln" else LND_K8S_NAMESPACE)
+        selector = shlex.quote(CLN_K8S_POD_SELECTOR if impl == "cln" else LND_K8S_POD_SELECTOR)
+        lookup_command = f"kubectl -n {namespace} get pods -l {selector} -o wide"
+        grep_command = None
+        logs_commands = [f"kubectl -n {shlex.quote(K8S_NAMESPACE)} logs -l app=tunnelsats --tail 100"]
+    else:
+        mode = "secure" if SECURE_MODE else "standard"
+        config_path = resolve_node_config(impl)[1]
+        lookup_command = DOCKER_CONTAINER_LOOKUP_COMMAND
+        keys = "|".join(_node_announcement_keys(impl))
+        grep_command = (
+            f"sudo grep -nE '^[[:space:]]*({keys})[[:space:]]*=' {shlex.quote(config_path)}"
+            if config_path else None
+        )
+        # Compose service names work whether or not the store stripped container_name.
+        logs_commands = [
+            f"sudo docker compose -f {UMBREL_TUNNELSATS_COMPOSE} logs --tail 100 {service}"
+            for service in ("tunnelsats-daemon", "tunnelsats-web")
+        ]
+    return {
+        "impl": impl,
+        "mode": mode,
+        "config_path": config_path,
+        "expected": expected,
+        "expected_line": expected_line,
+        "verify_command": f"{_node_cli_prefix(impl, target_container)} {cli} getinfo",
+        "container_lookup_command": lookup_command,
+        "config_grep_command": grep_command,
+        "logs_commands": logs_commands,
+    }
+
+
+def _announcement_diagnostic(node_type: str, kind: str, source: str, **fields: Any) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
+        "impl": node_type,
+        "kind": kind,
+        "source": source,
+        "setting": None,
+        "value": None,
+        "line": None,
+        "line_number": None,
+        "address": None,
+        "port_defaulted": False,
+        "expected": None,
+        "expected_line": None,
+        "config_path": None,
+        "withdraw_command": None,
+        "detail": None,
+    }
+    unknown = set(fields) - set(entry)
+    if unknown:
+        raise ValueError(f"Unknown announcement diagnostic fields: {sorted(unknown)}")
+    entry.update(fields)
+    return entry
+
+
+def _announced_host_is_ip(address: Optional[str]) -> bool:
+    parsed = split_announced_endpoint(address) if address else None
+    return bool(parsed and _ip_literal(parsed[0]))
+
+
+def build_config_announcement_diagnostics(
+    node_type: str,
+    audit: Dict[str, Any],
+    dns: str,
+    port: Any,
+    *,
+    detected: bool = False,
+    config_path: Optional[str] = None,
+    cli_prefix: str = "",
+    is_server_host: Optional[Callable[[str], bool]] = None,
+    check_missing_endpoint: bool = False,
+) -> List[Dict[str, Any]]:
+    """Explain each config-file conflict (and optionally a missing endpoint) for one node."""
+    expected, expected_line = _expected_announcement(node_type, dns, port)
+    common: Dict[str, Any] = {
+        "expected": expected,
+        "expected_line": expected_line,
+        "config_path": config_path,
+    }
+    audit = audit if isinstance(audit, dict) else {}
+    if not audit.get("readable"):
+        if "config-unreadable" in (audit.get("conflicts") or []):
+            return [_announcement_diagnostic(node_type, "config-unreadable", "config_file", detail="unreadable", **common)]
+        if detected:
+            return [_announcement_diagnostic(node_type, "config-unreadable", "config_file", detail="missing", **common)]
+        return []
+
+    matcher = is_server_host or _server_host_matcher(dns)
+    diagnostics: List[Dict[str, Any]] = []
+    for entry in audit.get("conflict_entries") or []:
+        key = str(entry.get("key", ""))
+        value = str(entry.get("value", ""))
+        try:
+            line_number: Optional[int] = int(entry.get("index")) + 1
+        except (TypeError, ValueError):
+            line_number = None
+        fields: Dict[str, Any] = dict(
+            common, setting=key, value=value, line=entry.get("line"), line_number=line_number
+        )
+        if key in ("nat", "ip-discovery"):
+            diagnostics.append(_announcement_diagnostic(node_type, "auto-discovery", "config_file", **fields))
+            continue
+        kind, address, port_defaulted = classify_announced_address(value, dns, port, matcher)
+        withdraw_command = None
+        # LND announces configured hostnames as resolved IPs, so only IP literals map
+        # one-to-one onto a live gossip entry that can be withdrawn exactly.
+        if node_type == "lnd" and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS and _announced_host_is_ip(address):
+            withdraw_command = _withdraw_command(cli_prefix, address)
+        diagnostics.append(_announcement_diagnostic(
+            node_type, kind, "config_file",
+            address=address, port_defaulted=port_defaulted, withdraw_command=withdraw_command, **fields,
+        ))
+
+    if check_missing_endpoint and not audit.get("has_expected_tunnelsats"):
+        diagnostics.append(_announcement_diagnostic(
+            node_type, "missing-endpoint", "config_file",
+            setting="announce-addr" if node_type == "cln" else "externalhosts",
+            detail=None if expected else "endpoint_unknown",
+            **common,
+        ))
+    return diagnostics
+
+
+def build_live_announcement_diagnostics(
+    node_type: str,
+    remaining: Iterable[Any],
+    dns: str,
+    port: Any,
+    *,
+    config_path: Optional[str] = None,
+    cli_prefix: str = "",
+    is_server_host: Optional[Callable[[str], bool]] = None,
+) -> List[Dict[str, Any]]:
+    """Explain what the live gossip check could not clean up or verify."""
+    expected, expected_line = _expected_announcement(node_type, dns, port)
+    common: Dict[str, Any] = {
+        "expected": expected,
+        "expected_line": expected_line,
+        "config_path": config_path,
+    }
+    pending_states = {f"{node_type}_initializing", f"{node_type}_not_found"}
+    matcher = is_server_host
+    diagnostics: List[Dict[str, Any]] = []
+    for item in remaining or []:
+        text = str(item or "").strip()
+        if not text or text == "secure_mode_manual_required":
+            continue
+        if text in pending_states:
+            diagnostics.append(_announcement_diagnostic(
+                node_type, "verification-pending", "live_gossip", detail=text, **common
+            ))
+            continue
+        if text.startswith("missing expected announcement"):
+            diagnostics.append(_announcement_diagnostic(
+                node_type, "missing-endpoint", "live_gossip",
+                detail=None if expected else "endpoint_unknown", **common,
+            ))
+            continue
+        if matcher is None:
+            matcher = _server_host_matcher(dns)
+        kind, address, port_defaulted = classify_announced_address(text, dns, port, matcher)
+        withdraw_command = (
+            _withdraw_command(cli_prefix, address)
+            if node_type == "lnd" and kind in ANNOUNCEMENT_WITHDRAWABLE_KINDS
+            else None
+        )
+        diagnostics.append(_announcement_diagnostic(
+            node_type, kind, "live_gossip",
+            value=text, address=address, port_defaulted=port_defaulted,
+            withdraw_command=withdraw_command, **common,
+        ))
+    return diagnostics
+
+
+def _confirmation_diagnostics(
+    node_type: str, audit: Dict[str, Any], dns: str, port: Any, meta: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Diagnostics shown before standard mode backs up and disables conflicting lines."""
+    return build_config_announcement_diagnostics(
+        node_type, audit, dns, port,
+        config_path=None if K3S_MODE else resolve_node_config(node_type)[1],
+        cli_prefix=_node_cli_prefix(node_type, str(read_dataplane_state().get("target_container") or "")),
+        is_server_host=_server_host_matcher(
+            dns, extra_hosts=[_address_host(str(meta.get("wgEndpoint") or ""))]
+        ),
+    )
 
 
 def _write_config_lines_atomic(path: str, lines: List[str]) -> bool:
@@ -3238,7 +3708,10 @@ def local_status():
     announcement_conflicts: List[str] = []
     lnd_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
     cln_audit: Dict[str, Any] = {"readable": False, "settings": [], "conflicts": [], "has_expected_tunnelsats": False}
+    lnd_audited = False
+    cln_audited = False
     if lnd_detected or os.path.exists(LND_CONFIG_PATH):
+        lnd_audited = True
         lnd_audit = audit_node_announcement_config(
             "lnd", LND_CONFIG_PATH, str(server_domain), expected_port
         )
@@ -3246,6 +3719,7 @@ def local_status():
         if lnd_detected and not lnd_audit["readable"] and not lnd_audit["conflicts"]:
             announcement_conflicts.append("lnd:config-unavailable")
     if cln_detected or (cln_container_config and os.path.exists(cln_container_config)):
+        cln_audited = True
         cln_audit = audit_node_announcement_config(
             "cln", cln_container_config, str(server_domain), expected_port
         )
@@ -3275,6 +3749,17 @@ def local_status():
     active_routing_active = cln_routing_active if active_target_impl == "cln" else lnd_routing_active
     active_detected = cln_detected if active_target_impl == "cln" else lnd_detected
 
+    # Diagnostics context: which container to address in copy-paste commands and how to
+    # recognise the TunnelSats server (domain, WireGuard endpoint host, or its DNS records).
+    target_container = str(dataplane.get("target_container") or "")
+    server_host_matcher = _server_host_matcher(
+        str(server_domain), extra_hosts=[_address_host(str(meta_data.get("wgEndpoint") or ""))]
+    )
+
+    def _diagnostics_config_path(impl: str) -> Optional[str]:
+        return None if K3S_MODE else resolve_node_config(impl)[1]
+
+    live_announcement_diagnostics: List[Dict[str, Any]] = []
     verification_required = bool(active_detected and active_routing_active)
     verification = meta_data.get(f"{active_target_impl}AnnouncementVerification")
     expected_endpoint = f"{server_domain}:{expected_port}"
@@ -3322,23 +3807,63 @@ def local_status():
                         }
                         _update_announcement_metadata(meta_path, "lnd", verification=new_verification)
                         announcement_verified = v_ok
+                if not v_ok:
+                    live_announcement_diagnostics = build_live_announcement_diagnostics(
+                        active_target_impl, v_conf, str(server_domain), expected_port,
+                        config_path=_diagnostics_config_path(active_target_impl),
+                        cli_prefix=_node_cli_prefix(active_target_impl, target_container),
+                        is_server_host=server_host_matcher,
+                    )
+            elif not announcement_verified:
+                live_announcement_diagnostics = [_announcement_diagnostic(
+                    active_target_impl, "missing-endpoint", "live_gossip",
+                    detail="endpoint_unknown",
+                    config_path=_diagnostics_config_path(active_target_impl),
+                )]
             verification_source = "live_gossip"
+
+    announcement_diagnostics: List[Dict[str, Any]] = []
+    for impl, audited, audit, detected in (
+        ("lnd", lnd_audited, lnd_audit, lnd_detected),
+        ("cln", cln_audited, cln_audit, cln_detected),
+    ):
+        if not audited:
+            continue
+        announcement_diagnostics.extend(build_config_announcement_diagnostics(
+            impl, audit, str(server_domain), expected_port,
+            detected=detected,
+            config_path=_diagnostics_config_path(impl),
+            cli_prefix=_node_cli_prefix(impl, target_container),
+            is_server_host=server_host_matcher,
+            check_missing_endpoint=bool(
+                (SECURE_MODE or K3S_MODE) and verification_required and impl == active_target_impl
+            ),
+        ))
+    announcement_diagnostics.extend(live_announcement_diagnostics)
 
     dns_protected = bool(dataplane.get("dns_protected", False))
     effective_rules_synced = bool(dataplane["rules_synced"])
     effective_error = dataplane["last_error"]
+    last_error_code: Optional[str] = None
     if target_switch_pending:
         effective_rules_synced = False
         effective_error = TARGET_SWITCH_PENDING_ERROR
+        last_error_code = STATUS_ERROR_TARGET_SWITCH_PENDING
     elif announcement_conflicts:
         effective_rules_synced = False
         effective_error = ANNOUNCEMENT_CONFLICT_ERROR
+        last_error_code = STATUS_ERROR_ANNOUNCEMENT_CONFLICT
     elif verification_required and not announcement_verified:
         effective_rules_synced = False
         effective_error = ANNOUNCEMENT_VERIFICATION_ERROR
+        last_error_code = STATUS_ERROR_ANNOUNCEMENT_UNVERIFIED
     elif (K3S_MODE or dataplane.get("dataplane_mode") == "k3s") and effective_rules_synced and not dns_protected:
         effective_rules_synced = False
-        effective_error = effective_error or "k3s: External DNS protection is not active"
+        if not effective_error:
+            effective_error = "k3s: External DNS protection is not active"
+            last_error_code = STATUS_ERROR_K3S_DNS_UNPROTECTED
+    if last_error_code is None:
+        last_error_code = dataplane_error_code(effective_error)
 
     # Enrich with location metadata using unified helper
     lat, lng, label, flag = None, None, None, None
@@ -3395,10 +3920,13 @@ def local_status():
             "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
             "last_reconcile_at": dataplane["last_reconcile_at"],
             "last_error": effective_error,
+            "last_error_code": last_error_code,
             "announcement_conflicts": announcement_conflicts,
+            "announcement_diagnostics": announcement_diagnostics,
+            "announcement_help": build_announcement_help(
+                active_target_impl, str(server_domain), expected_port, target_container
+            ),
             "announcement_verification_required": verification_required,
-            "announcement_verified": announcement_verified,
-            "announcement_verification_source": verification_source,
         }
     )
 
@@ -3706,7 +4234,23 @@ def configure_node():
 
         if not _persist_node_type(meta_path, node_type):
             return jsonify({"success": False, "error": "Failed to persist nodeType to metadata."}), 500
-        _, config_path = resolve_node_config(node_type)
+        container_config_path, config_path = resolve_node_config(node_type)
+        cli_prefix = _node_cli_prefix(node_type)
+        # Read-only audit: Secure Mode can read the node config but never writes it.
+        diagnostics = build_config_announcement_diagnostics(
+            node_type,
+            audit_node_announcement_config(node_type, container_config_path, dns, port),
+            dns,
+            port,
+            detected=True,
+            config_path=config_path,
+            cli_prefix=cli_prefix,
+            is_server_host=_server_host_matcher(
+                dns, extra_hosts=[_address_host(str(meta.get("wgEndpoint") or ""))]
+            ),
+            check_missing_endpoint=True,
+        )
+        gossip_commands = [entry["withdraw_command"] for entry in diagnostics if entry["withdraw_command"]]
         if node_type == "lnd":
             config_lines = [
                 f"externalhosts={dns}:{port}",
@@ -3714,7 +4258,7 @@ def configure_node():
             ]
             cleanup_lines = ["externalip=", "nat=true", "nat=1"]
             gossip_command = (
-                "sudo docker exec lnd lncli peers updatenodeannouncement "
+                f"{cli_prefix} lncli peers updatenodeannouncement "
                 "--address_remove=<your-old-ip>:9735"
             )
         else:
@@ -3737,6 +4281,8 @@ def configure_node():
             "config_lines": config_lines,
             "cleanup_lines": cleanup_lines,
             "gossip_command": gossip_command,
+            "gossip_commands": gossip_commands,
+            "diagnostics": diagnostics,
             "retain_tor_supported": True,
             "historical_warning": (
                 "Withdrawing an address updates live Lightning gossip, but third-party "
@@ -3769,6 +4315,7 @@ def configure_node():
                 "requires_confirmation": True,
                 "node_type": "lnd",
                 "conflicts": audit["conflicts"],
+                "diagnostics": _confirmation_diagnostics("lnd", audit, dns, port, meta),
                 "retain_tor_supported": True,
                 "error": ANNOUNCEMENT_CONFLICT_ERROR,
             }), 409
@@ -3841,6 +4388,7 @@ def configure_node():
             "requires_confirmation": True,
             "node_type": "cln",
             "conflicts": audit["conflicts"],
+            "diagnostics": _confirmation_diagnostics("cln", audit, dns, port, meta),
             "retain_tor_supported": True,
             "error": ANNOUNCEMENT_CONFLICT_ERROR,
         }), 409

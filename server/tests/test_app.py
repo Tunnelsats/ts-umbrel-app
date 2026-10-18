@@ -36,6 +36,15 @@ def mock_lnd_announcement_cleanup():
 
 
 @pytest.fixture(autouse=True)
+def hermetic_server_resolution():
+    """Announcement diagnostics must never perform real DNS lookups in unit tests."""
+    app_module._server_ip_cache.clear()
+    with patch('app._tunnelsats_server_ips', return_value=()) as mocked:
+        yield mocked
+    app_module._server_ip_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def mock_target_reconcile():
     """Keep configuration tests synchronous; reconciliation-specific tests use the original helper."""
     original = app_module.reconcile_target_and_wait

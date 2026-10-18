@@ -102,6 +102,18 @@ const BADGE_STATES = {
     configVerified: {
         text: "\u24d8 Config Verified",
         className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsgreen bg-green-900/50 text-tsgreen pulse-green"
+    },
+    actionNeeded: {
+        text: "Action Needed",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsyellow text-tsyellow bg-yellow-950/40"
+    },
+    verifying: {
+        text: "Verifying",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-blue-500 text-blue-300 bg-gray-900/50"
+    },
+    unknown: {
+        text: "Unknown",
+        className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-gray-700 bg-gray-900/50 text-gray-500"
     }
 };
 
@@ -133,12 +145,70 @@ if (!isJest) {
     };
 }
 
+// Local review of every diagnostics state without a node: open the dashboard on localhost
+// with ?mock=secure-wrong-port | live-gossip | verifying | no-subscription | unavailable.
+function mockStatusScenario(base) {
+    const scenario = new URLSearchParams(window.location.search).get('mock');
+    if (scenario === 'unavailable') {
+        return { ok: false, status: 503, body: { success: false, error: 'TunnelSats daemon is unavailable.' } };
+    }
+    const expected = 'us3.tunnelsats.com:23217';
+    const lndConf = '/home/umbrel/umbrel/app-data/lightning/data/lnd/lnd.conf';
+    const compose = '/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml';
+    const help = (mode, container) => ({
+        impl: 'lnd',
+        mode,
+        config_path: lndConf,
+        expected,
+        expected_line: `externalhosts=${expected}`,
+        verify_command: `sudo docker exec ${container} lncli getinfo`,
+        container_lookup_command: "sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'",
+        config_grep_command: `sudo grep -nE '^[[:space:]]*(externalip|externalhosts|nat)[[:space:]]*=' ${lndConf}`,
+        logs_commands: [`sudo docker compose -f ${compose} logs --tail 100 tunnelsats-daemon`, `sudo docker compose -f ${compose} logs --tail 100 tunnelsats-web`]
+    });
+    const diag = (fields) => ({
+        impl: 'lnd', kind: 'real-ip', source: 'config_file', setting: null, value: null, line: null, line_number: null,
+        address: null, port_defaulted: false, expected, expected_line: `externalhosts=${expected}`, config_path: lndConf,
+        withdraw_command: null, detail: null, ...fields
+    });
+    const withdraw = (address, container = 'lightning_lnd_1') => `sudo docker exec ${container} lncli peers updatenodeannouncement --address_remove=${address}`;
+    const blocked = { ...base, server_domain: 'us3.tunnelsats.com', vpn_port: '23217', rules_synced: false };
+    const conflict = 'Conflicting node announcement setting detected in node configuration.';
+    const unverified = 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.';
+    const scenarios = {
+        'secure-wrong-port': {
+            ...blocked, secure_mode: true, announcement_verification_source: 'config_file',
+            last_error: conflict, last_error_code: 'announcement_conflict', announcement_help: help('secure', 'lightning_lnd_1'),
+            announcement_diagnostics: [
+                diag({ kind: 'wrong-port', setting: 'externalip', value: '178.156.167.202', line: 'externalip=178.156.167.202', line_number: 12, address: '178.156.167.202:9735', port_defaulted: true, withdraw_command: withdraw('178.156.167.202:9735') }),
+                diag({ kind: 'auto-discovery', setting: 'nat', value: 'true', line: 'nat=true', line_number: 14 })
+            ]
+        },
+        'live-gossip': {
+            ...blocked, secure_mode: false, announcement_verification_source: 'live_gossip',
+            last_error: unverified, last_error_code: 'announcement_unverified', announcement_help: help('standard', 'lightning_lnd_1'),
+            announcement_diagnostics: [
+                diag({ source: 'live_gossip', value: '203.0.113.5:9735', address: '203.0.113.5:9735', withdraw_command: withdraw('203.0.113.5:9735') }),
+                diag({ kind: 'missing-endpoint', source: 'live_gossip' })
+            ]
+        },
+        verifying: {
+            ...blocked, secure_mode: false, announcement_verification_source: 'live_gossip',
+            last_error: unverified, last_error_code: 'announcement_unverified', announcement_help: help('standard', 'lightning_lnd_1'),
+            announcement_diagnostics: [diag({ kind: 'verification-pending', source: 'live_gossip', detail: 'lnd_initializing' })]
+        },
+        'no-subscription': {
+            ...base, vpn_active: false, wg_status: 'Disconnected', rules_synced: false, server_domain: '', vpn_port: '',
+            last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config', announcement_diagnostics: []
+        }
+    };
+    return { ok: true, body: scenarios[scenario] || base };
+}
+
 async function mockFetch(url) {
     console.log(`[MOCK] Fetching: ${url}`);
     if (url === '/api/local/status') {
-        return {
-            ok: true,
-            body: {
+        return mockStatusScenario({
                 wg_status: 'Connected',
                 wg_pubkey: 'MOCK_PUBKEY_1234567890abcdef',
                 configs_found: ['tunnelsats.conf', 'mullvad.conf'],
@@ -158,8 +228,7 @@ async function mockFetch(url) {
                 last_reconcile_at: new Date().toISOString(),
                 rules_synced: true,
                 last_error: null
-            }
-        };
+        });
     }
     if (url === '/api/local/meta') {
         return {
@@ -801,11 +870,438 @@ function applySecureModeUI(isSecureMode) {
     });
 }
 
+// --- Actionable status diagnostics (issue #170) ---
+// The backend classifies every announcement problem (announcement_diagnostics) and gives
+// a stable code for every status error (last_error_code). This module turns both into
+// plain-language guidance: what is wrong, why it matters, how to fix it without a
+// terminal, and how to confirm the fix (Re-check now). SSH commands are optional extras.
+// Every value is rendered with textContent; config values never reach innerHTML.
+const ANNOUNCEMENT_ERROR_CODES = ['announcement_conflict', 'announcement_unverified'];
+
+const ANNOUNCEMENT_KIND_LABELS = {
+    'real-ip': 'Non-TunnelSats address',
+    'wrong-port': 'TunnelSats server, wrong port',
+    'pinned-ip': 'TunnelSats address pinned by IP',
+    'stale-endpoint': 'Old TunnelSats endpoint',
+    'auto-discovery': 'Automatic IP discovery enabled',
+    'missing-endpoint': 'TunnelSats endpoint not announced',
+    'config-unreadable': 'Node config file not readable',
+    'verification-pending': 'Waiting for your Lightning node'
+};
+
+const STATUS_ERROR_HINTS = {
+    target_switch_pending: 'TunnelSats is switching protection to the Lightning node you selected. This usually finishes within a minute.',
+    k3s_dns_unprotected: 'External DNS protection for your Lightning pod is not active yet, so traffic stays blocked. Check the TunnelSats pod logs and the k3s README.',
+    no_wireguard_config: 'No TunnelSats subscription is installed yet. Buy one or import your WireGuard configuration on the Subscribe / Import tab.',
+    no_lightning_node: 'TunnelSats cannot reach a Lightning node. Start the Lightning Node or Core Lightning app on your Umbrel, then re-check.',
+    rules_not_synced: 'TunnelSats has not finished applying its protection rules yet. This can take a moment after a restart. If it does not clear, restart the TunnelSats app from the Umbrel dashboard.',
+    dataplane_error: 'The TunnelSats background service reported this problem while protecting your node. Traffic stays blocked until it is resolved. Restart the TunnelSats app from the Umbrel dashboard, then re-check. If it keeps happening, open an issue and include the TunnelSats logs (see the FAQ).',
+    daemon_unavailable: 'The TunnelSats background service is not responding, so the dashboard cannot read your protection status. Restart the TunnelSats app from the Umbrel dashboard, then re-check.',
+    session_expired: 'Your Umbrel session may have expired. Reload this page and sign in to Umbrel again.'
+};
+
+function createUiElement(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined && text !== null) element.textContent = String(text);
+    return element;
+}
+
+function createCopyButton(value, label) {
+    const button = createUiElement('button', 'ts-copy-btn', 'Copy');
+    button.type = 'button';
+    button.setAttribute('aria-label', `Copy ${label}`);
+    button.addEventListener('click', () => copyToClipboard(String(value), label));
+    return button;
+}
+
+// Rich text parts: strings, { code, copy? } for inline code, { strong } for emphasis, or nested arrays.
+function appendRichText(parent, parts) {
+    (Array.isArray(parts) ? parts : [parts]).forEach((part) => {
+        if (part === null || part === undefined || part === '') return;
+        if (Array.isArray(part)) {
+            appendRichText(parent, part);
+        } else if (typeof part === 'object' && part.code !== undefined) {
+            parent.appendChild(createUiElement('code', 'ts-code', part.code));
+            if (part.copy) parent.appendChild(createCopyButton(part.code, part.copy));
+        } else if (typeof part === 'object' && part.strong !== undefined) {
+            parent.appendChild(createUiElement('strong', 'ts-strong', part.strong));
+        } else {
+            parent.appendChild(document.createTextNode(String(part)));
+        }
+    });
+    return parent;
+}
+
+function createCommandBlock(command, label) {
+    const wrapper = createUiElement('div', 'ts-command');
+    wrapper.appendChild(createUiElement('pre', 'ts-command-text', command));
+    wrapper.appendChild(createCopyButton(command, label));
+    return wrapper;
+}
+
+function splitEndpoint(address) {
+    const text = String(address || '');
+    const separator = text.lastIndexOf(':');
+    if (separator <= 0) return { host: text, port: '' };
+    return { host: text.slice(0, separator), port: text.slice(separator + 1) };
+}
+
+function diagnosticLocation(diag) {
+    if (diag.source === 'live_gossip') return 'Live gossip';
+    const fileName = diag.impl === 'cln' ? 'config' : 'lnd.conf';
+    return diag.line_number ? `${fileName}, line ${diag.line_number}` : fileName;
+}
+
+function announcementGuidance(diag, ctx) {
+    const impl = diag.impl === 'cln' ? 'cln' : 'lnd';
+    const appName = impl === 'cln' ? 'Core Lightning' : 'Lightning Node';
+    const nodeName = impl === 'cln' ? 'Core Lightning' : 'LND';
+    const fileName = impl === 'cln' ? 'config' : 'lnd.conf';
+    const line = diag.line || '';
+    const lineRef = diag.line_number ? `line ${diag.line_number}` : 'the line';
+    const expected = diag.expected || '';
+    const expectedLine = diag.expected_line || '';
+    const address = diag.address || '';
+    const live = diag.source === 'live_gossip';
+    // The offending line is rendered in its own box above the summary, so refer to it.
+    const shown = line ? 'This line' : { code: diag.value || address || fileName };
+    const expectedRef = expected ? [' ', { code: expected }] : '';
+
+    const openStep = diag.config_path
+        ? ['Open ', { code: diag.config_path, copy: 'Config file path' }, ctx.isK3s ? '.' : ' in the Umbrel Files app or over SSH.']
+        : ['Open your ', { code: fileName }, ' file.'];
+    const restartStep = ctx.isK3s
+        ? ['Save the file and restart the ', nodeName, ' pod so it reloads the configuration.']
+        : ['Save the file and restart the ', { strong: appName }, ' app from the Umbrel dashboard.'];
+    const recheckStep = ['Come back here and click ', { strong: 'Re-check now' }, '.'];
+    const disableStep = line
+        ? ['Disable ', lineRef, ' by putting ', { code: '#' }, ' in front of it: ', { code: `# ${line}` }]
+        : null;
+    const ensureStep = expectedLine
+        ? ['Make sure this line exists exactly once', impl === 'lnd' ? ' (in the [Application Options] section)' : '', ': ', { code: expectedLine, copy: 'Configuration line' }]
+        : null;
+    const configFix = (needsExpectedLine) => [openStep, disableStep, needsExpectedLine ? ensureStep : null, restartStep, recheckStep].filter(Boolean);
+    const liveRetrySteps = [
+        ['Click ', { strong: 'Re-check now' }, '. Every check retries the automatic withdrawal.'],
+        ['If it keeps coming back, the address is still set in ', { code: fileName }, '. Use ', { strong: 'Fix automatically' }, ' or remove the matching line, then re-check.']
+    ];
+    const ssh = diag.withdraw_command
+        ? {
+            intro: live
+                ? ['Optional, over SSH: withdraw it manually. Pass only ip:port, without the pubkey@ prefix.']
+                : ['Optional, over SSH: if ', { code: 'getinfo' }, ' still lists ', { code: address }, ' after the restart, withdraw it from live gossip. Pass only ip:port, without the pubkey@ prefix.'],
+            command: diag.withdraw_command
+        }
+        : null;
+    const guidance = { title: ANNOUNCEMENT_KIND_LABELS[diag.kind] || 'Announcement issue', summary: [], steps: [], ssh };
+
+    switch (diag.kind) {
+        case 'wrong-port': {
+            const announced = splitEndpoint(address);
+            const forwarded = splitEndpoint(expected).port;
+            guidance.summary = [
+                live ? [nodeName, ' still announces ', { code: address }, ' in live gossip. '] : [shown, ' announces ', { code: address }, '. '],
+                { code: announced.host }, ' is your TunnelSats server, but port ', { code: announced.port },
+                diag.port_defaulted ? ' (the default, because no port is set)' : '',
+                ' is not your forwarded port', forwarded ? [' ', { code: forwarded }] : '',
+                '. Other nodes cannot reach you on that port.'
+            ];
+            guidance.steps = live ? liveRetrySteps : configFix(true);
+            break;
+        }
+        case 'real-ip':
+            if (live) {
+                guidance.summary = [nodeName, ' still announces ', { code: address || diag.value || '' }, ' in live gossip. That is not your TunnelSats endpoint', expectedRef, '.'];
+            } else if (address) {
+                guidance.summary = [shown, ' announces ', { code: address }, ', which is not your TunnelSats endpoint', expectedRef, '. This is usually your home or ISP IP, or a leftover from an earlier setup, and it can reveal where your node runs.'];
+            } else {
+                guidance.summary = [shown, ' can publish an address other than your TunnelSats endpoint', expectedRef, '.'];
+            }
+            guidance.steps = live ? liveRetrySteps : configFix(false);
+            break;
+        case 'pinned-ip':
+            guidance.summary = [shown, ' points at your TunnelSats server by a fixed address. TunnelSats only accepts the hostname form', expectedLine ? [' ', { code: expectedLine }] : '', ', so your announcement keeps working if the server IP changes.'];
+            guidance.steps = configFix(true);
+            break;
+        case 'stale-endpoint':
+            guidance.summary = live
+                ? [nodeName, ' still announces ', { code: address }, ' in live gossip, an older TunnelSats endpoint that does not match your subscription', expectedRef, '.']
+                : [shown, ' announces ', { code: address }, ', a TunnelSats endpoint that does not match your current subscription', expectedRef, '. This often happens after switching servers.'];
+            guidance.steps = live ? liveRetrySteps : configFix(true);
+            break;
+        case 'auto-discovery': {
+            const disabledLine = impl === 'cln' ? 'ip-discovery=false' : 'nat=false';
+            guidance.summary = impl === 'cln'
+                ? [shown, ' lets Core Lightning discover and announce your public IP, which can reveal your home IP.']
+                : [shown, ' lets LND discover your public IP through your router (UPnP or NAT-PMP) and announce it, which can reveal your home IP.'];
+            guidance.steps = [openStep, ['Change ', lineRef, ' to ', { code: disabledLine, copy: 'Configuration line' }], restartStep, recheckStep];
+            break;
+        }
+        case 'missing-endpoint':
+            if (diag.detail === 'endpoint_unknown' || !expectedLine) {
+                guidance.summary = ['TunnelSats does not know your assigned server and port, so it cannot check what your node announces.'];
+                guidance.steps = [['Open the ', { strong: 'Subscribe / Import' }, ' tab and import your WireGuard configuration again, or renew an expired subscription.'], recheckStep];
+            } else if (live) {
+                guidance.summary = [nodeName, ' does not announce ', { code: expected }, ' yet. TunnelSats adds it automatically while it can reach ', nodeName, '.'];
+                guidance.steps = [
+                    ['Click ', { strong: 'Re-check now' }, ' to retry.'],
+                    ['If it stays missing, make sure ', { code: fileName }, ' contains ', { code: expectedLine, copy: 'Configuration line' }, ' and restart the ', { strong: appName }, ' app.']
+                ];
+            } else {
+                guidance.summary = [{ code: fileName }, ' does not contain ', { code: expectedLine }, ', so other nodes cannot find your node through TunnelSats.'];
+                guidance.steps = [openStep, ['Add this line exactly once', impl === 'lnd' ? ' in the [Application Options] section' : '', ': ', { code: expectedLine, copy: 'Configuration line' }], restartStep, recheckStep];
+            }
+            break;
+        case 'config-unreadable':
+            guidance.summary = diag.detail === 'unreadable'
+                ? ['TunnelSats cannot read ', { code: diag.config_path || fileName }, ' (permissions or a disk error).']
+                : ['TunnelSats detected ', appName, ' but cannot find its config file', diag.config_path ? [' at ', { code: diag.config_path }] : '', '.'];
+            guidance.steps = [
+                ['Make sure the ', { strong: appName }, ' app is installed and has started at least once.'],
+                ['Restart the ', { strong: appName }, ' app, then the ', { strong: 'TunnelSats' }, ' app.'],
+                recheckStep,
+                ['Still failing? Open an issue and include the TunnelSats logs (see Check over SSH below).']
+            ];
+            break;
+        case 'verification-pending':
+            guidance.summary = String(diag.detail || '').endsWith('_not_found')
+                ? ['TunnelSats cannot find the ', nodeName, ' container, so it cannot check your live announcement yet.']
+                : [nodeName, ' is not answering yet. It is usually still starting, syncing, or waiting for its wallet to be unlocked. TunnelSats keeps traffic blocked until the live check passes.'];
+            guidance.steps = [['Open the ', { strong: appName }, ' app and make sure it is running, synced, and unlocked.'], recheckStep];
+            break;
+        default:
+            guidance.summary = [shown];
+            guidance.steps = [recheckStep];
+    }
+    return guidance;
+}
+
+function renderDiagnosticCard(diag, ctx) {
+    const guidance = announcementGuidance(diag, ctx);
+    const card = createUiElement('li', 'ts-diag-card');
+    card.dataset.kind = String(diag.kind || '');
+    card.dataset.source = String(diag.source || '');
+
+    const header = createUiElement('div', 'ts-diag-card-header');
+    header.appendChild(createUiElement('span', 'ts-diag-kind', guidance.title));
+    const chips = createUiElement('span', 'ts-diag-chips');
+    chips.appendChild(createUiElement('span', 'ts-chip', diag.impl === 'cln' ? 'Core Lightning' : 'LND'));
+    chips.appendChild(createUiElement('span', 'ts-chip', diagnosticLocation(diag)));
+    header.appendChild(chips);
+    card.appendChild(header);
+
+    if (diag.line) card.appendChild(createUiElement('code', 'ts-diag-line', diag.line));
+    card.appendChild(appendRichText(createUiElement('p', 'ts-diag-text'), guidance.summary));
+    if (guidance.steps.length) {
+        card.appendChild(createUiElement('p', 'ts-diag-subtitle', 'How to fix'));
+        const steps = createUiElement('ol', 'ts-diag-steps');
+        guidance.steps.forEach((step) => steps.appendChild(appendRichText(createUiElement('li'), step)));
+        card.appendChild(steps);
+    }
+    if (guidance.ssh) {
+        const ssh = createUiElement('div', 'ts-diag-ssh');
+        ssh.appendChild(appendRichText(createUiElement('p', 'ts-diag-meta'), guidance.ssh.intro));
+        ssh.appendChild(createCommandBlock(guidance.ssh.command, 'Withdrawal command'));
+        card.appendChild(ssh);
+    }
+    return card;
+}
+
+function createRecheckButton() {
+    const button = createUiElement('button', 'ts-btn ts-btn-primary', 'Re-check now');
+    button.type = 'button';
+    button.id = 'btn-recheck-status';
+    return button;
+}
+
+function createFaqLink(faqId, text) {
+    const link = createUiElement('a', 'ts-link', text);
+    link.href = `#${faqId}`;
+    link.setAttribute('data-scroll-to', faqId);
+    return link;
+}
+
+function renderSshHelp(help) {
+    const items = [];
+    if (help.container_lookup_command) items.push(['Find the container names', help.container_lookup_command]);
+    if (help.config_grep_command) items.push(['Show the active announcement lines in your config', help.config_grep_command]);
+    if (help.verify_command) items.push(['Show what your node announces right now (the uris or address list)', help.verify_command]);
+    (Array.isArray(help.logs_commands) ? help.logs_commands : []).forEach((command) => items.push(['TunnelSats logs', command]));
+    if (!items.length) return null;
+
+    const details = createUiElement('details', 'ts-diag-details');
+    details.appendChild(createUiElement('summary', 'ts-diag-summary', 'Check over SSH (optional)'));
+    details.appendChild(createUiElement('p', 'ts-diag-meta', 'You do not need SSH to fix this. These read-only commands help if you want to double-check, or to share details with support.'));
+    items.forEach(([label, command]) => {
+        details.appendChild(createUiElement('p', 'ts-diag-meta', label));
+        details.appendChild(createCommandBlock(command, 'Command'));
+    });
+    return details;
+}
+
+function renderAnnouncementDiagnostics(container, data, diagnostics, ctx) {
+    const help = data.announcement_help && typeof data.announcement_help === 'object' ? data.announcement_help : {};
+    const panel = createUiElement('div', ctx.onlyPending ? 'ts-diag-panel ts-diag-panel-pending' : 'ts-diag-panel');
+    panel.id = 'announcement-diagnostics-panel';
+
+    panel.appendChild(createUiElement('h3', 'ts-diag-title', ctx.onlyPending ? 'Waiting for your Lightning node' : "Fix your node's announcement settings"));
+    panel.appendChild(createUiElement('p', 'ts-diag-text', ctx.onlyPending
+        ? 'TunnelSats needs your Lightning node to answer before it can confirm that only your TunnelSats endpoint is announced. Traffic stays blocked until then.'
+        : "TunnelSats keeps your node's clearnet traffic blocked until your node announces only your TunnelSats endpoint. Each item below shows what was found, why it is a problem, and how to fix it."));
+
+    const expected = help.expected || (diagnostics.find((diag) => diag.expected) || {}).expected;
+    if (expected) {
+        panel.appendChild(appendRichText(createUiElement('p', 'ts-diag-meta'), ['Expected announcement: ', { code: expected, copy: 'Expected announcement' }]));
+    }
+    let modeNote = ctx.onlyPending
+        ? 'Nothing to change in your configuration right now. Once your node answers, click Re-check now.'
+        : 'TunnelSats can fix configuration conflicts for you with Fix automatically, or you can follow the steps yourself.';
+    if (ctx.isSecureMode) {
+        modeNote = 'Secure Mode: TunnelSats can read your node config file but cannot change it or query your node, so you apply the fix and click Re-check now.';
+    } else if (ctx.isK3s) {
+        modeNote = 'k3s: TunnelSats checks your node config file. Apply the fix where you manage that file, then click Re-check now.';
+    }
+    panel.appendChild(createUiElement('p', 'ts-diag-meta', modeNote));
+
+    if (diagnostics.length) {
+        const list = createUiElement('ol', 'ts-diag-list');
+        diagnostics.forEach((diag) => list.appendChild(renderDiagnosticCard(diag, ctx)));
+        panel.appendChild(list);
+    } else {
+        panel.appendChild(createUiElement('p', 'ts-diag-text', String(data.last_error || 'An announcement check did not pass.')));
+    }
+
+    const actions = createUiElement('div', 'ts-diag-actions');
+    actions.appendChild(createRecheckButton());
+    if (!ctx.onlyPending) {
+        const fixButton = createUiElement('button', 'ts-btn ts-btn-secondary', ctx.isSecureMode ? 'Show step-by-step fix' : 'Fix automatically');
+        fixButton.type = 'button';
+        fixButton.id = 'btn-goto-instructions';
+        fixButton.dataset.impl = ctx.targetImpl === 'cln' ? 'cln' : 'lnd';
+        actions.appendChild(fixButton);
+    }
+    actions.appendChild(createFaqLink('faq-8', 'Troubleshooting guide'));
+    panel.appendChild(actions);
+
+    const sshHelp = renderSshHelp(help);
+    if (sshHelp) panel.appendChild(sshHelp);
+
+    container.replaceChildren(panel);
+    container.classList.remove('hidden');
+}
+
+function renderStatusHelp(container, code) {
+    const panel = createUiElement('div', 'ts-diag-panel ts-diag-panel-generic');
+    panel.id = 'status-help-panel';
+    panel.dataset.code = String(code || '');
+    panel.appendChild(createUiElement('p', 'ts-diag-text', STATUS_ERROR_HINTS[code] || STATUS_ERROR_HINTS.dataplane_error));
+    const actions = createUiElement('div', 'ts-diag-actions');
+    if (code === 'session_expired') {
+        const reload = createUiElement('button', 'ts-btn ts-btn-primary', 'Reload page');
+        reload.type = 'button';
+        reload.id = 'btn-reload-page';
+        actions.appendChild(reload);
+    } else {
+        actions.appendChild(createRecheckButton());
+    }
+    if (code === 'no_wireguard_config') {
+        const subscribe = createUiElement('button', 'ts-btn ts-btn-secondary', 'Open Subscribe / Import');
+        subscribe.type = 'button';
+        subscribe.id = 'btn-open-subscribe';
+        actions.appendChild(subscribe);
+    }
+    actions.appendChild(createFaqLink('faq-3', 'How to check status and logs'));
+    panel.appendChild(actions);
+    container.replaceChildren(panel);
+    container.classList.remove('hidden');
+}
+
+function clearStatusHelp(container) {
+    if (!container) return;
+    container.replaceChildren();
+    container.classList.add('hidden');
+}
+
+function renderStatusUnavailable(res, data) {
+    const code = res && (res.status === 401 || res.status === 403) ? 'session_expired' : 'daemon_unavailable';
+    const message = (data && (data.error || data.message)) || 'TunnelSats status is unavailable.';
+
+    const badge = document.getElementById('statusBadge');
+    if (badge) {
+        badge.className = "px-4 py-2 rounded-full font-bold text-sm bg-gray-800 border border-gray-700 text-gray-400";
+        badge.textContent = "Status Unavailable";
+    }
+    const wgStatus = document.getElementById('txt-wg-status');
+    if (wgStatus) {
+        wgStatus.className = "text-2xl font-mono text-gray-500 font-bold";
+        wgStatus.textContent = "Unknown";
+    }
+    const bannerTitle = document.getElementById('dashboard-banner-title');
+    if (bannerTitle) bannerTitle.textContent = 'Status Unavailable';
+    const bannerText = document.getElementById('dashboard-banner-text');
+    if (bannerText) bannerText.textContent = 'The dashboard could not read the current protection status. See Node Routing Status below.';
+    const bannerDots = document.getElementById('dashboard-banner-dots');
+    if (bannerDots) bannerDots.classList.add('hidden');
+    const badgeRouting = document.getElementById('badge-routing');
+    if (badgeRouting) {
+        badgeRouting.textContent = BADGE_STATES.unknown.text;
+        badgeRouting.className = BADGE_STATES.unknown.className;
+        badgeRouting.removeAttribute('title');
+    }
+    const routingStatus = document.getElementById('txt-routing-status');
+    if (routingStatus) routingStatus.textContent = code === 'session_expired' ? 'Session Expired' : 'TunnelSats Service Unavailable';
+    const routingSubtitle = document.getElementById('txt-routing-subtitle');
+    if (routingSubtitle) {
+        routingSubtitle.textContent = '';
+        routingSubtitle.classList.add('hidden');
+    }
+    const routingError = document.getElementById('txt-routing-error');
+    if (routingError) {
+        routingError.textContent = message;
+        routingError.classList.remove('hidden');
+    }
+    ['btn-dash-enable-routing', 'btn-dash-disable-routing'].forEach((id) => {
+        const button = document.getElementById(id);
+        if (button) button.classList.add('hidden');
+    });
+    const diagnosticsContainer = document.getElementById('routing-diagnostics');
+    if (diagnosticsContainer) renderStatusHelp(diagnosticsContainer, code);
+}
+
+async function recheckStatus(button) {
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Checking...';
+    }
+    const status = await fetchStatus();
+    if (!status) {
+        showToast('Could not read the TunnelSats status. See the message on the dashboard.', 'error');
+    } else if (status.last_error || status.rules_synced !== true) {
+        const count = Array.isArray(status.announcement_diagnostics) ? status.announcement_diagnostics.length : 0;
+        showToast(count > 0 ? `Still blocked: ${count} item${count === 1 ? ' needs' : 's need'} attention.` : 'Still blocked. See the details on the dashboard.', 'error');
+    } else if (status.vpn_active === true) {
+        showToast('All checks passed. Your node routing is protected.', 'success');
+    } else {
+        showToast('No blocking problems found, but the tunnel is not connected yet.', 'info');
+    }
+    // fetchStatus re-renders the panel; only restore the button if it is still mounted.
+    if (button && button.isConnected) {
+        button.disabled = false;
+        button.textContent = 'Re-check now';
+    }
+    return status;
+}
+
 // 1. Fetch Local Status
 async function fetchStatus() {
     try {
         const res = await managementFetch('/api/local/status');
-        const data = await res.json();
+        const data = await safeFetchJson(res);
+        if (res && res.ok === false) {
+            renderStatusUnavailable(res, data);
+            return null;
+        }
 
         const vpnActive = data.vpn_active === true;
         const lndDetected = data.lnd_detected === true;
@@ -948,9 +1444,23 @@ async function fetchStatus() {
         const badgeRouting = document.getElementById('badge-routing');
         const txtRoutingStatus = document.getElementById('txt-routing-status');
         const txtRoutingError = document.getElementById('txt-routing-error');
+        const routingDiagnostics = document.getElementById('routing-diagnostics');
         const routingActions = document.getElementById('routing-actions');
         const btnDashEnable = document.getElementById('btn-dash-enable-routing');
         const btnDashDisable = document.getElementById('btn-dash-disable-routing');
+
+        const errorCode = typeof data.last_error_code === 'string' && data.last_error_code ? data.last_error_code : null;
+        const diagnostics = Array.isArray(data.announcement_diagnostics)
+            ? data.announcement_diagnostics.filter((diag) => diag && typeof diag === 'object')
+            : [];
+        const isAnnouncementIssue = Boolean(dataplaneError) && ANNOUNCEMENT_ERROR_CODES.includes(errorCode);
+        const onlyPending = isAnnouncementIssue && diagnostics.length > 0
+            && diagnostics.every((diag) => diag.kind === 'verification-pending');
+        let statusCode = errorCode;
+        if (!statusCode) {
+            if (targetSwitchPending) statusCode = 'target_switch_pending';
+            else statusCode = typeof data.last_error === 'string' && data.last_error.trim() ? 'dataplane_error' : 'rules_not_synced';
+        }
 
         if (routingActions) {
             routingActions.classList.remove('hidden');
@@ -959,32 +1469,41 @@ async function fetchStatus() {
         if (btnDashEnable) btnDashEnable.classList.add('hidden');
         if (btnDashDisable) btnDashDisable.classList.add('hidden');
         if (txtRoutingError) {
-            if (dataplaneError) {
-                if (isSecureMode && (dataplaneError.toLowerCase().includes('gossip') || dataplaneError.toLowerCase().includes('announcements'))) {
-                    txtRoutingError.innerHTML = `
-                        <div class="space-y-2">
-                            <strong class="text-tsyellow font-bold flex items-center gap-1.5">⚠️ Manual Setup Required (Secure Mode)</strong>
-                            <p class="text-xs text-gray-300 leading-relaxed">${dataplaneError}</p>
-                            <button id="btn-goto-instructions" type="button" class="mt-1 bg-tsyellow hover:bg-yellow-400 text-gray-900 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow flex items-center gap-1.5 cursor-pointer">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-                                <span>View Setup Instructions (Installation Tab)</span>
-                            </button>
-                        </div>`;
-                } else {
-                    txtRoutingError.textContent = dataplaneError;
-                }
+            // Announcement problems are explained by the diagnostics panel instead.
+            if (dataplaneError && !isAnnouncementIssue) {
+                txtRoutingError.textContent = dataplaneError;
                 txtRoutingError.classList.remove('hidden');
             } else {
                 txtRoutingError.textContent = '';
                 txtRoutingError.classList.add('hidden');
             }
         }
+        if (routingDiagnostics) {
+            if (isAnnouncementIssue) {
+                renderAnnouncementDiagnostics(routingDiagnostics, data, diagnostics, {
+                    isSecureMode,
+                    isK3s: data.dataplane_mode === 'k3s',
+                    onlyPending,
+                    targetImpl
+                });
+            } else if (dataplaneError) {
+                renderStatusHelp(routingDiagnostics, statusCode);
+            } else {
+                clearStatusHelp(routingDiagnostics);
+            }
+        }
 
         let badgeState;
         if (dataplaneError) {
-            if (isSecureMode && (dataplaneError.toLowerCase().includes('gossip') || dataplaneError.toLowerCase().includes('announcements'))) {
-                badgeState = { text: "Manual Setup Needed", className: "text-[10px] uppercase font-bold px-2 py-0.5 rounded border border-tsyellow text-tsyellow bg-yellow-950/40" };
-                if (txtRoutingStatus) txtRoutingStatus.textContent = "Gossip Verification Needed";
+            if (isAnnouncementIssue) {
+                badgeState = onlyPending ? BADGE_STATES.verifying : BADGE_STATES.actionNeeded;
+                if (txtRoutingStatus) txtRoutingStatus.textContent = onlyPending ? "Waiting for Lightning Node" : "Dataplane Blocked";
+            } else if (statusCode === 'no_wireguard_config') {
+                badgeState = BADGE_STATES.notFound;
+                if (txtRoutingStatus) txtRoutingStatus.textContent = "No Subscription Installed";
+            } else if (statusCode === 'no_lightning_node') {
+                badgeState = BADGE_STATES.notFound;
+                if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
             } else {
                 badgeState = BADGE_STATES.offline;
                 if (txtRoutingStatus) txtRoutingStatus.textContent = "Dataplane Blocked";
@@ -1508,7 +2027,7 @@ async function confirmRestartModal(nodeType) {
     });
 }
 
-async function confirmAnnouncementChanges(nodeType, conflicts) {
+async function confirmAnnouncementChanges(nodeType, conflicts, diagnostics) {
     return new Promise((resolve) => {
         const { overlay, panel, mountAndAnimate } = createModalOverlay('announcement-confirmation-modal');
         let settled = false;
@@ -1521,19 +2040,35 @@ async function confirmAnnouncementChanges(nodeType, conflicts) {
 
         const title = document.createElement('h3');
         title.className = 'text-xl font-bold text-white mb-4';
-        title.textContent = 'Real-IP announcement conflict detected';
+        title.textContent = 'Announcement conflict detected';
 
         const body = document.createElement('p');
         body.className = 'text-sm text-gray-300 leading-relaxed mb-4';
-        body.textContent = `TunnelSats found ${nodeType.toUpperCase()} settings that can publish a non-TunnelSats address. Continuing will back up and disable these user-owned settings before restarting the node.`;
+        body.textContent = `TunnelSats found ${nodeType.toUpperCase()} settings that announce something other than your TunnelSats endpoint. Continuing will back up and disable these user-owned settings before restarting the node.`;
 
         const list = document.createElement('ul');
         list.className = 'list-disc pl-5 space-y-1 text-sm font-mono text-red-300 mb-4 break-all';
-        (Array.isArray(conflicts) ? conflicts : []).forEach((conflict) => {
-            const item = document.createElement('li');
-            item.textContent = conflict;
-            list.appendChild(item);
-        });
+        const labelled = (Array.isArray(diagnostics) ? diagnostics : []).filter((diag) => diag && (diag.line || diag.value));
+        if (labelled.length > 0) {
+            labelled.forEach((diag) => {
+                const item = document.createElement('li');
+                item.textContent = diag.line || diag.value;
+                const label = ANNOUNCEMENT_KIND_LABELS[diag.kind];
+                if (label) {
+                    const kind = document.createElement('span');
+                    kind.className = 'text-gray-400 font-sans';
+                    kind.textContent = ` (${label})`;
+                    item.appendChild(kind);
+                }
+                list.appendChild(item);
+            });
+        } else {
+            (Array.isArray(conflicts) ? conflicts : []).forEach((conflict) => {
+                const item = document.createElement('li');
+                item.textContent = conflict;
+                list.appendChild(item);
+            });
+        }
 
         const torLabel = document.createElement('label');
         torLabel.className = 'flex items-start gap-3 rounded-lg border border-gray-800 bg-black/30 p-3 text-sm text-gray-300 mb-4 cursor-pointer';
@@ -1642,7 +2177,7 @@ async function confirmManualConfigureReconcile(nodeType) {
     }
 }
 
-function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipCommand = '', historicalWarning = '', requiresConfirmation = true) {
+function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipCommand = '', historicalWarning = '', requiresConfirmation = true, diagnostics = [], gossipCommands = []) {
     const { overlay, panel, closeModal, mountAndAnimate } = createModalOverlay('manual-config-modal');
 
     const title = document.createElement('h3');
@@ -1691,7 +2226,36 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
     privacyTitle.className = 'font-bold text-red-300';
     privacyTitle.textContent = 'Required privacy cleanup';
     privacyBox.appendChild(privacyTitle);
+
+    // The backend audits the user's actual config (read-only), so show the exact lines first.
+    const foundLines = (Array.isArray(diagnostics) ? diagnostics : []).filter((diag) => diag && diag.line);
+    if (foundLines.length > 0) {
+        const foundTitle = document.createElement('p');
+        foundTitle.className = 'text-xs text-gray-300';
+        foundTitle.textContent = 'Found in your config file. Disable each line by putting # in front of it:';
+        const foundList = document.createElement('ul');
+        foundList.id = 'manual-config-found-lines';
+        foundList.className = 'list-disc pl-5 space-y-1 text-xs break-all';
+        foundLines.forEach((diag) => {
+            const item = document.createElement('li');
+            if (diag.line_number) item.appendChild(document.createTextNode(`Line ${diag.line_number}: `));
+            const code = document.createElement('code');
+            code.className = 'font-mono text-red-300';
+            code.textContent = diag.line;
+            item.appendChild(code);
+            const label = ANNOUNCEMENT_KIND_LABELS[diag.kind];
+            if (label) item.appendChild(document.createTextNode(` (${label})`));
+            foundList.appendChild(item);
+        });
+        privacyBox.append(foundTitle, foundList);
+    }
     if (cleanupLines.length > 0) {
+        if (foundLines.length > 0) {
+            const alsoTitle = document.createElement('p');
+            alsoTitle.className = 'text-xs text-gray-400';
+            alsoTitle.textContent = 'Also make sure none of these settings are active:';
+            privacyBox.appendChild(alsoTitle);
+        }
         const cleanupList = document.createElement('ul');
         cleanupList.className = 'list-disc pl-5 space-y-1 font-mono text-xs break-all';
         cleanupLines.forEach((line) => {
@@ -1701,16 +2265,34 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
         });
         privacyBox.appendChild(cleanupList);
     }
-    if (gossipCommand) {
+
+    const appendCommand = (commandText) => {
         const command = document.createElement('pre');
         command.className = 'bg-black/60 border border-gray-800 rounded-lg p-3 text-xs text-tsgreen overflow-x-auto whitespace-pre-wrap break-all';
-        command.textContent = gossipCommand;
+        command.textContent = commandText;
         const copyCommand = document.createElement('button');
         copyCommand.type = 'button';
         copyCommand.className = 'w-full rounded-lg border border-gray-700 py-2 text-xs font-bold text-gray-200';
         copyCommand.textContent = 'Copy gossip-withdrawal command';
-        copyCommand.addEventListener('click', () => copyToClipboard(gossipCommand, 'Gossip-withdrawal command'));
+        copyCommand.addEventListener('click', () => copyToClipboard(commandText, 'Gossip-withdrawal command'));
         privacyBox.append(command, copyCommand);
+    };
+    const prefilledCommands = (Array.isArray(gossipCommands) ? gossipCommands : []).filter(Boolean);
+    if (prefilledCommands.length > 0) {
+        const prefilledTitle = document.createElement('p');
+        prefilledTitle.className = 'text-xs text-gray-300';
+        prefilledTitle.textContent = 'Optional, over SSH after the restart: withdraw these old addresses from live gossip if they are still listed.';
+        privacyBox.appendChild(prefilledTitle);
+        prefilledCommands.forEach((commandText) => appendCommand(commandText));
+    }
+    if (gossipCommand) {
+        if (prefilledCommands.length > 0) {
+            const otherTitle = document.createElement('p');
+            otherTitle.className = 'text-xs text-gray-400';
+            otherTitle.textContent = 'For any other old address, replace the placeholder (ip:port only, without the pubkey@ prefix):';
+            privacyBox.appendChild(otherTitle);
+        }
+        appendCommand(gossipCommand);
     }
     if (historicalWarning) {
         const warning = document.createElement('p');
@@ -1729,12 +2311,11 @@ function showManualConfigModal(nodeType, path, lines, cleanupLines = [], gossipC
         ol.innerHTML = `
             <li>Open the Umbrel <b>Files</b> app (or use SSH).</li>
             <li>Navigate to the configuration file path shown above.</li>
-            <li>Remove/comment every active <code>externalip=</code> line and set <code>nat=false</code>. You may retain deliberate <code>.onion</code> announcements.</li>
+            <li>Disable every line listed under <b>Required privacy cleanup</b> by putting <code>#</code> in front of it, and set <code>nat=false</code>. You may retain deliberate <code>.onion</code> announcements.</li>
             <li>Add or update the TunnelSats lines under the existing <b>[Application Options]</b> section (do not create duplicate lines).</li>
             <li>Go back to the Umbrel dashboard and restart your <b>Lightning Node</b> app.</li>
-            <li>For every previously announced clearnet address, replace the placeholder in the command above and run it over SSH.</li>
-            <li>Run <code>sudo docker exec lnd lncli getinfo</code> and verify that <code>uris</code> contains only the intended TunnelSats and retained Tor addresses.</li>
-            <li>Click <b>Done</b> below after restarting your node to reconcile TunnelSats routing and fail-closed network guards.</li>
+            <li>Optional (SSH): run <code>sudo docker exec lightning_lnd_1 lncli getinfo</code>. If <code>uris</code> still lists an old clearnet address, run the matching withdrawal command above.</li>
+            <li>Click <b>Done</b> below after restarting your node to reconcile TunnelSats routing and fail-closed network guards, then use <b>Re-check now</b> on the Dashboard to confirm.</li>
         `;
     } else {
         ol.innerHTML = `
@@ -1949,7 +2530,7 @@ async function configureNode() {
         let data = await safeFetchJson(res);
 
         if (res.status === 409 && data.requires_confirmation === true) {
-            const decision = await confirmAnnouncementChanges(selectedNodeType, data.conflicts);
+            const decision = await confirmAnnouncementChanges(selectedNodeType, data.conflicts, data.diagnostics);
             if (!decision.confirmed) {
                 setActionMessage('configure-node-msg', 'Configuration cancelled; existing announcement settings were not changed.', 'info');
                 return;
@@ -1976,7 +2557,9 @@ async function configureNode() {
                     data.cleanup_lines,
                     data.gossip_command,
                     data.historical_warning,
-                    data.requires_confirmation !== false
+                    data.requires_confirmation !== false,
+                    data.diagnostics,
+                    data.gossip_commands
                 );
             } else {
                 const location = data.dns && data.port ? `${data.dns}:${data.port}` : 'configured endpoint';
@@ -1984,7 +2567,17 @@ async function configureNode() {
             }
             fetchStatus();
         } else {
-            setActionMessage('configure-node-msg', data.error || 'Failed to configure node.', 'error');
+            const remaining = Array.isArray(data.remaining_conflicts) ? data.remaining_conflicts : [];
+            const stillAnnounced = remaining.filter((item) => typeof item === 'string' && /^\S+:\d+$/.test(item));
+            const baseError = data.error || 'Failed to configure node.';
+            let message = baseError;
+            if (stillAnnounced.length > 0) {
+                message = `${baseError} Still announced: ${stillAnnounced.join(', ')}. See the Dashboard for how to fix it.`;
+            } else if (remaining.length > 0) {
+                message = `${baseError} See the Dashboard for details.`;
+            }
+            setActionMessage('configure-node-msg', message, 'error');
+            if (remaining.length > 0) fetchStatus();
         }
     } catch (e) {
         setActionMessage('configure-node-msg', `Failed to configure node: ${e.message}`, 'error');
@@ -2414,7 +3007,7 @@ function selectOption(dropdownId, value, label) {
     closeDropdown(dropdownId);
 }
 
-document.addEventListener('click', (e) => {
+function handleDocumentClick(e) {
     if (openDropdown) {
         const container = document.getElementById(`${openDropdown}-dropdown-container`);
         if (container && !container.contains(e.target)) {
@@ -2425,12 +3018,40 @@ document.addEventListener('click', (e) => {
     const gotoBtn = e.target.closest('#btn-goto-instructions');
     if (gotoBtn) {
         e.preventDefault();
+        const impl = gotoBtn.dataset ? gotoBtn.dataset.impl : '';
+        if (impl === 'lnd' || impl === 'cln') setNodeType(impl, false);
         switchTab('import');
         setTimeout(() => {
             configureNode();
         }, 100);
+        return;
     }
-});
+
+    const recheckBtn = e.target.closest('#btn-recheck-status');
+    if (recheckBtn) {
+        e.preventDefault();
+        if (!recheckBtn.disabled) recheckStatus(recheckBtn);
+        return;
+    }
+
+    if (e.target.closest('#btn-open-subscribe')) {
+        e.preventDefault();
+        switchTab('buy');
+        return;
+    }
+
+    if (e.target.closest('#btn-reload-page')) {
+        e.preventDefault();
+        window.location.reload();
+    }
+}
+
+// Register once, even if this script is evaluated again, so no action runs twice.
+if (window.__tsDocumentClickHandler) {
+    document.removeEventListener('click', window.__tsDocumentClickHandler);
+}
+window.__tsDocumentClickHandler = handleDocumentClick;
+document.addEventListener('click', window.__tsDocumentClickHandler);
 
 async function downloadWireGuardConfig() {
     try {

@@ -514,7 +514,8 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('faq-6')).toBeTruthy();
         expect(document.getElementById('faq-6').textContent).toContain('In Secure Mode, why must I edit my config manually');
         
-        expect(document.getElementById('faq-8').classList.contains('hidden')).toBe(true);
+        // Issue #170: the conflict troubleshooting guide is visible in Secure Mode too.
+        expect(document.getElementById('faq-8').classList.contains('hidden')).toBe(false);
         expect(window.secureModeActive).toBe(true);
     });
 
@@ -1779,6 +1780,7 @@ describe('Phase 3b: Install Config', () => {
     });
 
     test('configureNode requires explicit confirmation before disabling conflicting announcements', async () => {
+        const diagnostics = [{ kind: 'real-ip', line: 'externalip=198.51.100.10:9735' }, { kind: 'auto-discovery', line: 'nat=true' }];
         const endpointFetch = jest.fn()
             .mockResolvedValueOnce({
                 status: 409,
@@ -1786,7 +1788,8 @@ describe('Phase 3b: Install Config', () => {
                 json: () => Promise.resolve({
                     success: false,
                     requires_confirmation: true,
-                    conflicts: ['externalip=198.51.100.10:9735', 'nat=true']
+                    conflicts: ['externalip=198.51.100.10:9735', 'nat=true'],
+                    diagnostics
                 })
             })
             .mockResolvedValueOnce({
@@ -1811,7 +1814,7 @@ describe('Phase 3b: Install Config', () => {
         expect(window.confirmAnnouncementChanges).toHaveBeenCalledWith('lnd', [
             'externalip=198.51.100.10:9735',
             'nat=true'
-        ]);
+        ], diagnostics);
         expect(endpointFetch.mock.calls[1][0]).toBe('/api/local/configure-node');
         expect(JSON.parse(endpointFetch.mock.calls[1][1].body)).toEqual({
             nodeType: 'lnd',
@@ -2132,5 +2135,327 @@ describe('Subscription Renewal Fixes', () => {
         
         expect(fetchStatusSpy).toHaveBeenCalled();
         expect(invoiceBox.textContent).toContain('Renewal Successful');
+    });
+});
+
+// --- Issue #170: actionable diagnostics -------------------------------------------------
+
+describe('Issue #170: actionable status diagnostics', () => {
+    const EXPECTED = 'us3.tunnelsats.com:23217';
+    const LND_CONF = '/home/umbrel/umbrel/app-data/lightning/data/lnd/lnd.conf';
+    const WITHDRAW = 'sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=178.156.167.202:9735';
+
+    function diag(fields) {
+        return {
+            impl: 'lnd', kind: 'real-ip', source: 'config_file', setting: null, value: null,
+            line: null, line_number: null, address: null, port_defaulted: false,
+            expected: EXPECTED, expected_line: `externalhosts=${EXPECTED}`, config_path: LND_CONF,
+            withdraw_command: null, detail: null, ...fields
+        };
+    }
+
+    function blockedStatus(overrides) {
+        return {
+            vpn_active: true, lnd_detected: true, cln_detected: false, lnd_routing_active: true,
+            cln_routing_active: false, wg_status: 'Connected', target_impl: 'lnd', configs_found: [],
+            server_domain: 'us3.tunnelsats.com', vpn_port: '23217', rules_synced: false,
+            announcement_help: {
+                impl: 'lnd', mode: 'secure', config_path: LND_CONF, expected: EXPECTED,
+                expected_line: `externalhosts=${EXPECTED}`,
+                verify_command: 'sudo docker exec lightning_lnd_1 lncli getinfo',
+                container_lookup_command: "sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'",
+                config_grep_command: `sudo grep -nE '^[[:space:]]*(externalip|externalhosts|nat)[[:space:]]*=' ${LND_CONF}`,
+                logs_commands: ['sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-daemon']
+            },
+            ...overrides
+        };
+    }
+
+    const SECURE_WRONG_PORT = blockedStatus({
+        secure_mode: true,
+        announcement_verification_source: 'config_file',
+        last_error: 'Conflicting node announcement setting detected in node configuration.',
+        last_error_code: 'announcement_conflict',
+        announcement_diagnostics: [diag({
+            kind: 'wrong-port', setting: 'externalip', value: '178.156.167.202',
+            line: 'externalip=178.156.167.202', line_number: 4,
+            address: '178.156.167.202:9735', port_defaulted: true, withdraw_command: WITHDRAW
+        })]
+    });
+
+    function mockStatus(...payloads) {
+        let call = 0;
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/status') {
+                const payload = payloads[Math.min(call, payloads.length - 1)];
+                call += 1;
+                if (payload && payload.__response) return Promise.resolve(payload.__response);
+                return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+        return () => call;
+    }
+
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+    beforeEach(() => {
+        setupDOM();
+        mockStatus({ vpn_active: true, lnd_detected: true, rules_synced: true, last_error: null });
+        evalScript();
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText: jest.fn().mockImplementation(() => Promise.resolve()) },
+            configurable: true
+        });
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
+        jest.restoreAllMocks();
+    });
+
+    test('Secure Mode names the offending setting, its class, the source and the fix', async () => {
+        mockStatus(SECURE_WRONG_PORT);
+        await window.fetchStatus();
+
+        expect(document.getElementById('badge-routing').textContent).toBe('Action Needed');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Dataplane Blocked');
+        expect(document.getElementById('txt-routing-error').classList.contains('hidden')).toBe(true);
+
+        const panel = document.getElementById('announcement-diagnostics-panel');
+        expect(panel).toBeTruthy();
+        expect(document.getElementById('routing-diagnostics').classList.contains('hidden')).toBe(false);
+        const card = panel.querySelector('.ts-diag-card');
+        expect(card.dataset.kind).toBe('wrong-port');
+        expect(card.dataset.source).toBe('config_file');
+        expect(card.textContent).toContain('TunnelSats server, wrong port');
+        expect(card.textContent).toContain('lnd.conf, line 4');
+        expect(card.querySelector('.ts-diag-line').textContent).toBe('externalip=178.156.167.202');
+        expect(card.textContent).toContain('178.156.167.202:9735');
+        expect(card.textContent).toContain('the default, because no port is set');
+        expect(card.textContent).toContain('23217');
+        expect(card.textContent).toContain(LND_CONF);
+        expect(card.textContent).toContain(`externalhosts=${EXPECTED}`);
+        expect(card.textContent).toContain('# externalip=178.156.167.202');
+        expect(card.textContent).toContain('Lightning Node');
+        expect(card.querySelector('.ts-command-text').textContent).toBe(WITHDRAW);
+
+        expect(panel.textContent).toContain('Secure Mode');
+        expect(panel.textContent).toContain(`Expected announcement: ${EXPECTED}`);
+        expect(document.getElementById('btn-recheck-status').textContent).toBe('Re-check now');
+        const fix = document.getElementById('btn-goto-instructions');
+        expect(fix.textContent).toBe('Show step-by-step fix');
+        expect(fix.dataset.impl).toBe('lnd');
+        expect(panel.querySelector('a[data-scroll-to="faq-8"]')).toBeTruthy();
+        expect(panel.querySelector('details').textContent).toContain("docker ps --format '{{.Names}}'");
+    });
+
+    test('copy buttons copy the exact remediation command', async () => {
+        mockStatus(SECURE_WRONG_PORT);
+        await window.fetchStatus();
+        const writeText = jest.spyOn(navigator.clipboard, 'writeText');
+        const block = document.querySelector('.ts-diag-card .ts-command');
+        block.querySelector('button').click();
+        expect(writeText).toHaveBeenCalledWith(WITHDRAW);
+    });
+
+    test('standard mode offers Fix automatically for live gossip leftovers', async () => {
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            announcement_verification_source: 'live_gossip',
+            last_error: 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.',
+            last_error_code: 'announcement_unverified',
+            announcement_diagnostics: [
+                diag({ source: 'live_gossip', value: '203.0.113.5:9735', address: '203.0.113.5:9735', withdraw_command: 'sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=203.0.113.5:9735' }),
+                diag({ kind: 'missing-endpoint', source: 'live_gossip' })
+            ]
+        }));
+        await window.fetchStatus();
+
+        const cards = document.querySelectorAll('.ts-diag-card');
+        expect(cards).toHaveLength(2);
+        expect(cards[0].dataset.source).toBe('live_gossip');
+        expect(cards[0].textContent).toContain('Live gossip');
+        expect(cards[0].textContent).toContain('still announces');
+        expect(cards[0].textContent).toContain('retries the automatic withdrawal');
+        expect(cards[1].dataset.kind).toBe('missing-endpoint');
+        expect(document.getElementById('btn-goto-instructions').textContent).toBe('Fix automatically');
+        expect(document.getElementById('announcement-diagnostics-panel').textContent).toContain('Fix automatically');
+    });
+
+    test('a node that is still starting shows Verifying instead of a privacy failure', async () => {
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            last_error: 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.',
+            last_error_code: 'announcement_unverified',
+            announcement_diagnostics: [diag({ kind: 'verification-pending', source: 'live_gossip', detail: 'lnd_initializing' })]
+        }));
+        await window.fetchStatus();
+
+        expect(document.getElementById('badge-routing').textContent).toBe('Verifying');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Waiting for Lightning Node');
+        expect(document.getElementById('btn-goto-instructions')).toBeNull();
+        expect(document.getElementById('announcement-diagnostics-panel').textContent).toContain('waiting for its wallet to be unlocked');
+    });
+
+    test('config values are rendered as text, never as HTML', async () => {
+        const hostile = 'externalip=<img src=x onerror="window.__pwned=true">';
+        mockStatus({
+            ...SECURE_WRONG_PORT,
+            announcement_diagnostics: [diag({ setting: 'externalip', value: '<img src=x>', line: hostile, line_number: 2 })]
+        });
+        await window.fetchStatus();
+
+        const panel = document.getElementById('announcement-diagnostics-panel');
+        expect(panel.querySelector('img')).toBeNull();
+        expect(panel.textContent).toContain(hostile);
+        expect(window.__pwned).toBeUndefined();
+    });
+
+    test('Re-check now fetches the status again and clears the panel once fixed', async () => {
+        const calls = mockStatus(SECURE_WRONG_PORT, {
+            vpn_active: true, lnd_detected: true, lnd_routing_active: true, target_impl: 'lnd',
+            secure_mode: true, rules_synced: true, last_error: null, last_error_code: null,
+            announcement_diagnostics: [], announcement_verified: true, announcement_verification_source: 'config_file'
+        });
+        await window.fetchStatus();
+        expect(calls()).toBe(1);
+
+        document.getElementById('btn-recheck-status').click();
+        await flush();
+
+        expect(calls()).toBe(2);
+        expect(document.getElementById('announcement-diagnostics-panel')).toBeNull();
+        expect(document.getElementById('routing-diagnostics').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Node Routing Secured');
+        expect(document.getElementById('toast-container').textContent).toContain('All checks passed');
+    });
+
+    test('the fix button opens the configure flow for the affected implementation', async () => {
+        jest.useFakeTimers();
+        mockStatus({ ...SECURE_WRONG_PORT, target_impl: 'cln' });
+        await window.fetchStatus();
+        window.configureNode = jest.fn();
+
+        const fix = document.getElementById('btn-goto-instructions');
+        expect(fix.dataset.impl).toBe('cln');
+        fix.click();
+        jest.advanceTimersByTime(150);
+
+        expect(document.getElementById('node-type-selected').value).toBe('cln');
+        expect(document.getElementById('view-import').classList.contains('hidden')).toBe(false);
+        expect(window.configureNode).toHaveBeenCalledTimes(1);
+    });
+
+    test('a new install without a subscription gets a friendly hint and a shortcut', async () => {
+        mockStatus({
+            vpn_active: false, lnd_detected: true, wg_status: 'Disconnected', target_impl: 'lnd',
+            rules_synced: false, last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config',
+            announcement_diagnostics: []
+        });
+        await window.fetchStatus();
+
+        expect(document.getElementById('txt-routing-status').textContent).toBe('No Subscription Installed');
+        expect(document.getElementById('txt-routing-error').textContent).toBe('No WireGuard config found in /data');
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('no_wireguard_config');
+        expect(help.textContent).toContain('Subscribe / Import');
+        document.getElementById('btn-open-subscribe').click();
+        expect(document.getElementById('view-buy').classList.contains('hidden')).toBe(false);
+    });
+
+    test('other daemon errors keep the raw text and add plain-language guidance', async () => {
+        const error = 'k3s: Pod co-location required; TunnelSats node=worker-a, LND pod=lightning/lnd-0 node=worker-b';
+        mockStatus({
+            vpn_active: true, lnd_detected: true, lnd_routing_active: true, target_impl: 'lnd',
+            rules_synced: false, last_error: error, last_error_code: 'dataplane_error'
+        });
+        await window.fetchStatus();
+
+        expect(document.getElementById('badge-routing').textContent).toBe('Offline');
+        expect(document.getElementById('txt-routing-error').textContent).toBe(error);
+        const help = document.getElementById('status-help-panel');
+        expect(help.textContent).toContain('Restart the TunnelSats app');
+        expect(help.querySelector('#btn-recheck-status')).toBeTruthy();
+        expect(help.querySelector('a[data-scroll-to="faq-3"]')).toBeTruthy();
+    });
+
+    test('an unavailable daemon is reported instead of "Tunnel Down / No Nodes Detected"', async () => {
+        mockStatus({
+            __response: {
+                ok: false,
+                status: 503,
+                json: () => Promise.resolve({ success: false, error: 'TunnelSats daemon is unavailable.' })
+            }
+        });
+        const result = await window.fetchStatus();
+
+        expect(result).toBeNull();
+        expect(document.getElementById('statusBadge').textContent).toBe('Status Unavailable');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('TunnelSats Service Unavailable');
+        expect(document.getElementById('txt-routing-error').textContent).toBe('TunnelSats daemon is unavailable.');
+        expect(document.getElementById('status-help-panel').dataset.code).toBe('daemon_unavailable');
+    });
+
+    test('an expired Umbrel session asks for a reload', async () => {
+        mockStatus({ __response: { ok: false, status: 401, json: () => Promise.resolve({ error: 'Unauthorized' }) } });
+        await window.fetchStatus();
+
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Session Expired');
+        expect(document.getElementById('btn-reload-page')).toBeTruthy();
+        expect(document.getElementById('btn-recheck-status')).toBeNull();
+    });
+
+    test('the Secure Mode manual modal lists the actual lines and pre-filled commands', async () => {
+        window.showManualConfigModal(
+            'lnd', LND_CONF, [`externalhosts=${EXPECTED}`, 'nat=false'], ['externalip=', 'nat=true'],
+            'sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=<your-old-ip>:9735',
+            'Historical collectors may retain old addresses.', true,
+            SECURE_WRONG_PORT.announcement_diagnostics, [WITHDRAW]
+        );
+        const modal = document.getElementById('manual-config-modal');
+        const found = document.getElementById('manual-config-found-lines');
+        expect(found.textContent).toContain('Line 4: externalip=178.156.167.202 (TunnelSats server, wrong port)');
+        expect(modal.textContent).toContain(WITHDRAW);
+        expect(modal.textContent).toContain('without the pubkey@ prefix');
+        expect(modal.textContent).toContain('lightning_lnd_1 lncli getinfo');
+        expect(modal.textContent).not.toContain('docker exec lnd ');
+        expect(modal.textContent).toContain('Re-check now');
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Done').click();
+        await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    test('the standard-mode confirmation no longer claims a real-IP leak and labels each line', async () => {
+        const pending = window.confirmAnnouncementChanges('lnd', ['externalip=178.156.167.202'], SECURE_WRONG_PORT.announcement_diagnostics);
+        const modal = document.getElementById('announcement-confirmation-modal');
+        expect(modal.textContent).toContain('Announcement conflict detected');
+        expect(modal.textContent).not.toContain('Real-IP');
+        expect(modal.textContent).toContain('externalip=178.156.167.202 (TunnelSats server, wrong port)');
+        Array.from(modal.querySelectorAll('button')).find((btn) => btn.textContent === 'Cancel').click();
+        await expect(pending).resolves.toEqual({ confirmed: false, retainTorAnnouncements: true });
+    });
+
+    test('a failed live verification names the addresses that are still announced', async () => {
+        window.confirmRestartModal = jest.fn().mockResolvedValue(true);
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/configure-node') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 500,
+                    json: () => Promise.resolve({
+                        success: false,
+                        error: 'Lightning node gossip announcements have not been verified free of conflicting clearnet addresses.',
+                        remaining_conflicts: ['203.0.113.5:9735', 'missing expected announcement us3.tunnelsats.com:23217']
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+
+        await window.configureNode();
+
+        const message = document.getElementById('configure-node-msg').textContent;
+        expect(message).toContain('Still announced: 203.0.113.5:9735.');
+        expect(message).not.toContain('missing expected announcement');
     });
 });

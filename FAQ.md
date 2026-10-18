@@ -37,6 +37,18 @@ sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.ym
   exec -T tunnelsats-daemon wg show
 ```
 
+You rarely need this: the dashboard shows the same checks in plain language with a
+**Re-check now** button. The status JSON also contains `last_error_code` and, for
+announcement problems, `announcement_diagnostics` with the exact setting, line and fix.
+To find the container names on your node and read the TunnelSats logs (useful for a
+support request):
+
+```bash
+sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'
+sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml \
+  logs --tail 100 tunnelsats-daemon tunnelsats-web
+```
+
 ### 4. Can I tunnel both LND and Core-Lightning (CLN) simultaneously?
 **No.** TunnelSats routes traffic for exactly **one** Lightning node at a time.
 1. **Priority:** If both are running, TunnelSats will prioritize LND.
@@ -85,3 +97,70 @@ If you skipped Step 1, TunnelSats's fail-closed host/node routing and firewall g
 2. **The Manual Way (Advanced):** Connect to your Umbrel via SSH, reboot or flush the residual `tunnelsats` routing/firewall rules after removing the orphaned TunnelSats lines from your node's configuration files:
    * **For LND:** Edit `~/umbrel/app-data/lightning/data/lnd/lnd.conf` and delete or comment out the `externalhosts=` line. Then restart LND.
    * **For CLN:** Edit `~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config` and delete or comment out the `announce-addr=` line. Then restart CLN.
+
+---
+
+### Troubleshooting: "Dataplane Blocked" because of an announcement conflict
+
+TunnelSats keeps your node's clearnet traffic blocked (fail-closed) until your node
+announces **only** your TunnelSats endpoint: the VPN server and forwarded port shown on
+the dashboard. Start on the **dashboard**. The Node Routing card lists every setting
+TunnelSats found, where it found it, why it is a problem, and how to fix it. You usually
+do not need SSH.
+
+**What the labels mean**
+
+| Label | Meaning | Fix |
+|---|---|---|
+| Non-TunnelSats address | The setting announces an address that is not your TunnelSats endpoint, usually your home or ISP IP or a leftover from an earlier setup. | Disable the line. |
+| TunnelSats server, wrong port | The address is your TunnelSats server, but on another port. Example: `externalip=178.156.167.202` announces `178.156.167.202:9735`. `9735` is the Lightning default (used when no port is set), not your forwarded **VPN External Port**. | Use `externalhosts=<server>:<forwarded-port>`. |
+| TunnelSats address pinned by IP | Right server and port, but set as a fixed address (for example `externalip=`). | Use the hostname form `externalhosts=<server>:<port>`. |
+| Old TunnelSats endpoint | An endpoint from a previous subscription or server. | Replace it with your current endpoint. |
+| Automatic IP discovery enabled | `nat=true` (LND) or `ip-discovery=true` (Core Lightning) announces your public home IP automatically. | Set it to `false`. |
+| TunnelSats endpoint not announced | The TunnelSats line is missing. | Add the line shown on the dashboard. |
+| Node config file not readable / Waiting for your Lightning node | TunnelSats cannot check yet. | Make sure the Lightning app is installed, running, synced and unlocked, then re-check. |
+
+**Where was it found?** *Config file* means TunnelSats read `lnd.conf` (or the Core
+Lightning `config`). This check runs in every mode, and it is the only check in Secure
+Mode, where TunnelSats can read the file but cannot change it or ask your node directly.
+*Live gossip* means TunnelSats asked LND what it announces right now (standard mode only);
+there it also withdraws old addresses automatically on every check.
+
+**Fix it without SSH**
+
+1. Standard mode: click **Fix automatically** on the dashboard. TunnelSats backs up and
+   disables the conflicting lines, withdraws old addresses from live gossip, and restarts LND.
+2. Secure Mode: click **Show step-by-step fix**. It lists the exact lines from your config
+   file. Edit the file in the Umbrel **Files** app, save it, and restart the Lightning Node
+   (or Core Lightning) app.
+3. Click **Re-check now** on the dashboard to confirm.
+
+**Optional: check over SSH**
+
+```bash
+# 1. Find the container names (umbrelOS: lightning_lnd_1, core-lightning_lightningd_1)
+sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'
+
+# 2. Show the active announcement lines (lines starting with # are ignored)
+sudo grep -nE '^[[:space:]]*(externalip|externalhosts|nat)[[:space:]]*=' \
+  ~/umbrel/app-data/lightning/data/lnd/lnd.conf
+
+# 3. Show what LND announces right now (each "uris" entry is pubkey@address)
+sudo docker exec lightning_lnd_1 lncli getinfo
+
+# 4. Withdraw a stale address from live gossip (LND only, after fixing the config file)
+sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=203.0.113.5:9735
+
+# 5. TunnelSats logs for a support request
+sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml \
+  logs --tail 100 tunnelsats-daemon
+```
+
+Pass only `ip:port` to `--address_remove`, without the `pubkey@` prefix. Fix the config
+file first, otherwise the address returns on the next restart. For Core Lightning, search
+for `announce-addr|ip-discovery` in
+`~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config`.
+
+Public explorers can keep showing an old address for a while, and historical snapshots
+cannot be erased. What counts is what your node announces now: the dashboard check and
+`lncli getinfo`.
