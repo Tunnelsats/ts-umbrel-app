@@ -7,7 +7,7 @@
 # receive new images through versioned releases.
 #
 # How it works:
-# 1. Triggers on pull_request_target for Dependabot PRs
+# 1. Triggers on pull_request for Dependabot PRs (see "Why pull_request" below)
 # 2. Uses dependabot/fetch-metadata (pinned to commit SHA) to inspect semver update types (minor/patch)
 # 3. Checks that the PR changes nothing but npm manifests (root or web/) or workflow files
 # 4. Auto-approves the PR and marks the required 'TunnelSentinel / Code Review' check as
@@ -18,16 +18,25 @@
 #
 # Still need a real TunnelSentinel review: major updates, Docker base image updates
 # (Dockerfile / compose files), and Dependabot PRs that someone else pushed to.
+#
+# Why pull_request and not pull_request_target: from November 2, 2026 GitHub blocks
+# pull_request_target in public repositories unless an Actions event policy allows it (#168).
+# On pull_request, Dependabot runs get a GITHUB_TOKEN that is read-only except for the scopes
+# in the permissions block below, and only Dependabot secrets (this workflow uses no other
+# secret). Fork PRs always get a read-only token. The workflow runs from the PR merge ref, so
+# it must never check out or run PR code (server/tests/test_github_workflows.py enforces this).
+# Open Dependabot PRs get no new run until Dependabot pushes to them again: comment
+# `@dependabot rebase` to trigger one.
 
 name: Dependabot Auto-Merge
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write # gh pr merge --auto --squash
+  pull-requests: write # gh pr review --approve, gh pr merge --auto
   statuses: write # post the 'TunnelSentinel / Code Review' exemption status
 
 jobs:
@@ -37,7 +46,7 @@ jobs:
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.0.0
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
