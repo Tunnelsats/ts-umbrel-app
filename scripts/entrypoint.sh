@@ -20,6 +20,7 @@ DOCKER_TARGET_IP="10.9.9.9"
 DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
 DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
+DOCKER_TARGET_STATE_FILE="${DOCKER_TARGET_STATE_FILE:-/data/tunnelsats-docker-target.json}"
 IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_FILE:-/data/tunnelsats-ipv6-policy-sources.json}"
 K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE_FILE:-/data/tunnelsats-k3s-policy-state.json}"
 DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_FILE:-/data/tunnelsats-decommissioned.json}"
@@ -237,6 +238,12 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
+# Standard Mode: the implementation (lnd/cln) and container that the last
+# successful reconcile protected, persisted in DOCKER_TARGET_STATE_FILE.
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
 DOCKER_API_BODY=""
 DOCKER_API_CODE=""
 DOCKER_API_ERROR=""
@@ -616,6 +623,108 @@ persist_managed_docker_policy_state() {
         LAST_ERROR="Failed to persist Docker policy ownership state"
         return 1
     fi
+}
+
+lightning_impl_label() {
+    if [ "${1:-}" = "cln" ]; then
+        printf '%s' "Core Lightning"
+    else
+        printf '%s' "LND"
+    fi
+}
+
+# Without a selected node type, Standard Mode keeps protecting the
+# implementation of the last successful reconcile. The record survives daemon
+# restarts and reboots. A malformed record fails closed until the user selects
+# a node type, which takes precedence and rewrites the record.
+load_protected_target_state() {
+    [ "${PROTECTED_TARGET_STATE_LOADED}" = "false" ] || return 0
+
+    local state
+    local target_impl
+    local target_container
+    local malformed_error="Protected node state is malformed; select the node type under Configure Lightning Node"
+    if [ ! -e "${DOCKER_TARGET_STATE_FILE}" ]; then
+        PROTECTED_TARGET_STATE_LOADED="true"
+        return 0
+    fi
+    state=$(cat "${DOCKER_TARGET_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read the protected node state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.target_impl == "lnd" or .target_impl == "cln") and
+        (.target_container | type == "string")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="${malformed_error}"
+        return 1
+    fi
+    target_impl=$(printf '%s' "${state}" | jq -r '.target_impl')
+    target_container=$(printf '%s' "${state}" | jq -r '.target_container')
+    if [ -n "${target_container}" ] && [[ ! "${target_container}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        LAST_ERROR="${malformed_error}"
+        return 1
+    fi
+    PROTECTED_TARGET_IMPL="${target_impl}"
+    PROTECTED_TARGET_CONTAINER="${target_container}"
+    PROTECTED_TARGET_STATE_LOADED="true"
+    PROTECTED_TARGET_PERSISTED="true"
+}
+
+persist_protected_target_state() {
+    local state_dir
+    local state_tmp
+
+    state_dir="${DOCKER_TARGET_STATE_FILE%/*}"
+    [ "${state_dir}" != "${DOCKER_TARGET_STATE_FILE}" ] || state_dir="."
+    if ! mkdir -p "${state_dir}"; then
+        LAST_ERROR="Failed to create the protected node state directory"
+        return 1
+    fi
+    state_tmp=$(mktemp "${DOCKER_TARGET_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary protected node state"
+        return 1
+    }
+    if ! jq -n \
+        --arg target_impl "${PROTECTED_TARGET_IMPL}" \
+        --arg target_container "${PROTECTED_TARGET_CONTAINER}" \
+        '{version:1, target_impl:$target_impl, target_container:$target_container}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${DOCKER_TARGET_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist the protected node state"
+        return 1
+    fi
+}
+
+# Called after a fully verified Standard Mode reconcile. A failed write keeps
+# the record in memory, logs a warning and is retried after the next success.
+record_protected_target() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+    case "${TARGET_IMPL}" in
+        lnd|cln) ;;
+        *) return 0 ;;
+    esac
+    if [ "${PROTECTED_TARGET_PERSISTED}" = "true" ] && \
+       [ "${PROTECTED_TARGET_IMPL}" = "${TARGET_IMPL}" ] && \
+       [ "${PROTECTED_TARGET_CONTAINER}" = "${TARGET_CONTAINER_NAME}" ]; then
+        return 0
+    fi
+
+    local saved_error="${LAST_ERROR}"
+    PROTECTED_TARGET_IMPL="${TARGET_IMPL}"
+    PROTECTED_TARGET_CONTAINER="${TARGET_CONTAINER_NAME}"
+    PROTECTED_TARGET_STATE_LOADED="true"
+    if persist_protected_target_state; then
+        PROTECTED_TARGET_PERSISTED="true"
+        log INFO "Protected node recorded: $(lightning_impl_label "${TARGET_IMPL}") (${TARGET_CONTAINER_NAME})"
+    else
+        PROTECTED_TARGET_PERSISTED="false"
+        log WARN "${LAST_ERROR}; keeping $(lightning_impl_label "${TARGET_IMPL}") as the protected node in memory"
+    fi
+    LAST_ERROR="${saved_error}"
 }
 
 load_managed_ipv6_policy_state() {
@@ -2793,6 +2902,27 @@ detect_k3s_target() {
     return 1
 }
 
+# Prints "<id>|<name>|<impl>" for the first running container of the given
+# implementation (lnd or cln) in a /containers/json listing, or nothing.
+pick_running_lightning_container() {
+    local containers="$1"
+    local impl="$2"
+    local pattern='(^|[_-])lnd([_-]|$)'
+    if [ "${impl}" = "cln" ]; then
+        pattern='(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)'
+    fi
+    printf '%s' "${containers}" | jq -r --arg pattern "${pattern}" --arg impl "${impl}" '
+        def cname: (.Names[0] // "") | ltrimstr("/");
+        [ .[]
+          | {id: .Id, name: cname}
+          | select(.name | test($pattern))
+          | select(.name | test("(app|proxy|tor|web|ui)") | not)
+        ]
+        | if length > 0 then .[0] else empty end
+        | "\(.id)|\(.name)|\($impl)"
+    '
+}
+
 detect_lightning_container() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
@@ -2860,54 +2990,47 @@ detect_lightning_container() {
     fi
 
     local containers
-    containers=$(docker_api "GET" "/containers/json?all=0") || return 1
+    containers=$(docker_api "GET" "/containers/json?all=0") || {
+        LAST_ERROR="Unable to list running Docker containers"
+        return 1
+    }
+
+    # Standard Mode never switches the protected implementation on its own:
+    # umbrelOS removes and recreates the Lightning container during an app
+    # restart, and protecting the other implementation in that gap would
+    # retire the previous node's policy rules. The selected node type wins;
+    # without one, the last protected implementation is kept. Only a first
+    # start without either uses the LND-first discovery order.
+    local chosen_impl=""
+    case "${meta_node}" in
+        lnd|cln) chosen_impl="${meta_node}" ;;
+    esac
+    if [ -z "${chosen_impl}" ]; then
+        if ! load_protected_target_state; then
+            return 1
+        fi
+        chosen_impl="${PROTECTED_TARGET_IMPL}"
+    fi
 
     local pick=""
-    if [ "${meta_node}" = "cln" ]; then
-        pick=$(echo "${containers}" | jq -r '
-            def cname: (.Names[0] // "") | ltrimstr("/");
-            [ .[]
-              | {id: .Id, name: cname}
-              | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
-              | select(.name | test("(app|proxy|tor|web|ui)") | not)
-            ]
-            | if length > 0 then .[0] else empty end
-            | "\(.id)|\(.name)|cln"
-        ')
+    if [ -n "${chosen_impl}" ]; then
+        pick=$(pick_running_lightning_container "${containers}" "${chosen_impl}")
         if [ -z "${pick}" ]; then
-            pick=$(echo "${containers}" | jq -r '
-                def cname: (.Names[0] // "") | ltrimstr("/");
-                [ .[]
-                  | {id: .Id, name: cname}
-                  | select(.name | test("(^|[_-])lnd([_-]|$)"))
-                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
-                ]
-                | if length > 0 then .[0] else empty end
-                | "\(.id)|\(.name)|lnd"
-            ')
+            # Fail closed through the failed-detection path, which keeps the
+            # fallback blackholes, until the chosen node runs again.
+            local waiting_for
+            waiting_for="$(lightning_impl_label "${chosen_impl}")"
+            if [ "${PROTECTED_TARGET_IMPL}" = "${chosen_impl}" ] && [ -n "${PROTECTED_TARGET_CONTAINER}" ]; then
+                waiting_for+=" (${PROTECTED_TARGET_CONTAINER})"
+            fi
+            TARGET_IMPL="${chosen_impl}"
+            LAST_ERROR="Waiting for the protected node to start: ${waiting_for}"
+            return 1
         fi
     else
-        pick=$(echo "${containers}" | jq -r '
-            def cname: (.Names[0] // "") | ltrimstr("/");
-            [ .[]
-              | {id: .Id, name: cname}
-              | select(.name | test("(^|[_-])lnd([_-]|$)"))
-              | select(.name | test("(app|proxy|tor|web|ui)") | not)
-            ]
-            | if length > 0 then .[0] else empty end
-            | "\(.id)|\(.name)|lnd"
-        ')
+        pick=$(pick_running_lightning_container "${containers}" "lnd")
         if [ -z "${pick}" ]; then
-            pick=$(echo "${containers}" | jq -r '
-                def cname: (.Names[0] // "") | ltrimstr("/");
-                [ .[]
-                  | {id: .Id, name: cname}
-                  | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
-                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
-                ]
-                | if length > 0 then .[0] else empty end
-                | "\(.id)|\(.name)|cln"
-            ')
+            pick=$(pick_running_lightning_container "${containers}" "cln")
         fi
     fi
 
@@ -9296,6 +9419,7 @@ reconcile_once() {
         RULES_SYNCED="true"
     fi
 
+    record_protected_target
     write_state
 
     if [ -n "${request_id}" ]; then

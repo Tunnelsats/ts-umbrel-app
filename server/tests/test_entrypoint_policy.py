@@ -16,6 +16,9 @@ def run_bash(script):
         env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "docker-policy-sources.json"
         )
+        env["DOCKER_TARGET_STATE_FILE"] = os.path.join(
+            temp_dir, "docker-target.json"
+        )
         env["IPV6_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "ipv6-policy-sources.json"
         )
@@ -917,6 +920,317 @@ write_state() { EVENTS+="state:${RULES_SYNCED}"$'\n'; }
 if reconcile_once "test"; then exit 1; fi
 
 [[ "${EVENTS}" == $'guard:10.21.21.9\nguard:10.21.21.96\ndetect\nguard:10.21.21.9\nguard:10.21.21.96\ncleanup:--keep-tunnel\nguard:10.21.21.9\nguard:10.21.21.96\nstate:false\n' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# Issue #173: Standard Mode target selection. RUNNING is the /containers/json
+# listing of running containers.
+DOCKER_DETECTION_HARNESS = r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+LND_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"]}'
+CLN_RUNNING='{"Id":"cln-id","Names":["/core-lightning_lightningd_1"]}'
+CLN_UI_RUNNING='{"Id":"cln-app-id","Names":["/core-lightning_app_1"]}'
+RUNNING="[]"
+
+docker_api() {
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' "${RUNNING}"
+        return 0
+    fi
+    return 1
+}
+
+restart_daemon_state() {
+    PROTECTED_TARGET_IMPL=""
+    PROTECTED_TARGET_CONTAINER=""
+    PROTECTED_TARGET_STATE_LOADED="false"
+    PROTECTED_TARGET_PERSISTED="false"
+}
+'''
+
+
+def test_selected_node_type_is_never_switched_while_it_restarts():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# Core Lightning runs while umbrelOS recreates the selected LND container.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+RUNNING="[${CLN_RUNNING},${CLN_UI_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+[[ -z "${TARGET_CONTAINER_NAME}" ]]
+
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${LN_TARGET_PORT}" == "9735" ]]
+
+# The same holds for Core Lightning: no fallback to a running LND.
+printf '%s\n' '{"nodeType":"CLN"}' > "${TUNNELSATS_META_PATH}"
+RUNNING="[${LND_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: Core Lightning" ]]
+[[ "${TARGET_IMPL}" == "cln" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+
+# Detection alone never records a protected node.
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_last_protected_node_is_kept_without_node_type_across_daemon_restarts():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# A verified reconcile protected LND.
+TARGET_IMPL="lnd"
+TARGET_CONTAINER_NAME="lightning_lnd_1"
+record_protected_target
+[[ "$(jq -r '.version' "${DOCKER_TARGET_STATE_FILE}")" == "1" ]]
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "lnd" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "lightning_lnd_1" ]]
+[[ "$(stat -c '%a' "${DOCKER_TARGET_STATE_FILE}")" == "600" ]]
+
+# The daemon restarts while umbrelOS recreates LND and Core Lightning runs.
+restart_daemon_state
+RUNNING="[${CLN_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+
+# A record that cannot be written stays in memory for this daemon.
+restart_daemon_state
+rm -f "${DOCKER_TARGET_STATE_FILE}"
+DOCKER_TARGET_STATE_FILE="${POLICY_TEST_STATE_FILE}.blocked/docker-target.json"
+: > "${POLICY_TEST_STATE_FILE}.blocked"
+LAST_ERROR=""
+TARGET_IMPL="cln"
+TARGET_CONTAINER_NAME="core-lightning_lightningd_1"
+record_protected_target
+[[ -z "${LAST_ERROR}" ]]
+[[ "${PROTECTED_TARGET_IMPL}" == "cln" ]]
+[[ "${PROTECTED_TARGET_PERSISTED}" == "false" ]]
+RUNNING="[${LND_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: Core Lightning (core-lightning_lightningd_1)" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "keeping Core Lightning as the protected node in memory" in result.stderr
+
+
+def test_first_start_without_node_type_or_record_keeps_lnd_first_discovery():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# Only Core Lightning is installed.
+RUNNING="[${CLN_UI_RUNNING},${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+[[ "${TARGET_CONTAINER_NAME}" == "core-lightning_lightningd_1" ]]
+[[ "${TARGET_IMPL}" == "cln" ]]
+[[ "${LN_TARGET_PORT}" == "9736" ]]
+
+# Both run and nothing is recorded yet: LND first, as before.
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+
+RUNNING="[${CLN_UI_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ -z "${LAST_ERROR}" ]]
+[[ -z "${TARGET_IMPL}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_malformed_protected_node_record_fails_closed_until_a_node_type_is_selected():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+printf '%s\n' '{"version":1,"target_impl":"eclair","target_container":"eclair_1"}' > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${LND_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Protected node state is malformed; select the node type under Configure Lightning Node" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+
+printf '%s\n' '{"version":1,"target_impl":"lnd","target_container":"lnd; rm -rf /"}' > "${DOCKER_TARGET_STATE_FILE}"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Protected node state is malformed; select the node type under Configure Lightning Node" ]]
+
+# A selected node type takes precedence, and the next verified reconcile
+# replaces the record.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+record_protected_target
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "lnd" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "lightning_lnd_1" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_protected_node_is_recorded_only_after_a_verified_reconcile():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+ensure_reconcile_kill_switch() { return 0; }
+detect_lightning_container() {
+    TARGET_CONTAINER_ID="cln-id"
+    TARGET_CONTAINER_NAME="core-lightning_lightningd_1"
+    TARGET_IMPL="cln"
+    DOCKER_TARGET_IP="10.9.9.9"
+}
+ensure_ipv6_containment() { return 0; }
+ipv6_containment_is_synced() { return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { LAST_ERROR="attach failed"; return 1; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED=0; return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED=0; return 0; }
+rules_are_synced() { return 0; }
+remove_reconcile_kill_switch() { return 0; }
+cleanup_dataplane() { :; }
+
+if reconcile_once "periodic"; then exit 1; fi
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+
+ensure_container_attached() { return 0; }
+reconcile_once "periodic"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ -z "${LAST_ERROR}" ]]
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "cln" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "core-lightning_lightningd_1" ]]
+[[ "$(jq -r '.last_error' "${STATE_FILE}")" == "null" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_waiting_for_the_protected_node_keeps_its_fallback_blackholes():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+DOCKER_LOG="${POLICY_TEST_STATE_FILE}.docker"
+: > "${DOCKER_LOG}"
+
+# The previous reconcile protected LND. umbrelOS is recreating it and only
+# Core Lightning runs right now.
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|100"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|0"
+)
+RULES=$'32500:\tfrom 10.9.9.9 to 10.9.9.0/25 lookup main\n32500:\tfrom 10.21.21.9 to 10.21.0.0/16 lookup main\n32764:\tfrom 10.9.9.9 lookup 51820\n32764:\tfrom 10.21.21.9 lookup 51820\n32765:\tfrom 10.9.9.9 blackhole\n32765:\tfrom 10.21.21.9 blackhole\n'
+
+docker_api() {
+    printf '%s %s\n' "$1" "$2" >> "${DOCKER_LOG}"
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' '[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"]},{"Id":"cln-app-id","Names":["/core-lightning_app_1"]}]'
+        return 0
+    fi
+    return 1
+}
+docker_api_with_code() {
+    printf '%s %s\n' "$1" "$2" >> "${DOCKER_LOG}"
+    printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500'
+}
+remove_tagged_iptables_rules() { :; }
+get_target_subnet() { printf '%s\n' "10.21.0.0/16"; }
+ip() {
+    local spec
+    local pref
+    local line
+    case "$1 $2" in
+        "rule show")
+            if [ "${3:-}" = "pref" ]; then
+                printf '%s' "${RULES}" | grep "^${4}:" || true
+            else
+                printf '%s' "${RULES}"
+            fi
+            return 0
+            ;;
+        "rule add"|"rule del")
+            spec="${*:3}"
+            pref="${spec##* pref }"
+            spec="${spec% pref *}"
+            spec="${spec/ table / lookup }"
+            line="${pref}:"$'\t'"${spec}"
+            if [ "$2" = "add" ]; then
+                RULES+="${line}"$'\n'
+                return 0
+            fi
+            if ! printf '%s' "${RULES}" | grep -qxF -- "${line}"; then
+                return 2
+            fi
+            RULES="$(printf '%s' "${RULES}" | grep -vxF -- "${line}" || true)"$'\n'
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+if reconcile_once "periodic"; then exit 1; fi
+
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "$(jq -r '.target_impl' "${STATE_FILE}")" == "lnd" ]]
+[[ "$(jq -r '.rules_synced' "${STATE_FILE}")" == "false" ]]
+[[ "$(jq -r '.last_error' "${STATE_FILE}")" == "Waiting for the protected node to start: LND" ]]
+
+# Core Lightning was neither attached nor routed.
+[[ "$(cat "${DOCKER_LOG}")" == "GET /containers/json?all=0" ]]
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# LND keeps its fallback blackholes while its tunnel routes are withdrawn, so
+# the recreated container is blocked from its first packet.
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.9.9.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32762:\tfrom 10.9.9.0/25 blackhole'
+if printf '%s' "${RULES}" | grep -qF $'32764:\tfrom 10.21.21.9 lookup 51820'; then exit 1; fi
+if printf '%s' "${RULES}" | grep -qF $'32500:\tfrom 10.21.21.9 to'; then exit 1; fi
 '''
     )
 
