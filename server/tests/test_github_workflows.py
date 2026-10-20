@@ -57,6 +57,8 @@ def test_dependabot_auto_merge_runs_on_pull_request_for_dependabot_only():
     for scope in ("contents", "pull-requests", "statuses"):
         assert permissions.get(scope) == "write", scope
 
+    # A second job would inherit the write permissions, so allow only this one.
+    assert set(workflow["jobs"]) == {"auto-merge"}
     job = workflow["jobs"]["auto-merge"]
     guard = job["if"]
     assert "github.actor == 'dependabot[bot]'" in guard
@@ -64,8 +66,8 @@ def test_dependabot_auto_merge_runs_on_pull_request_for_dependabot_only():
     assert "&&" in guard
     assert "||" not in guard
 
-    # The job holds a write token: it runs no third-party code except the
-    # SHA-pinned metadata action and never checks out the pull request.
+    # The job holds a write token: allow no action except the SHA-pinned
+    # metadata action, so no actions/checkout and no other third-party code.
     uses = [step["uses"] for step in job["steps"] if "uses" in step]
     assert len(uses) == 1
     action, _, ref = uses[0].partition("@")

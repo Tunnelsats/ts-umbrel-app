@@ -24,7 +24,8 @@
 # On pull_request, Dependabot runs get a GITHUB_TOKEN that is read-only except for the scopes
 # in the permissions block below, and only Dependabot secrets (this workflow uses no other
 # secret). Fork PRs always get a read-only token. The workflow runs from the PR merge ref, so
-# it must never check out or run PR code (server/tests/test_github_workflows.py enforces this).
+# it must never check out or run PR code; server/tests/test_github_workflows.py allows a
+# single job and no action in it except the SHA-pinned fetch-metadata.
 # Open Dependabot PRs get no new run until Dependabot pushes to them again: comment
 # `@dependabot rebase` to trigger one.
 
