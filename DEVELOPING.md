@@ -108,6 +108,8 @@ Dependabot PRs:
 - Minor and patch updates for npm (root and `web/`) and GitHub Actions are approved and auto-merged by `.github/workflows/dependabot-auto-merge.yml` once the required checks pass. They are exempt from the TunnelSentinel review: the workflow marks the required `TunnelSentinel / Code Review` check as "Not reviewed".
 - These merges do not build or publish images. Users only receive dependency updates with the next versioned release.
 - Major updates, Docker base image updates and Dependabot PRs with commits from anyone else still need a TunnelSentinel review.
+- The workflow runs on `pull_request`, not `pull_request_target`: from November 2, 2026 GitHub blocks `pull_request_target` in public repositories unless an Actions event policy allows it. On `pull_request`, Dependabot runs get a `GITHUB_TOKEN` that is read-only except for the scopes in the workflow's `permissions:` block, and only Dependabot secrets. `server/tests/test_github_workflows.py` fails if any workflow uses `pull_request_target`.
+- An open Dependabot PR gets no new run of the workflow until Dependabot pushes to it again (for example a PR opened before the workflow changed). Comment `@dependabot rebase` on it to trigger one.
 
 ### 5. Multi-Repo Release Automation (`promote`)
 We utilize an automated release promotion workflow to maintain total parity between our local repository and the official `umbrel-apps` GitHub fork.
