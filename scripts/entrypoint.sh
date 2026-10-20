@@ -3104,15 +3104,16 @@ resolve_bridge_name() {
 
 # Only the protected target may use docker-tunnelsats. A previous target (for
 # example after the user switched implementations) or an orphaned endpoint
-# would otherwise keep DOCKER_TARGET_IP, and Docker would refuse the connect.
+# would otherwise keep DOCKER_TARGET_IP, and a stopped container that still
+# has the network configured would claim its address again when it starts.
 # Endpoints are detached by name with Force, which also removes endpoints
-# whose container no longer exists.
+# whose container no longer exists. Stopped containers are detached by ID.
 detach_other_docker_network_endpoints() {
     local entries
-    local entry_key
-    local endpoint_name
-    local endpoint_ip
+    local stopped
+    local detach_ref
     local detach_name
+    local endpoint_ip
 
     if ! docker_api_request "GET" "/networks/${DOCKER_NETWORK_NAME}"; then
         LAST_ERROR="Unable to inspect ${DOCKER_NETWORK_NAME} endpoints: ${DOCKER_API_ERROR}"
@@ -3122,19 +3123,34 @@ detach_other_docker_network_endpoints() {
         (.Containers // {})
         | to_entries[]
         | select(.key != $target)
-        | [.key, (.value.Name // ""), ((.value.IPv4Address // "") | sub("/.*$"; ""))]
+        | ((.value.Name // "") | if . == "" then null else . end) as $name
+        | [($name // .key), ($name // .key), ((.value.IPv4Address // "") | sub("/.*$"; ""))]
         | join("|")
     '); then
         LAST_ERROR="Unable to parse ${DOCKER_NETWORK_NAME} endpoints"
         return 1
     fi
+    if ! docker_api_request "GET" "/containers/json?all=1"; then
+        LAST_ERROR="Unable to list containers configured for ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
+        return 1
+    fi
+    if ! stopped=$(printf '%s' "${DOCKER_API_BODY}" | jq -r --arg target "${TARGET_CONTAINER_ID}" --arg net "${DOCKER_NETWORK_NAME}" '
+        .[]
+        | select(.Id != $target)
+        | select(.State == "created" or .State == "exited" or .State == "dead")
+        | (.NetworkSettings.Networks[$net] // empty) as $endpoint
+        | [.Id, ((.Names[0] // .Id) | ltrimstr("/")), ($endpoint | .IPAMConfig.IPv4Address // .IPAddress // "")]
+        | join("|")
+    '); then
+        LAST_ERROR="Unable to parse the containers configured for ${DOCKER_NETWORK_NAME}"
+        return 1
+    fi
 
-    while IFS='|' read -r entry_key endpoint_name endpoint_ip; do
-        [ -n "${entry_key}" ] || continue
-        detach_name="${endpoint_name:-${entry_key}}"
+    while IFS='|' read -r detach_ref detach_name endpoint_ip; do
+        [ -n "${detach_ref}" ] || continue
         log INFO "Detaching ${detach_name} from ${DOCKER_NETWORK_NAME} (IP=${endpoint_ip:-NONE}); only ${TARGET_CONTAINER_NAME} may use it"
         if docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" \
-            "$(jq -cn --arg c "${detach_name}" '{Container:$c, Force:true}')"; then
+            "$(jq -cn --arg c "${detach_ref}" '{Container:$c, Force:true}')"; then
             continue
         fi
         if docker_api_error_is_not_connected; then
@@ -3147,7 +3163,7 @@ detach_other_docker_network_endpoints() {
             LAST_ERROR="Failed to detach ${detach_name} from ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
         fi
         return 1
-    done <<< "${entries}"
+    done <<< "${entries}"$'\n'"${stopped}"
 }
 
 ensure_container_attached() {
@@ -3200,6 +3216,12 @@ ensure_container_attached() {
         fi
     fi
 
+    # docker-tunnelsats stays exclusive to the target, also while the target
+    # is already attached correctly.
+    if ! detach_other_docker_network_endpoints; then
+        return 1
+    fi
+
     if [ "${attached}" = "true" ] && [ "${current_ip}" = "${DOCKER_TARGET_IP}" ] && \
        { [ "${DOCKER_GW_PRIORITY_SUPPORTED}" != "true" ] || [ "${current_priority}" -eq "${desired_priority}" ]; }; then
         refresh_docker_target_endpoints
@@ -3218,10 +3240,6 @@ ensure_container_attached() {
         fi
     elif [ "${has_entry}" = "true" ]; then
         log INFO "${TARGET_CONTAINER_NAME} has a ${DOCKER_NETWORK_NAME} entry without an endpoint; reconnecting"
-    fi
-
-    if ! detach_other_docker_network_endpoints; then
-        return 1
     fi
 
     local connect_payload

@@ -8,6 +8,7 @@ CLEAR_NETWORK="ts-clear-${TEST_SUFFIX}"
 PROTECTED_NETWORK="ts-protected-${TEST_SUFFIX}"
 TARGET_CONTAINER="ts-route-lnd-${TEST_SUFFIX}"
 HOLDER_CONTAINER="ts-route-cln-${TEST_SUFFIX}"
+STOPPED_CONTAINER="ts-route-stopped-${TEST_SUFFIX}"
 CLEAR_SUBNET="10.121.120.0/24"
 PROTECTED_SUBNET="10.121.121.0/24"
 CLEAR_IP="10.121.120.9"
@@ -20,6 +21,7 @@ STATE_FILE_TMP="/tmp/tunnelsats-state-${TEST_SUFFIX}.json"
 cleanup_test_env() {
     docker rm -f "${TARGET_CONTAINER}" >/dev/null 2>&1 || true
     docker rm -f "${HOLDER_CONTAINER}" >/dev/null 2>&1 || true
+    docker rm -f "${STOPPED_CONTAINER}" >/dev/null 2>&1 || true
     docker network rm "${CLEAR_NETWORK}" >/dev/null 2>&1 || true
     docker network rm "${PROTECTED_NETWORK}" >/dev/null 2>&1 || true
     rm -f \
@@ -142,6 +144,28 @@ target_entry="$(protected_entry "${TARGET_CONTAINER}")"
 IFS='|' read -r target_state target_ip target_endpoint <<< "${target_entry}"
 if [ "${target_state}" != "present" ] || [ "${target_ip}" != "${PROTECTED_IP}" ] || [ -z "${target_endpoint}" ]; then
     echo "FAIL: target was not reattached with ${PROTECTED_IP}: ${target_entry}" >&2
+    exit 1
+fi
+
+# A stopped container that still has the protected network configured would
+# claim the protected IP again when it starts. Reconciliation removes that
+# configuration while the target stays attached.
+docker create --name "${STOPPED_CONTAINER}" --network "${CLEAR_NETWORK}" \
+    alpine:latest sh -c 'while true; do sleep 3600; done' >/dev/null
+docker network connect --ip "${PROTECTED_IP}" "${PROTECTED_NETWORK}" "${STOPPED_CONTAINER}"
+if [ "$(protected_entry "${STOPPED_CONTAINER}")" = "absent" ]; then
+    echo "FAIL: the stopped container did not record the protected network" >&2
+    exit 1
+fi
+ensure_container_attached
+verify_docker_target_routes
+stopped_entry="$(protected_entry "${STOPPED_CONTAINER}")"
+if [ "${stopped_entry}" != "absent" ]; then
+    echo "FAIL: the stopped container still has the protected network configured: ${stopped_entry}" >&2
+    exit 1
+fi
+if [ "$(protected_entry "${TARGET_CONTAINER}")" != "${target_entry}" ]; then
+    echo "FAIL: detaching the stopped container changed the target endpoint" >&2
     exit 1
 fi
 

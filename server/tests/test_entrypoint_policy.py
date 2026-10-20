@@ -395,6 +395,9 @@ docker_api_with_code() {
         "GET:/networks/docker-tunnelsats")
             printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
             ;;
+        "GET:/containers/json?all=1")
+            printf '%s' '[]HTTPSTATUS:200'
+            ;;
         "POST:/networks/docker-tunnelsats/disconnect")
             printf '%s\n' "disconnect" >> "${POLICY_TEST_STATE_FILE}.events"
             printf '%s' 'HTTPSTATUS:200'
@@ -456,6 +459,9 @@ docker_api_with_code() {
         "GET:/networks/docker-tunnelsats")
             printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
             ;;
+        "GET:/containers/json?all=1")
+            printf '%s' '[]HTTPSTATUS:200'
+            ;;
         "POST:/networks/docker-tunnelsats/connect")
             printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
             touch "${POLICY_TEST_STATE_FILE}.connected"
@@ -499,6 +505,8 @@ TARGET_BEFORE="${UMBREL_ENDPOINT}"
 TARGET_AFTER="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
 NETWORK_CONTAINERS=""
 NETWORK_CODE="200"
+CONTAINERS_ALL="[]"
+CONTAINERS_CODE="200"
 DISCONNECT_CODE="200"
 DISCONNECT_MESSAGE=""
 CONNECT_CODE="200"
@@ -540,6 +548,13 @@ docker_api_with_code() {
             fi
             printf '{"Name":"docker-tunnelsats","Containers":{%s}}HTTPSTATUS:200' "${NETWORK_CONTAINERS}"
             ;;
+        "GET:/containers/json?all=1")
+            if [ "${CONTAINERS_CODE}" != "200" ]; then
+                docker_response "${CONTAINERS_CODE}" "container list failed"
+                return 0
+            fi
+            printf '%sHTTPSTATUS:200' "${CONTAINERS_ALL}"
+            ;;
         "POST:/networks/docker-tunnelsats/disconnect")
             container=$(printf '%s' "${data}" | jq -r 'if .Force == true then .Container else "unforced:" + .Container end')
             printf 'disconnect:%s\n' "${container}" >> "${EVENTS}"
@@ -559,20 +574,32 @@ docker_api_with_code() {
 '''
 
 
-def test_docker_attach_keeps_a_verified_endpoint_without_touching_the_network():
+def test_docker_attach_keeps_a_verified_endpoint_and_detaches_every_other_container():
     result = run_bash(
         DOCKER_ATTACH_HARNESS
         + r'''
 TARGET_BEFORE="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
-NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.2/25"}'
+NETWORK_CONTAINERS='"target-id":{"Name":"lightning_lnd_1","EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPv4Address":"10.9.9.9/25"},"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.2/25"}'
+# A stopped container that still has the network configured would claim its
+# address again on start. A running container whose entry has no endpoint
+# holds no address, and the target is never detached.
+CONTAINERS_ALL='[
+  {"Id":"target-id","Names":["/lightning_lnd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9"}}}},
+  {"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPAddress":"10.9.9.2"}}}},
+  {"Id":"stopped-id","Names":["/old-lightning_lnd_1"],"State":"exited","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"stale-id","Names":["/other_app_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.3"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"unrelated-id","Names":["/bitcoin_bitcoind_1"],"State":"exited","NetworkSettings":{"Networks":{"umbrel_main_network":{"EndpointID":"","IPAddress":""}}}}
+]'
 
 ensure_container_attached
-[[ ! -s "${EVENTS}" ]]
+[[ "$(cat "${EVENTS}")" == $'disconnect:core-lightning_lightningd_1\ndisconnect:stopped-id' ]]
+[[ ! -f "${POLICY_TEST_STATE_FILE}.payload" ]]
 [[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
 '''
     )
 
     assert result.returncode == 0, result.stderr
+    assert "Detaching old-lightning_lnd_1 from docker-tunnelsats (IP=10.9.9.9)" in result.stderr
 
 
 def test_docker_attach_treats_entry_without_endpoint_as_detached():
@@ -646,29 +673,41 @@ ensure_container_attached
 
 
 @pytest.mark.parametrize(
-    ("holder_ip", "network_code", "expected_error"),
+    ("holder_ip", "network_code", "containers_code", "expected_error"),
     [
         (
             "10.9.9.9/25",
+            "200",
             "200",
             "10.9.9.9 on docker-tunnelsats is held by core-lightning_lightningd_1, which could not be detached: endpoint is busy",
         ),
         (
             "10.9.9.2/25",
             "200",
+            "200",
             "Failed to detach core-lightning_lightningd_1 from docker-tunnelsats: endpoint is busy",
         ),
         (
             "10.9.9.9/25",
             "500",
+            "200",
             "Unable to inspect docker-tunnelsats endpoints: network inspect failed",
+        ),
+        (
+            "10.9.9.9/25",
+            "200",
+            "500",
+            "Unable to list containers configured for docker-tunnelsats: container list failed",
         ),
     ],
 )
-def test_docker_attach_fails_closed_when_another_endpoint_cannot_be_detached(holder_ip, network_code, expected_error):
+def test_docker_attach_fails_closed_when_another_endpoint_cannot_be_detached(
+    holder_ip, network_code, containers_code, expected_error
+):
     result = run_bash(
         DOCKER_ATTACH_HARNESS
-        + f'HOLDER_IP="{holder_ip}"\nNETWORK_CODE="{network_code}"\nEXPECTED_ERROR="{expected_error}"\n'
+        + f'HOLDER_IP="{holder_ip}"\nNETWORK_CODE="{network_code}"\n'
+        + f'CONTAINERS_CODE="{containers_code}"\nEXPECTED_ERROR="{expected_error}"\n'
         + r'''
 NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"'"${HOLDER_IP}"'"}'
 DISCONNECT_CODE="500"
