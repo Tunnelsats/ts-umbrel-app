@@ -118,8 +118,10 @@
                         </div>
                         <p id="txt-routing-subtitle" class="text-xs text-gray-400 mt-1 hidden"></p>
                         <p id="txt-routing-error"
-                            class="hidden mt-3 rounded-lg border border-red-800/70 bg-red-950/40 p-3 font-mono text-xs text-red-300 break-words">
+                            class="hidden mt-3 rounded-lg border border-red-800/70 bg-red-950/40 p-3 font-mono text-xs text-red-300 break-words ts-error-box">
                         </p>
+                        <!-- Actionable diagnostics: what is wrong, why, how to fix and re-check (issue #170) -->
+                        <div id="routing-diagnostics" class="hidden" aria-live="polite"></div>
                         <div id="routing-actions" class="mt-6 space-x-3 hidden">
                             <button id="btn-dash-enable-routing"
                                 class="flex-1 bg-tsyellow hover:bg-yellow-500 text-black font-bold py-2.5 px-4 rounded-xl transition shadow-lg hidden">Enable
@@ -685,13 +687,13 @@
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
                                     </svg> 6. In Secure Mode, why must I edit my config manually?</a></li>
-                            <li data-secure-mode="exclude"><a href="#faq-8"
+                            <li><a href="#faq-8"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-8"><svg class="w-4 h-4 text-gray-500" fill="none"
                                         stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M9 5l7 7-7 7"></path>
-                                    </svg> 6. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?</a></li>
+                                    </svg> Troubleshooting: "Dataplane Blocked" because of an announcement conflict</a></li>
                             <li><a href="#faq-7"
                                     class="text-gray-300 hover:text-white transition-colors flex items-center gap-2"
                                     data-scroll-to="faq-7"><svg class="w-4 h-4 text-gray-500" fill="none"
@@ -774,6 +776,19 @@
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
                                     sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml exec -T tunnelsats-daemon wg show</div>
+                                <p>You rarely need this: the Dashboard shows the same checks in plain language, with
+                                    <strong>Re-check now</strong>. The status JSON also contains <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">last_error_code</code>
+                                    and, for announcement problems, <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">announcement_diagnostics</code>
+                                    with the exact setting, line, and fix. To find the container names on your node and to
+                                    read the TunnelSats logs (useful for a support request):</p>
+                                <div
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
+                                    sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'</div>
+                                <div
+                                    class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
+                                    sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-daemon tunnelsats-web</div>
                             </div>
                         </div>
 
@@ -897,7 +912,7 @@
                                     <li>Open the Umbrel <strong>Files</strong> app, navigate to the config file (e.g. <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">~/umbrel/app-data/lightning/data/lnd/lnd.conf</code> for LND), paste the lines, and save.</li>
                                     <li>Alternatively, connect via SSH and edit the files using <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nano</code> or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">vim</code>.</li>
                                     <li>Go back to your Umbrel dashboard, open the <strong>Lightning Node</strong> or <strong>Core Lightning</strong> app settings, and click <strong>Restart</strong>.</li>
-                                    <li>For each old LND clearnet address, run <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">sudo docker exec lnd lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code>, then inspect <code>sudo docker exec lnd lncli getinfo</code>.</li>
+                                    <li>Back on the TunnelSats Dashboard, click <strong>Re-check now</strong>. If it still lists a setting, it shows exactly which line to change. For an old LND address that is still announced, the optional SSH step is <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=&lt;old-ip&gt;:9735</code> (see <a href="#faq-8" data-scroll-to="faq-8" class="text-tsgreen underline">Troubleshooting: "Dataplane Blocked"</a>).</li>
                                 </ol>
                                 <p class="text-tsyellow">The withdrawal updates active gossip, but historical explorers and collectors may retain addresses that were published previously.</p>
 
@@ -954,41 +969,65 @@
                             </div>
                         </div>
 
-                        <!-- Q8 -->
-                        <div id="faq-8" data-secure-mode="exclude" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
+                        <!-- Q8: visible in Secure Mode too, where this problem is most common (issue #170) -->
+                        <div id="faq-8" class="bg-gray-800/60 border border-gray-700 rounded-lg p-5 scroll-mt-6">
                             <h3 class="text-white font-bold mb-2 text-base flex items-center gap-2">
                                 <svg class="w-5 h-5 text-tsgreen" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                                </svg> 6. How does Zero-Restart Gossip Verification work, and how do I fix conflicts?
+                                </svg> Troubleshooting: "Dataplane Blocked" because of an announcement conflict
                             </h3>
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
-                                <p>TunnelSats updates your Lightning node's public gossip announcements in real time without restarting your LND container, preserving active channels and preventing downtime.</p>
-                                <h4 class="text-white font-semibold mt-4 mb-2">How It Works:</h4>
-                                <ul class="list-disc pl-5 space-y-1 marker:text-tsgreen">
-                                    <li><strong>Live RPC Updates:</strong> Node announcements are updated instantly via LND live RPC commands (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lncli peers updatenodeannouncement</code>).</li>
-                                    <li><strong>Persistence:</strong> Configuration files (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lnd.conf</code>) are updated on disk so settings persist across future system reboots.</li>
-                                    <li><strong>Self-Healing Background Verification:</strong> If your node is booting up or unlocking its wallet, the app non-blockingly waits for LND to finish starting, then automatically verifies and marks the dashboard <strong>ONLINE</strong> within seconds.</li>
+                                <p>TunnelSats keeps your node's clearnet traffic blocked (fail-closed) until your node announces <strong class="text-white">only</strong> your TunnelSats endpoint: the VPN server and the forwarded port shown on the Dashboard. Start on the <strong class="text-white">Dashboard</strong>. The Node Routing card lists every setting TunnelSats found, where it found it, why it is a problem, and how to fix it. You usually do not need SSH.</p>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">What the labels mean</h4>
+                                <ul class="list-disc pl-5 space-y-2 marker:text-tsgreen">
+                                    <li><strong>Non-TunnelSats address:</strong> the setting announces an address that is not your TunnelSats endpoint, usually your home or ISP IP or a leftover from an earlier setup. Disable the line.</li>
+                                    <li><strong>TunnelSats server, wrong port:</strong> the address belongs to your TunnelSats server but uses another port. Example: <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalip=178.156.167.202</code> announces <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">178.156.167.202:9735</code>. Port <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">9735</code> is the Lightning default, used when no port is set, but your forwarded port is the <strong>VPN External Port</strong> on the Dashboard. Replace the line with <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts=&lt;server&gt;:&lt;forwarded-port&gt;</code>.</li>
+                                    <li><strong>TunnelSats address pinned by IP:</strong> right server and port, but set as a fixed address (for example with <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalip=</code>). Use the hostname form <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts=&lt;server&gt;:&lt;port&gt;</code> so the announcement keeps working if the server IP changes.</li>
+                                    <li><strong>Old TunnelSats endpoint:</strong> an endpoint from a previous subscription or server. Replace it with your current one.</li>
+                                    <li><strong>Automatic IP discovery enabled:</strong> <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nat=true</code> (LND) or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">ip-discovery=true</code> (Core Lightning) lets your node discover and announce your public home IP by itself. Set it to <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">false</code>.</li>
+                                    <li><strong>TunnelSats endpoint not announced:</strong> the TunnelSats line is missing. Add the line shown on the Dashboard.</li>
+                                    <li><strong>Node config file not readable</strong> or <strong>Waiting for your Lightning node:</strong> TunnelSats cannot check yet. Make sure your Lightning app is installed, running, synced, and unlocked, then re-check.</li>
                                 </ul>
-                                <h4 class="text-white font-semibold mt-4 mb-2">Troubleshooting Conflicting Clearnet IPs:</h4>
-                                <p>If your dashboard reports <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-red-400 font-mono text-xs">Dataplane Blocked</code> due to a conflicting clearnet address, follow these three simple steps over SSH:</p>
+                                <p>Whatever the label, finish with exactly one TunnelSats line, as shown on the Dashboard: <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">externalhosts=&lt;server&gt;:&lt;forwarded-port&gt;</code> (LND) or <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">announce-addr=&lt;server&gt;:&lt;forwarded-port&gt;</code> (Core Lightning). Without it, the Dashboard cannot show your node as protected.</p>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">Where was it found?</h4>
+                                <p><strong class="text-white">Config file</strong> means TunnelSats read your node configuration (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">lnd.conf</code> or the Core Lightning <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">config</code>). This check runs in every mode. In Secure Mode it is the only check, because TunnelSats can read the file but cannot change it or ask your node directly. <strong class="text-white">Live gossip</strong> means TunnelSats asked your node what it announces right now (standard mode only). For LND it also withdraws old addresses automatically on every check, without a restart. Core Lightning only changes its announcement after a restart.</p>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">Fix it without SSH</h4>
+                                <ol class="list-decimal pl-5 space-y-2">
+                                    <li><strong>Standard mode:</strong> on the Dashboard, click <strong>Fix automatically</strong>. TunnelSats backs up and disables the conflicting lines in your config file and withdraws old addresses from live gossip right away. LND keeps running (Core Lightning is restarted). Restart LND when convenient so it also loads the saved file, especially after <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">nat=true</code> was disabled.</li>
+                                    <li><strong>Secure Mode:</strong> click <strong>Show step-by-step fix</strong>. It lists the exact lines from your config file. Edit the file in the Umbrel <strong>Files</strong> app, save it, and restart the <strong>Lightning Node</strong> (or <strong>Core Lightning</strong>) app from the Umbrel dashboard.</li>
+                                    <li>Click <strong>Re-check now</strong> on the Dashboard. The card clears once your node announces only your TunnelSats endpoint.</li>
+                                </ol>
+
+                                <h4 class="text-white font-semibold mt-4 mb-2">Optional: check over SSH</h4>
                                 <ol class="list-decimal pl-5 space-y-3 text-gray-300">
                                     <li>
-                                        <strong>Step 1: Check what LND is currently announcing:</strong>
-                                        <p class="text-xs text-gray-400 mt-0.5">Query LND to list all advertised URIs:</p>
-                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli getinfo | grep uris -A 10</code>
-                                        <p class="text-xs text-gray-400 mt-1">Identify any non-TunnelSats clearnet IP address in the list (e.g. <code class="text-yellow-400">85.214.12.34:9735</code>).</p>
+                                        <strong>Find the container names.</strong>
+                                        <p class="text-xs text-gray-400 mt-0.5">On umbrelOS, LND runs as <code class="text-tsgreen">lightning_lnd_1</code> and Core Lightning as <code class="text-tsgreen">core-lightning_lightningd_1</code>. Check yours:</p>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'</code>
                                     </li>
                                     <li>
-                                        <strong>Step 2: Remove the conflicting address:</strong>
-                                        <p class="text-xs text-gray-400 mt-0.5">Withdraw the specific conflicting address from your node's live gossip memory:</p>
-                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec -it lightning_lnd_1 lncli peers updatenodeannouncement --address_remove="&lt;CONFLICTING_IP&gt;:&lt;PORT&gt;"</code>
+                                        <strong>Show the active announcement lines</strong> (lines starting with <code class="text-tsgreen">#</code> are ignored):
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo grep -nE '^[[:space:]]*(externalip|externalhosts|nat)[[:space:]]*=' ~/umbrel/app-data/lightning/data/lnd/lnd.conf</code>
+                                        <p class="text-xs text-gray-400 mt-1">For Core Lightning, search for <code class="text-tsgreen">announce-addr|ip-discovery</code> in <code class="text-tsgreen">~/umbrel/app-data/core-lightning/data/lightningd/bitcoin/config</code>.</p>
                                     </li>
                                     <li>
-                                        <strong>Step 3: Trigger auto-verification & return ONLINE:</strong>
-                                        <p class="text-xs text-gray-400 mt-0.5">Once the withdrawal command completes, return to your TunnelSats dashboard and click <strong>Configure Node</strong> (or refresh the page). TunnelSats will automatically re-verify your node's announcements and set your node status to <strong class="text-tsgreen">ONLINE</strong> within seconds.</p>
-                                        <p class="text-xs text-gray-400 mt-1"><em>Optional: Re-run Step 1 over SSH to verify that the conflicting IP address has disappeared from LND's advertised URIs list.</em></p>
+                                        <strong>Show what LND announces right now.</strong> Each <code class="text-tsgreen">uris</code> entry is <code class="text-tsgreen">pubkey@address</code>:
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec lightning_lnd_1 lncli getinfo</code>
+                                    </li>
+                                    <li>
+                                        <strong>Withdraw a stale address from live gossip</strong> (LND only). Fix the config file first, otherwise the address returns on the next restart. Pass only <code class="text-tsgreen">ip:port</code>, without the <code class="text-tsgreen">pubkey@</code> prefix:
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=203.0.113.5:9735</code>
+                                    </li>
+                                    <li>
+                                        <strong>Read the TunnelSats logs</strong> (useful for a support request):
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-daemon</code>
+                                        <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-web</code>
                                     </li>
                                 </ol>
+                                <p class="text-tsyellow">Public explorers can keep showing an old address for a while, and historical snapshots cannot be erased. What counts is what your node announces now: the Dashboard check and <code class="text-tsgreen">lncli getinfo</code>.</p>
                             </div>
                         </div>
 
