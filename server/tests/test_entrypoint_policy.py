@@ -187,7 +187,7 @@ TARGET_CONTAINER_NAME="lnd"
 DOCKER_POLICY_STATE_LOADED="true"
 persist_managed_docker_policy_state() { :; }
 docker_api() {
-    printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0,"GlobalIPv6Address":"2001:db8:21::9","GlobalIPv6PrefixLen":64,"IPv6Gateway":"2001:db8:21::1","MacAddress":"02:42:ac:11:00:09"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100,"GlobalIPv6Address":"","IPv6Gateway":"","MacAddress":"02:42:0a:09:09:09"}}}}'
+    printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0,"GlobalIPv6Address":"2001:db8:21::9","GlobalIPv6PrefixLen":64,"IPv6Gateway":"2001:db8:21::1","MacAddress":"02:42:ac:11:00:09"},"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100,"GlobalIPv6Address":"","IPv6Gateway":"","MacAddress":"02:42:0a:09:09:09"}}}}'
 }
 
 refresh_docker_target_endpoints
@@ -375,20 +375,34 @@ docker_api() {
             ;;
         "GET:/containers/target-id/json")
             if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":251}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"EndpointID":"b6316b274fb724dd4ded4e27d950138fcdf9cda4ef01e07018fe3dab67fff2b0","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":251}}}}'
             else
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}}}}'
             fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/disconnect")
             printf '%s\n' "disconnect" >> "${POLICY_TEST_STATE_FILE}.events"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/connect")
             printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
             printf '%s\n' "connect" >> "${POLICY_TEST_STATE_FILE}.events"
             touch "${POLICY_TEST_STATE_FILE}.connected"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
-        *) return 1 ;;
+        *) printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500' ;;
     esac
 }
 
@@ -422,22 +436,268 @@ docker_api() {
         "GET:/version") printf '%s\n' '{"ApiVersion":"1.47"}' ;;
         "GET:/containers/target-id/json")
             if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1"}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"},"docker-tunnelsats":{"EndpointID":"b6316b274fb724dd4ded4e27d950138fcdf9cda4ef01e07018fe3dab67fff2b0","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1"}}}}'
             else
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"}}}}'
             fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/connect")
             printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
             touch "${POLICY_TEST_STATE_FILE}.connected"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
-        *) return 1 ;;
+        *) printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500' ;;
     esac
 }
 
 ensure_container_attached
 [[ "$(jq 'has("GwPriority") or (.EndpointConfig | has("GwPriority"))' "${POLICY_TEST_STATE_FILE}.payload")" == "false" ]]
 [[ "${DOCKER_GW_PRIORITY_SUPPORTED}" == "false" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# Fake Docker Engine for ensure_container_attached (issue #173). The target's
+# docker-tunnelsats entry comes from TARGET_BEFORE until a connect succeeds and
+# from TARGET_AFTER afterwards. NETWORK_CONTAINERS is the network's endpoint
+# list. Every request that changes something is logged to EVENTS.
+DOCKER_ATTACH_HARNESS = r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lightning_lnd_1"
+DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+EVENTS="${POLICY_TEST_STATE_FILE}.events"
+: > "${EVENTS}"
+
+UMBREL_ENDPOINT='"umbrel_main_network":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.21.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0}'
+PROTECTED_ENDPOINT='"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100}'
+LOW_PRIORITY_ENDPOINT='"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}'
+# Docker keeps this entry when a connect fails before the endpoint exists.
+STALE_ENDPOINT='"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"DNSNames":["lightning_lnd_1","target-id"],"NetworkID":"","EndpointID":"","Gateway":"","IPAddress":"","IPPrefixLen":0,"GwPriority":100,"MacAddress":""}'
+NO_ENDPOINT_ID_ENDPOINT='"docker-tunnelsats":{"EndpointID":"","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100}'
+TARGET_BEFORE="${UMBREL_ENDPOINT}"
+TARGET_AFTER="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
+NETWORK_CONTAINERS=""
+NETWORK_CODE="200"
+DISCONNECT_CODE="200"
+DISCONNECT_MESSAGE=""
+CONNECT_CODE="200"
+CONNECT_MESSAGE=""
+
+docker_api() {
+    case "$1:$2" in
+        "GET:/version") printf '%s\n' '{"ApiVersion":"1.48"}' ;;
+        "GET:/containers/target-id/json")
+            if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
+                printf '{"Id":"target-id","NetworkSettings":{"Networks":{%s}}}\n' "${TARGET_AFTER}"
+            else
+                printf '{"Id":"target-id","NetworkSettings":{"Networks":{%s}}}\n' "${TARGET_BEFORE}"
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_response() {
+    local code="$1"
+    local message="$2"
+    if [ -n "${message}" ]; then
+        jq -cn --arg message "${message}" '{message:$message}' | tr -d '\n'
+    fi
+    printf 'HTTPSTATUS:%s' "${code}"
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    local container
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            if [ "${NETWORK_CODE}" != "200" ]; then
+                docker_response "${NETWORK_CODE}" "network inspect failed"
+                return 0
+            fi
+            printf '{"Name":"docker-tunnelsats","Containers":{%s}}HTTPSTATUS:200' "${NETWORK_CONTAINERS}"
+            ;;
+        "POST:/networks/docker-tunnelsats/disconnect")
+            container=$(printf '%s' "${data}" | jq -r 'if .Force == true then .Container else "unforced:" + .Container end')
+            printf 'disconnect:%s\n' "${container}" >> "${EVENTS}"
+            docker_response "${DISCONNECT_CODE}" "${DISCONNECT_MESSAGE}"
+            ;;
+        "POST:/networks/docker-tunnelsats/connect")
+            printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
+            printf 'connect\n' >> "${EVENTS}"
+            if [ "${CONNECT_CODE}" = "200" ]; then
+                touch "${POLICY_TEST_STATE_FILE}.connected"
+            fi
+            docker_response "${CONNECT_CODE}" "${CONNECT_MESSAGE}"
+            ;;
+        *) docker_response "500" "unexpected ${method} ${path}" ;;
+    esac
+}
+'''
+
+
+def test_docker_attach_keeps_a_verified_endpoint_without_touching_the_network():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
+NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.2/25"}'
+
+ensure_container_attached
+[[ ! -s "${EVENTS}" ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_treats_entry_without_endpoint_as_detached():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${STALE_ENDPOINT}"
+
+# The B3 state: the entry exists, but it is no attachment.
+[[ "$(docker_api GET /containers/target-id/json | jq -r '.NetworkSettings.Networks["docker-tunnelsats"].EndpointID')" == "" ]]
+
+ensure_container_attached
+[[ "$(cat "${EVENTS}")" == "connect" ]]
+[[ "$(jq -r '.EndpointConfig.IPAMConfig.IPv4Address' "${POLICY_TEST_STATE_FILE}.payload")" == "10.9.9.9" ]]
+[[ "$(jq -r '.EndpointConfig.GwPriority' "${POLICY_TEST_STATE_FILE}.payload")" == "100" ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "docker-tunnelsats entry without an endpoint; reconnecting" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "tolerated"),
+    [
+        ("500", "container target-id is not connected to network docker-tunnelsats", True),
+        ("404", "container target-id is not connected to the network docker-tunnelsats", True),
+        ("500", "failed to remove endpoint: device or resource busy", False),
+        ("404", "network docker-tunnelsats not found", False),
+    ],
+)
+def test_docker_attach_tolerates_only_not_connected_disconnect_errors(code, message, tolerated):
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + f'DISCONNECT_CODE="{code}"\nDISCONNECT_MESSAGE="{message}"\nEXPECT_TOLERATED="{tolerated}"\n'
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${LOW_PRIORITY_ENDPOINT}"
+# Docker may still list the target itself; it is never detached as another endpoint.
+NETWORK_CONTAINERS='"target-id":{"Name":"lightning_lnd_1","EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPv4Address":"10.9.9.9/25"}'
+
+if [ "${EXPECT_TOLERATED}" = "True" ]; then
+    ensure_container_attached
+    [[ "$(cat "${EVENTS}")" == $'disconnect:target-id\nconnect' ]]
+else
+    if ensure_container_attached; then exit 1; fi
+    [[ "$(cat "${EVENTS}")" == "disconnect:target-id" ]]
+    [[ "${LAST_ERROR}" == "Failed to disconnect stale docker-tunnelsats endpoint from lightning_lnd_1: ${DISCONNECT_MESSAGE}" ]]
+fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_detaches_every_other_endpoint_before_connecting():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+# Core Lightning holds the protected IP and an endpoint outlived its container.
+NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.9/25"},"ep-1541c6aef9bb26cda145b9b2f91c613492ef15460da91cac79b31cce40881e65":{"Name":"old-lightning","EndpointID":"1541c6aef9bb26cda145b9b2f91c613492ef15460da91cac79b31cce40881e65","IPv4Address":"10.9.9.2/25"}'
+
+ensure_container_attached
+[[ "$(cat "${EVENTS}")" == $'disconnect:core-lightning_lightningd_1\ndisconnect:old-lightning\nconnect' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Detaching core-lightning_lightningd_1 from docker-tunnelsats (IP=10.9.9.9)" in result.stderr
+    assert "Detaching old-lightning from docker-tunnelsats (IP=10.9.9.2)" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("holder_ip", "network_code", "expected_error"),
+    [
+        (
+            "10.9.9.9/25",
+            "200",
+            "10.9.9.9 on docker-tunnelsats is held by core-lightning_lightningd_1, which could not be detached: endpoint is busy",
+        ),
+        (
+            "10.9.9.2/25",
+            "200",
+            "Failed to detach core-lightning_lightningd_1 from docker-tunnelsats: endpoint is busy",
+        ),
+        (
+            "10.9.9.9/25",
+            "500",
+            "Unable to inspect docker-tunnelsats endpoints: network inspect failed",
+        ),
+    ],
+)
+def test_docker_attach_fails_closed_when_another_endpoint_cannot_be_detached(holder_ip, network_code, expected_error):
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + f'HOLDER_IP="{holder_ip}"\nNETWORK_CODE="{network_code}"\nEXPECTED_ERROR="{expected_error}"\n'
+        + r'''
+NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"'"${HOLDER_IP}"'"}'
+DISCONNECT_CODE="500"
+DISCONNECT_MESSAGE="endpoint is busy"
+
+if ensure_container_attached; then exit 1; fi
+[[ "${LAST_ERROR}" == "${EXPECTED_ERROR}" ]]
+if grep -qx "connect" "${EVENTS}"; then exit 1; fi
+[[ ! -f "${POLICY_TEST_STATE_FILE}.payload" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_reports_docker_connect_error_and_requires_endpoint_id():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+CONNECT_CODE="403"
+CONNECT_MESSAGE="Address already in use"
+if ensure_container_attached; then exit 1; fi
+[[ "${LAST_ERROR}" == "Failed to connect lightning_lnd_1 to docker-tunnelsats: Address already in use" ]]
+
+# A connect that reports success but leaves no endpoint is not an attachment.
+: > "${EVENTS}"
+CONNECT_CODE="200"
+CONNECT_MESSAGE=""
+TARGET_AFTER="${UMBREL_ENDPOINT},${NO_ENDPOINT_ID_ENDPOINT}"
+if ensure_container_attached; then exit 1; fi
+[[ "$(cat "${EVENTS}")" == "connect" ]]
+[[ "${LAST_ERROR}" == "Docker did not create a docker-tunnelsats endpoint for lightning_lnd_1" ]]
 '''
     )
 

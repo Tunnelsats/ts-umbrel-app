@@ -237,6 +237,9 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
+DOCKER_API_BODY=""
+DOCKER_API_CODE=""
+DOCKER_API_ERROR=""
 TARGET_IPV4_ENDPOINTS=()
 MANAGED_DOCKER_IPV4_ENDPOINTS=()
 TARGET_IPV6_ADDRESSES=()
@@ -439,6 +442,35 @@ docker_api_with_code() {
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     fi
+}
+
+# Docker API call that keeps Docker's answer. Sets DOCKER_API_BODY,
+# DOCKER_API_CODE and, on failure, DOCKER_API_ERROR (Docker's message or the
+# HTTP status). Succeeds only on HTTP 2xx.
+docker_api_request() {
+    local response
+    response=$(docker_api_with_code "$@") || true
+    DOCKER_API_BODY="${response%HTTPSTATUS:*}"
+    DOCKER_API_CODE="${response##*HTTPSTATUS:}"
+    if [[ ! "${DOCKER_API_CODE}" =~ ^[0-9]{3}$ ]]; then
+        DOCKER_API_CODE="000"
+    fi
+    DOCKER_API_ERROR=""
+    if [[ "${DOCKER_API_CODE}" =~ ^2[0-9]{2}$ ]]; then
+        return 0
+    fi
+    DOCKER_API_ERROR=$(printf '%s' "${DOCKER_API_BODY}" | jq -r '.message // empty' 2>/dev/null || true)
+    DOCKER_API_ERROR="${DOCKER_API_ERROR//$'\n'/ }"
+    if [ -z "${DOCKER_API_ERROR}" ]; then
+        DOCKER_API_ERROR="HTTP ${DOCKER_API_CODE}"
+    fi
+    return 1
+}
+
+# A disconnect that Docker rejects because the endpoint is already gone.
+docker_api_error_is_not_connected() {
+    { [ "${DOCKER_API_CODE}" = "404" ] || [ "${DOCKER_API_CODE}" = "500" ]; } && \
+        [[ "${DOCKER_API_ERROR}" == *"is not connected"* ]]
 }
 
 detect_docker_gw_priority_support() {
@@ -2947,6 +2979,54 @@ resolve_bridge_name() {
     return 0
 }
 
+# Only the protected target may use docker-tunnelsats. A previous target (for
+# example after the user switched implementations) or an orphaned endpoint
+# would otherwise keep DOCKER_TARGET_IP, and Docker would refuse the connect.
+# Endpoints are detached by name with Force, which also removes endpoints
+# whose container no longer exists.
+detach_other_docker_network_endpoints() {
+    local entries
+    local entry_key
+    local endpoint_name
+    local endpoint_ip
+    local detach_name
+
+    if ! docker_api_request "GET" "/networks/${DOCKER_NETWORK_NAME}"; then
+        LAST_ERROR="Unable to inspect ${DOCKER_NETWORK_NAME} endpoints: ${DOCKER_API_ERROR}"
+        return 1
+    fi
+    if ! entries=$(printf '%s' "${DOCKER_API_BODY}" | jq -r --arg target "${TARGET_CONTAINER_ID}" '
+        (.Containers // {})
+        | to_entries[]
+        | select(.key != $target)
+        | [.key, (.value.Name // ""), ((.value.IPv4Address // "") | sub("/.*$"; ""))]
+        | join("|")
+    '); then
+        LAST_ERROR="Unable to parse ${DOCKER_NETWORK_NAME} endpoints"
+        return 1
+    fi
+
+    while IFS='|' read -r entry_key endpoint_name endpoint_ip; do
+        [ -n "${entry_key}" ] || continue
+        detach_name="${endpoint_name:-${entry_key}}"
+        log INFO "Detaching ${detach_name} from ${DOCKER_NETWORK_NAME} (IP=${endpoint_ip:-NONE}); only ${TARGET_CONTAINER_NAME} may use it"
+        if docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" \
+            "$(jq -cn --arg c "${detach_name}" '{Container:$c, Force:true}')"; then
+            continue
+        fi
+        if docker_api_error_is_not_connected; then
+            log INFO "${detach_name} is already detached from ${DOCKER_NETWORK_NAME}"
+            continue
+        fi
+        if [ "${endpoint_ip}" = "${DOCKER_TARGET_IP}" ]; then
+            LAST_ERROR="${DOCKER_TARGET_IP} on ${DOCKER_NETWORK_NAME} is held by ${detach_name}, which could not be detached: ${DOCKER_API_ERROR}"
+        else
+            LAST_ERROR="Failed to detach ${detach_name} from ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
+        fi
+        return 1
+    done <<< "${entries}"
+}
+
 ensure_container_attached() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
     [[ "${SECURE_MODE}" == "true" ]] && return 0
@@ -2955,10 +3035,23 @@ ensure_container_attached() {
     fi
 
     local inspect
-    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || return 1
+    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || {
+        LAST_ERROR="Failed to inspect ${TARGET_CONTAINER_NAME}"
+        return 1
+    }
 
-    local attached
-    attached=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net] != null')
+    # Docker records the network on the container before it creates the
+    # endpoint and keeps that entry when the connect fails, for example while
+    # another container holds DOCKER_TARGET_IP. Only an entry with an
+    # EndpointID is attached; a stale entry goes straight to connect.
+    local has_entry
+    has_entry=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net] != null')
+    local endpoint_id
+    endpoint_id=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net].EndpointID // empty')
+    local attached="false"
+    if [ "${has_entry}" = "true" ] && [ -n "${endpoint_id}" ]; then
+        attached="true"
+    fi
     local current_ip
     current_ip=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net].IPAddress // empty')
     local current_priority=0
@@ -2992,10 +3085,20 @@ ensure_container_attached() {
 
     if [ "${attached}" = "true" ]; then
         log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (IP=${current_ip:-NONE}, GwPriority=${current_priority})"
-        if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')" >/dev/null; then
-            LAST_ERROR="Failed to disconnect stale ${DOCKER_NETWORK_NAME} endpoint from ${TARGET_CONTAINER_NAME}"
-            return 1
+        if ! docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" \
+            "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')"; then
+            if ! docker_api_error_is_not_connected; then
+                LAST_ERROR="Failed to disconnect stale ${DOCKER_NETWORK_NAME} endpoint from ${TARGET_CONTAINER_NAME}: ${DOCKER_API_ERROR}"
+                return 1
+            fi
+            log INFO "${TARGET_CONTAINER_NAME} is already detached from ${DOCKER_NETWORK_NAME}"
         fi
+    elif [ "${has_entry}" = "true" ]; then
+        log INFO "${TARGET_CONTAINER_NAME} has a ${DOCKER_NETWORK_NAME} entry without an endpoint; reconnecting"
+    fi
+
+    if ! detach_other_docker_network_endpoints; then
+        return 1
     fi
 
     local connect_payload
@@ -3011,8 +3114,8 @@ ensure_container_attached() {
             '{Container:$c, EndpointConfig:{IPAMConfig:{IPv4Address:$ip}}}')
         log INFO "Connecting ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME} (${DOCKER_TARGET_IP}, legacy Engine compatibility mode)"
     fi
-    if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "${connect_payload}" >/dev/null; then
-        LAST_ERROR="Failed to connect ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME}"
+    if ! docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "${connect_payload}"; then
+        LAST_ERROR="Failed to connect ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
         return 1
     fi
 
@@ -3020,6 +3123,12 @@ ensure_container_attached() {
         LAST_ERROR="Failed to verify ${DOCKER_NETWORK_NAME} attachment"
         return 1
     }
+    endpoint_id=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+        '.NetworkSettings.Networks[$net].EndpointID // empty')
+    if [ -z "${endpoint_id}" ]; then
+        LAST_ERROR="Docker did not create a ${DOCKER_NETWORK_NAME} endpoint for ${TARGET_CONTAINER_NAME}"
+        return 1
+    fi
     current_ip=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
         '.NetworkSettings.Networks[$net].IPAddress // empty')
     if [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
