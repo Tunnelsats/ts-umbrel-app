@@ -635,40 +635,41 @@ lightning_impl_label() {
 
 # Without a selected node type, Standard Mode keeps protecting the
 # implementation of the last successful reconcile. The record survives daemon
-# restarts and reboots. A malformed record fails closed until the user selects
-# a node type, which takes precedence and rewrites the record.
+# restarts and reboots. An unreadable or malformed record is ignored with one
+# warning: discovery then protects the running node as on a first start, and
+# the next verified reconcile rewrites the record.
 load_protected_target_state() {
     [ "${PROTECTED_TARGET_STATE_LOADED}" = "false" ] || return 0
 
-    local state
-    local target_impl
-    local target_container
-    local malformed_error="Protected node state is malformed; select the node type under Configure Lightning Node"
+    local state=""
+    local target_impl=""
+    local target_container=""
+    local problem=""
+    PROTECTED_TARGET_STATE_LOADED="true"
     if [ ! -e "${DOCKER_TARGET_STATE_FILE}" ]; then
-        PROTECTED_TARGET_STATE_LOADED="true"
         return 0
     fi
-    state=$(cat "${DOCKER_TARGET_STATE_FILE}" 2>/dev/null) || {
-        LAST_ERROR="Failed to read the protected node state"
-        return 1
-    }
-    if ! printf '%s' "${state}" | jq -e '
+    if ! state=$(cat "${DOCKER_TARGET_STATE_FILE}" 2>/dev/null); then
+        problem="it cannot be read"
+    elif ! printf '%s' "${state}" | jq -e '
         .version == 1 and
         (.target_impl == "lnd" or .target_impl == "cln") and
         (.target_container | type == "string")
     ' >/dev/null 2>&1; then
-        LAST_ERROR="${malformed_error}"
-        return 1
+        problem="it is malformed"
+    else
+        target_impl=$(printf '%s' "${state}" | jq -r '.target_impl')
+        target_container=$(printf '%s' "${state}" | jq -r '.target_container')
+        if [ -n "${target_container}" ] && [[ ! "${target_container}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            problem="it is malformed"
+        fi
     fi
-    target_impl=$(printf '%s' "${state}" | jq -r '.target_impl')
-    target_container=$(printf '%s' "${state}" | jq -r '.target_container')
-    if [ -n "${target_container}" ] && [[ ! "${target_container}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-        LAST_ERROR="${malformed_error}"
-        return 1
+    if [ -n "${problem}" ]; then
+        log WARN "Ignoring ${DOCKER_TARGET_STATE_FILE} because ${problem}; using node discovery until the next verified reconcile rewrites it"
+        return 0
     fi
     PROTECTED_TARGET_IMPL="${target_impl}"
     PROTECTED_TARGET_CONTAINER="${target_container}"
-    PROTECTED_TARGET_STATE_LOADED="true"
     PROTECTED_TARGET_PERSISTED="true"
 }
 
@@ -2999,16 +3000,15 @@ detect_lightning_container() {
     # umbrelOS removes and recreates the Lightning container during an app
     # restart, and protecting the other implementation in that gap would
     # retire the previous node's policy rules. The selected node type wins;
-    # without one, the last protected implementation is kept. Only a first
-    # start without either uses the LND-first discovery order.
+    # without one, the last protected implementation is kept. Only without
+    # either (a first start, or an unreadable record) does the LND-first
+    # discovery order apply.
     local chosen_impl=""
     case "${meta_node}" in
         lnd|cln) chosen_impl="${meta_node}" ;;
     esac
     if [ -z "${chosen_impl}" ]; then
-        if ! load_protected_target_state; then
-            return 1
-        fi
+        load_protected_target_state
         chosen_impl="${PROTECTED_TARGET_IMPL}"
     fi
 

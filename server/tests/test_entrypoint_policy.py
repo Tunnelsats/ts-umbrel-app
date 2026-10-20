@@ -1112,32 +1112,50 @@ if detect_lightning_container; then exit 1; fi
     assert result.returncode == 0, result.stderr
 
 
-def test_malformed_protected_node_record_fails_closed_until_a_node_type_is_selected():
+def test_unreadable_protected_node_record_falls_back_to_discovery():
     result = run_bash(
         DOCKER_DETECTION_HARNESS
         + r'''
+# A record that cannot be used counts as no record: discovery protects the
+# running node, as on a first start, and the record is read once per start.
 printf '%s\n' '{"version":1,"target_impl":"eclair","target_container":"eclair_1"}' > "${DOCKER_TARGET_STATE_FILE}"
-RUNNING="[${LND_RUNNING}]"
-if detect_lightning_container; then exit 1; fi
-[[ "${LAST_ERROR}" == "Protected node state is malformed; select the node type under Configure Lightning Node" ]]
-[[ -z "${TARGET_CONTAINER_ID}" ]]
-
-printf '%s\n' '{"version":1,"target_impl":"lnd","target_container":"lnd; rm -rf /"}' > "${DOCKER_TARGET_STATE_FILE}"
-if detect_lightning_container; then exit 1; fi
-[[ "${LAST_ERROR}" == "Protected node state is malformed; select the node type under Configure Lightning Node" ]]
-
-# A selected node type takes precedence, and the next verified reconcile
-# replaces the record.
-printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
 detect_lightning_container
 [[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ -z "${PROTECTED_TARGET_IMPL}" ]]
+RUNNING="[${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+
+# The next verified reconcile rewrites the record.
 record_protected_target
-[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "lnd" ]]
-[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "lightning_lnd_1" ]]
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "cln" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "core-lightning_lightningd_1" ]]
+
+# An unsafe container name and an empty file are ignored the same way.
+restart_daemon_state
+printf '%s\n' '{"version":1,"target_impl":"cln","target_container":"cln; rm -rf /"}' > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ -z "${PROTECTED_TARGET_CONTAINER}" ]]
+restart_daemon_state
+: > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+
+# A selected node type takes precedence and never reads the record.
+restart_daemon_state
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "${PROTECTED_TARGET_STATE_LOADED}" == "false" ]]
 '''
     )
 
     assert result.returncode == 0, result.stderr
+    assert result.stderr.count("because it is malformed; using node discovery") == 3
 
 
 def test_protected_node_is_recorded_only_after_a_verified_reconcile():
