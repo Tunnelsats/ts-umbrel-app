@@ -894,6 +894,7 @@ const STATUS_ERROR_HINTS = {
     k3s_dns_unprotected: 'External DNS protection for your Lightning pod is not active yet, so traffic stays blocked. Check the TunnelSats pod logs and the k3s README.',
     no_wireguard_config: 'No TunnelSats subscription is installed yet. Buy one or import your WireGuard configuration on the Subscribe / Import tab.',
     no_lightning_node: 'TunnelSats cannot reach a Lightning node. Start the Lightning Node or Core Lightning app on your Umbrel, then re-check.',
+    protected_node_not_running: 'Your protected Lightning node is not running. TunnelSats keeps it blocked until it starts. To protect your other Lightning node instead, switch the node type.',
     rules_not_synced: 'TunnelSats has not finished applying its protection rules yet. This can take a moment after a restart. If it does not clear, restart the TunnelSats app from the Umbrel dashboard.',
     dataplane_error: 'The TunnelSats background service reported this problem while protecting your node. Traffic stays blocked until it is resolved. Restart the TunnelSats app from the Umbrel dashboard, then re-check. If it keeps happening, open an issue and include the TunnelSats logs (see the FAQ).',
     daemon_unavailable: 'The TunnelSats background service is not responding, so the dashboard cannot read your protection status. Restart the TunnelSats app from the Umbrel dashboard, then re-check.',
@@ -906,6 +907,29 @@ function createUiElement(tag, className, text) {
     if (className) element.className = className;
     if (text !== undefined && text !== null) element.textContent = String(text);
     return element;
+}
+
+const LIGHTNING_IMPL_NAMES = { lnd: 'LND', cln: 'Core Lightning' };
+
+function knownLightningImpl(status) {
+    const impl = status && typeof status === 'object' ? status.target_impl : null;
+    return impl === 'lnd' || impl === 'cln' ? impl : null;
+}
+
+function otherLightningImpl(impl) {
+    if (impl === 'lnd') return 'cln';
+    if (impl === 'cln') return 'lnd';
+    return null;
+}
+
+// Hints that name the protected node are built from the status payload.
+function statusHintText(code, status) {
+    const impl = knownLightningImpl(status);
+    if (code === 'protected_node_not_running' && impl) {
+        const otherName = LIGHTNING_IMPL_NAMES[otherLightningImpl(impl)];
+        return `Your protected node (${LIGHTNING_IMPL_NAMES[impl]}) is not running. TunnelSats keeps it blocked until it starts. To protect ${otherName} instead, switch the node type.`;
+    }
+    return STATUS_ERROR_HINTS[code] || STATUS_ERROR_HINTS.dataplane_error;
 }
 
 function createCopyButton(value, label) {
@@ -1250,11 +1274,11 @@ function renderAnnouncementDiagnostics(container, data, diagnostics, ctx) {
     container.classList.remove('hidden');
 }
 
-function renderStatusHelp(container, code) {
+function renderStatusHelp(container, code, status) {
     const panel = createUiElement('div', 'ts-diag-panel ts-diag-panel-generic');
     panel.id = 'status-help-panel';
     panel.dataset.code = String(code || '');
-    panel.appendChild(createUiElement('p', 'ts-diag-text', STATUS_ERROR_HINTS[code] || STATUS_ERROR_HINTS.dataplane_error));
+    panel.appendChild(createUiElement('p', 'ts-diag-text', statusHintText(code, status)));
     const actions = createUiElement('div', 'ts-diag-actions');
     if (code === 'session_expired') {
         const reload = createUiElement('button', 'ts-btn ts-btn-primary', 'Reload page');
@@ -1269,6 +1293,16 @@ function renderStatusHelp(container, code) {
         subscribe.type = 'button';
         subscribe.id = 'btn-open-subscribe';
         actions.appendChild(subscribe);
+    }
+    if (code === 'protected_node_not_running') {
+        // Opens Configure Lightning Node with the other implementation preselected.
+        // Nothing changes until the user confirms there with Configure Node.
+        const switchNode = createUiElement('button', 'ts-btn ts-btn-secondary', 'Switch node type');
+        switchNode.type = 'button';
+        switchNode.id = 'btn-switch-node-type';
+        const otherImpl = otherLightningImpl(knownLightningImpl(status));
+        if (otherImpl) switchNode.dataset.impl = otherImpl;
+        actions.appendChild(switchNode);
     }
     actions.appendChild(createFaqLink('faq-3', 'How to check status and logs'));
     panel.appendChild(actions);
@@ -1610,7 +1644,7 @@ async function fetchStatus() {
                     targetImpl
                 });
             } else if (dataplaneError) {
-                renderStatusHelp(routingDiagnostics, statusCode);
+                renderStatusHelp(routingDiagnostics, statusCode, data);
             } else {
                 clearStatusHelp(routingDiagnostics);
             }
@@ -1627,6 +1661,9 @@ async function fetchStatus() {
             } else if (statusCode === 'no_lightning_node') {
                 badgeState = BADGE_STATES.notFound;
                 if (txtRoutingStatus) txtRoutingStatus.textContent = "No Nodes Detected";
+            } else if (statusCode === 'protected_node_not_running') {
+                badgeState = BADGE_STATES.notFound;
+                if (txtRoutingStatus) txtRoutingStatus.textContent = `Waiting for ${LIGHTNING_IMPL_NAMES[knownLightningImpl(data)] || 'Lightning Node'}`;
             } else {
                 badgeState = BADGE_STATES.offline;
                 if (txtRoutingStatus) txtRoutingStatus.textContent = "Dataplane Blocked";
@@ -3169,6 +3206,15 @@ function handleDocumentClick(e) {
     if (e.target.closest('#btn-open-subscribe')) {
         e.preventDefault();
         switchTab('buy');
+        return;
+    }
+
+    const switchNodeBtn = e.target.closest('#btn-switch-node-type');
+    if (switchNodeBtn) {
+        e.preventDefault();
+        const impl = switchNodeBtn.dataset ? switchNodeBtn.dataset.impl : '';
+        if (impl === 'lnd' || impl === 'cln') setNodeType(impl, false);
+        switchTab('import');
         return;
     }
 

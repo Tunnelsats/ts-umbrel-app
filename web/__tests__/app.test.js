@@ -2415,6 +2415,55 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('view-buy').classList.contains('hidden')).toBe(false);
     });
 
+    function waitingStatus(targetImpl, error) {
+        return {
+            vpn_active: true, wg_status: 'Connected', configs_found: [], secure_mode: false,
+            lnd_detected: targetImpl !== 'lnd', cln_detected: targetImpl !== 'cln',
+            lnd_routing_active: true, cln_routing_active: true,
+            target_impl: targetImpl, target_switch_pending: false, rules_synced: false,
+            last_error: error, last_error_code: 'protected_node_not_running',
+            announcement_diagnostics: []
+        };
+    }
+
+    test('a stopped protected LND is explained and never shown as protected', async () => {
+        const error = 'Waiting for the protected node to start: LND (lightning_lnd_1)';
+        mockStatus(waitingStatus('lnd', error));
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+        expect(document.getElementById('badge-routing').textContent).toBe('Not Found');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Waiting for LND');
+        expect(document.getElementById('txt-routing-error').textContent).toBe(error);
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('protected_node_not_running');
+        expect(help.querySelector('.ts-diag-text').textContent).toBe(
+            'Your protected node (LND) is not running. TunnelSats keeps it blocked until it starts. To protect Core Lightning instead, switch the node type.'
+        );
+        expect(help.querySelector('#btn-recheck-status')).toBeTruthy();
+
+        // The shortcut only preselects the other node; nothing changes until Configure Node.
+        global.fetch.mockClear();
+        const switchNode = document.getElementById('btn-switch-node-type');
+        expect(switchNode.textContent).toBe('Switch node type');
+        expect(switchNode.dataset.impl).toBe('cln');
+        switchNode.click();
+        expect(document.getElementById('view-import').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('node-type-selected').value).toBe('cln');
+        expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/api/local/configure-node'))).toBe(false);
+    });
+
+    test('a stopped protected Core Lightning names the node and offers LND', async () => {
+        mockStatus(waitingStatus('cln', 'Waiting for the protected node to start: Core Lightning'));
+        await window.fetchStatus();
+
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Waiting for Core Lightning');
+        expect(document.querySelector('#status-help-panel .ts-diag-text').textContent).toBe(
+            'Your protected node (Core Lightning) is not running. TunnelSats keeps it blocked until it starts. To protect LND instead, switch the node type.'
+        );
+        expect(document.getElementById('btn-switch-node-type').dataset.impl).toBe('lnd');
+    });
+
     test('other daemon errors keep the raw text and add plain-language guidance', async () => {
         const error = 'k3s: Pod co-location required; TunnelSats node=worker-a, LND pod=lightning/lnd-0 node=worker-b';
         mockStatus({
