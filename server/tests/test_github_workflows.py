@@ -51,11 +51,15 @@ def test_dependabot_auto_merge_runs_on_pull_request_for_dependabot_only():
         "pull_request": {"types": ["opened", "synchronize", "reopened"]}
     }
 
-    # Approve, exemption status and auto-merge need these scopes. Without
-    # them a Dependabot run on pull_request only has a read-only token.
-    permissions = workflow["permissions"]
-    for scope in ("contents", "pull-requests", "statuses"):
-        assert permissions.get(scope) == "write", scope
+    # Approve, exemption status and auto-merge need exactly these scopes.
+    # Without them a Dependabot run on pull_request only has a read-only
+    # token. A job-level block would replace them, so allow none.
+    assert workflow["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "statuses": "write",
+    }
+    assert "permissions" not in workflow["jobs"]["auto-merge"]
 
     # A second job would inherit the write permissions, so allow only this one.
     assert set(workflow["jobs"]) == {"auto-merge"}
