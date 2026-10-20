@@ -3107,7 +3107,9 @@ resolve_bridge_name() {
 # would otherwise keep DOCKER_TARGET_IP, and a stopped container that still
 # has the network configured would claim its address again when it starts.
 # Endpoints are detached by name with Force, which also removes endpoints
-# whose container no longer exists. Stopped containers are detached by ID.
+# whose container no longer exists. Created and exited containers are
+# detached by ID. Dead containers are skipped: Docker never starts them again
+# and refuses to disconnect them ("marked for removal").
 detach_other_docker_network_endpoints() {
     local entries
     local stopped
@@ -3137,7 +3139,7 @@ detach_other_docker_network_endpoints() {
     if ! stopped=$(printf '%s' "${DOCKER_API_BODY}" | jq -r --arg target "${TARGET_CONTAINER_ID}" --arg net "${DOCKER_NETWORK_NAME}" '
         .[]
         | select(.Id != $target)
-        | select(.State == "created" or .State == "exited" or .State == "dead")
+        | select(.State == "created" or .State == "exited")
         | (.NetworkSettings.Networks[$net] // empty) as $endpoint
         | [.Id, ((.Names[0] // .Id) | ltrimstr("/")), ($endpoint | .IPAMConfig.IPv4Address // .IPAddress // "")]
         | join("|")

@@ -558,6 +558,10 @@ docker_api_with_code() {
         "POST:/networks/docker-tunnelsats/disconnect")
             container=$(printf '%s' "${data}" | jq -r 'if .Force == true then .Container else "unforced:" + .Container end')
             printf 'disconnect:%s\n' "${container}" >> "${EVENTS}"
+            if [ "${container}" = "dead-id" ]; then
+                docker_response "500" "Container dead-id is marked for removal and cannot be connected or disconnected to the network"
+                return 0
+            fi
             docker_response "${DISCONNECT_CODE}" "${DISCONNECT_MESSAGE}"
             ;;
         "POST:/networks/docker-tunnelsats/connect")
@@ -582,11 +586,13 @@ TARGET_BEFORE="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
 NETWORK_CONTAINERS='"target-id":{"Name":"lightning_lnd_1","EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPv4Address":"10.9.9.9/25"},"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.2/25"}'
 # A stopped container that still has the network configured would claim its
 # address again on start. A running container whose entry has no endpoint
-# holds no address, and the target is never detached.
+# holds no address, a dead container never starts again (and Docker refuses
+# to disconnect it), and the target is never detached.
 CONTAINERS_ALL='[
   {"Id":"target-id","Names":["/lightning_lnd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9"}}}},
   {"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPAddress":"10.9.9.2"}}}},
   {"Id":"stopped-id","Names":["/old-lightning_lnd_1"],"State":"exited","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"dead-id","Names":["/1a2b3c4d5e6f_lightning_lnd_1"],"State":"dead","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"EndpointID":"","IPAddress":""}}}},
   {"Id":"stale-id","Names":["/other_app_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.3"},"EndpointID":"","IPAddress":""}}}},
   {"Id":"unrelated-id","Names":["/bitcoin_bitcoind_1"],"State":"exited","NetworkSettings":{"Networks":{"umbrel_main_network":{"EndpointID":"","IPAddress":""}}}}
 ]'
