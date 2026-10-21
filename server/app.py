@@ -1007,10 +1007,14 @@ STATUS_ERROR_ANNOUNCEMENT_UNVERIFIED = "announcement_unverified"
 STATUS_ERROR_K3S_DNS_UNPROTECTED = "k3s_dns_unprotected"
 STATUS_ERROR_NO_WIREGUARD_CONFIG = "no_wireguard_config"
 STATUS_ERROR_NO_LIGHTNING_NODE = "no_lightning_node"
+STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING = "protected_node_not_running"
 STATUS_ERROR_DATAPLANE = "dataplane_error"
 _DATAPLANE_ERROR_CODE_PREFIXES = (
     ("No WireGuard config found", STATUS_ERROR_NO_WIREGUARD_CONFIG),
     ("SecureMode: No Lightning node detected", STATUS_ERROR_NO_LIGHTNING_NODE),
+    # Standard Mode keeps the protected node blocked while it is not running
+    # instead of switching to the other implementation (issue #173).
+    ("Waiting for the protected node to start", STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING),
 )
 
 _SERVER_IP_CACHE_TTL_SECONDS = 60.0

@@ -51,9 +51,9 @@ sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.ym
 
 ### 4. Can I tunnel both LND and Core-Lightning (CLN) simultaneously?
 **No.** TunnelSats routes traffic for exactly **one** Lightning node at a time.
-1. **Priority:** If both are running, TunnelSats will prioritize LND.
-2. **Switching:** If you stop LND and start CLN, the daemon will automatically detect the change and reroute the tunnel to CLN.
-3. **Warning:** Starting a second node while one is already tunneled may cause an IP conflict in Docker. Always stop one before starting the other.
+1. **Which node:** TunnelSats protects the node type selected under **Configure Lightning Node**. Without a selection, standard mode keeps the node it protected last (LND if both are running on the first start), and Secure Mode prefers LND when both are running.
+2. **Switching:** To protect the other node, select it under **Configure Lightning Node** and click **Configure Node**. In standard mode, TunnelSats never switches on its own: while the protected node is stopped or restarting, it stays blocked and the dashboard shows **Waiting for LND** (or Core Lightning) until it runs again.
+3. **Both installed:** Both apps can run side by side. In standard mode, TunnelSats attaches only the protected node to its Docker network and detaches any other container from it.
 
 ### 5. Why does CLN use port 9736 internally?
 When TunnelSats detects CLN, it handles two distinct ports:

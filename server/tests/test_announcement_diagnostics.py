@@ -665,6 +665,7 @@ class TestStatusDiagnostics:
     @pytest.mark.parametrize('daemon_error,expected_code', [
         ('No WireGuard config found in /data', 'no_wireguard_config'),
         ('SecureMode: No Lightning node detected (probed 10.21.21.9 and 10.21.21.96)', 'no_lightning_node'),
+        ('Waiting for the protected node to start: LND (lightning_lnd_1)', 'protected_node_not_running'),
         ('Failed to bring up WireGuard interface tunnelsatsv2', 'dataplane_error'),
     ])
     def test_daemon_errors_get_stable_codes(self, client, daemon_error, expected_code):
@@ -698,6 +699,42 @@ class TestStatusDiagnostics:
 
         assert payload['last_error'] == app_module.TARGET_SWITCH_PENDING_ERROR
         assert payload['last_error_code'] == 'target_switch_pending'
+
+    @pytest.mark.parametrize('meta_node_type', ['lnd', None])
+    def test_waiting_for_the_protected_node_keeps_it_as_the_target(self, client, meta_node_type):
+        """Issue #173: while LND restarts, Core Lightning runs but LND stays the protected node."""
+        waiting_error = 'Waiting for the protected node to start: LND (lightning_lnd_1)'
+        meta = {'vpnPort': PORT, 'serverDomain': SERVER}
+        if meta_node_type:
+            meta['nodeType'] = meta_node_type
+        cln_container = [{
+            'Names': ['/core-lightning_lightningd_1'],
+            'Id': 'cln1',
+            'NetworkSettings': {'Networks': {'main': {'IPAddress': '10.21.21.96'}}},
+        }]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cln_path = os.path.join(tmp_dir, 'config')
+            _write(cln_path, 'network=bitcoin\n')
+            _write(os.path.join(tmp_dir, app_module.META_FILE), json.dumps(meta))
+            with patch('app.DATA_DIR', tmp_dir), \
+                    patch('app.LND_CONFIG_PATH', os.path.join(tmp_dir, 'missing-lnd.conf')), \
+                    patch('app.CLN_CONFIG_PATH', cln_path), \
+                    patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                    patch('app._get_wireguard_state', return_value=('Connected', '')), \
+                    patch('app.list_containers', return_value=cln_container), \
+                    patch('app.read_dataplane_state', return_value=_dataplane(
+                        target_impl='lnd', target_container='', rules_synced=False,
+                        last_error=waiting_error)), \
+                    patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+                payload = client.get('/api/local/status').get_json()
+
+        assert payload['cln_detected'] is True
+        assert payload['lnd_detected'] is False
+        assert payload['target_impl'] == 'lnd'
+        assert payload['target_switch_pending'] is False
+        assert payload['rules_synced'] is False
+        assert payload['last_error'] == waiting_error
+        assert payload['last_error_code'] == 'protected_node_not_running'
 
 
 # --- Cycle 4: configure-node responses ------------------------------------------------------

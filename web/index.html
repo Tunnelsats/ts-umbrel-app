@@ -800,15 +800,20 @@
                                 <p><strong class="text-white">No.</strong> TunnelSats routes traffic for exactly <strong
                                         class="text-tsyellow">one</strong> Lightning node at a time.</p>
                                 <ol class="list-decimal pl-5 space-y-2 marker:text-gray-500 font-semibold">
-                                    <li><strong class="text-white">Priority:</strong> <span class="font-normal">If both
-                                            are running, TunnelSats will prioritize LND.</span></li>
-                                    <li><strong class="text-white">Switching:</strong> <span class="font-normal">If you
-                                            stop LND and start CLN, the daemon will automatically detect the change and
-                                            reroute the tunnel to CLN.</span></li>
-                                    <li><strong class="text-red-400">Warning:</strong> <span
-                                            class="font-normal">Starting a second node while one is already tunneled may
-                                            cause an IP conflict in Docker. Always stop one before starting the
-                                            other.</span></li>
+                                    <li><strong class="text-white">Which node:</strong> <span class="font-normal">TunnelSats
+                                            protects the node type selected under Configure Lightning Node. Without a
+                                            selection, standard mode keeps the node it protected last (LND if both are
+                                            running on the first start), and Secure Mode prefers LND when both are
+                                            running.</span></li>
+                                    <li><strong class="text-white">Switching:</strong> <span class="font-normal">To protect
+                                            the other node, select it under Configure Lightning Node and click Configure
+                                            Node. In standard mode, TunnelSats never switches on its own: while the
+                                            protected node is stopped or restarting, it stays blocked and the dashboard
+                                            shows "Waiting for LND" (or Core Lightning) until it runs again.</span></li>
+                                    <li><strong class="text-white">Both installed:</strong> <span
+                                            class="font-normal">Both apps can run side by side. In standard mode,
+                                            TunnelSats attaches only the protected node to its Docker network and
+                                            detaches any other container from it.</span></li>
                                 </ol>
                             </div>
                         </div>

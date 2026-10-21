@@ -17,9 +17,12 @@ TUNNELSATS_META_PATH="${TUNNELSATS_META_PATH:-/data/tunnelsats-meta.json}"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
+UMBREL_LND_IP="${UMBREL_LND_IP:-10.21.21.9}"
+UMBREL_CLN_IP="${UMBREL_CLN_IP:-10.21.21.96}"
 DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
 DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
+DOCKER_TARGET_STATE_FILE="${DOCKER_TARGET_STATE_FILE:-/data/tunnelsats-docker-target.json}"
 IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_FILE:-/data/tunnelsats-ipv6-policy-sources.json}"
 K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE_FILE:-/data/tunnelsats-k3s-policy-state.json}"
 DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_FILE:-/data/tunnelsats-decommissioned.json}"
@@ -237,6 +240,17 @@ LAST_RECONCILE_EPOCH=0
 TARGET_CONTAINER_ID=""
 TARGET_CONTAINER_NAME=""
 TARGET_IMPL=""
+# Standard Mode: the implementation (lnd/cln) and container that the last
+# successful reconcile protected, persisted in DOCKER_TARGET_STATE_FILE.
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
+DOCKER_API_BODY=""
+DOCKER_API_CODE=""
+DOCKER_API_ERROR=""
 TARGET_IPV4_ENDPOINTS=()
 MANAGED_DOCKER_IPV4_ENDPOINTS=()
 TARGET_IPV6_ADDRESSES=()
@@ -441,6 +455,35 @@ docker_api_with_code() {
     fi
 }
 
+# Docker API call that keeps Docker's answer. Sets DOCKER_API_BODY,
+# DOCKER_API_CODE and, on failure, DOCKER_API_ERROR (Docker's message or the
+# HTTP status). Succeeds only on HTTP 2xx.
+docker_api_request() {
+    local response
+    response=$(docker_api_with_code "$@") || true
+    DOCKER_API_BODY="${response%HTTPSTATUS:*}"
+    DOCKER_API_CODE="${response##*HTTPSTATUS:}"
+    if [[ ! "${DOCKER_API_CODE}" =~ ^[0-9]{3}$ ]]; then
+        DOCKER_API_CODE="000"
+    fi
+    DOCKER_API_ERROR=""
+    if [[ "${DOCKER_API_CODE}" =~ ^2[0-9]{2}$ ]]; then
+        return 0
+    fi
+    DOCKER_API_ERROR=$(printf '%s' "${DOCKER_API_BODY}" | jq -r '.message // empty' 2>/dev/null || true)
+    DOCKER_API_ERROR="${DOCKER_API_ERROR//$'\n'/ }"
+    if [ -z "${DOCKER_API_ERROR}" ]; then
+        DOCKER_API_ERROR="HTTP ${DOCKER_API_CODE}"
+    fi
+    return 1
+}
+
+# A disconnect that Docker rejects because the endpoint is already gone.
+docker_api_error_is_not_connected() {
+    { [ "${DOCKER_API_CODE}" = "404" ] || [ "${DOCKER_API_CODE}" = "500" ]; } && \
+        [[ "${DOCKER_API_ERROR}" == *"is not connected"* ]]
+}
+
 detect_docker_gw_priority_support() {
     [[ "${DOCKER_GW_PRIORITY_SUPPORTED}" != "unknown" ]] && return 0
 
@@ -584,6 +627,109 @@ persist_managed_docker_policy_state() {
         LAST_ERROR="Failed to persist Docker policy ownership state"
         return 1
     fi
+}
+
+lightning_impl_label() {
+    if [ "${1:-}" = "cln" ]; then
+        printf '%s' "Core Lightning"
+    else
+        printf '%s' "LND"
+    fi
+}
+
+# Without a selected node type, Standard Mode keeps protecting the
+# implementation of the last successful reconcile. The record survives daemon
+# restarts and reboots. An unreadable or malformed record is ignored with one
+# warning: discovery then protects the running node as on a first start, and
+# the next verified reconcile rewrites the record.
+load_protected_target_state() {
+    [ "${PROTECTED_TARGET_STATE_LOADED}" = "false" ] || return 0
+
+    local state=""
+    local target_impl=""
+    local target_container=""
+    local problem=""
+    PROTECTED_TARGET_STATE_LOADED="true"
+    if [ ! -e "${DOCKER_TARGET_STATE_FILE}" ]; then
+        return 0
+    fi
+    if ! state=$(cat "${DOCKER_TARGET_STATE_FILE}" 2>/dev/null); then
+        problem="it cannot be read"
+    elif ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.target_impl == "lnd" or .target_impl == "cln") and
+        (.target_container | type == "string")
+    ' >/dev/null 2>&1; then
+        problem="it is malformed"
+    else
+        target_impl=$(printf '%s' "${state}" | jq -r '.target_impl')
+        target_container=$(printf '%s' "${state}" | jq -r '.target_container')
+        if [ -n "${target_container}" ] && [[ ! "${target_container}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            problem="it is malformed"
+        fi
+    fi
+    if [ -n "${problem}" ]; then
+        log WARN "Ignoring ${DOCKER_TARGET_STATE_FILE} because ${problem}; using node discovery until the next verified reconcile rewrites it"
+        return 0
+    fi
+    PROTECTED_TARGET_IMPL="${target_impl}"
+    PROTECTED_TARGET_CONTAINER="${target_container}"
+    PROTECTED_TARGET_PERSISTED="true"
+}
+
+persist_protected_target_state() {
+    local state_dir
+    local state_tmp
+
+    state_dir="${DOCKER_TARGET_STATE_FILE%/*}"
+    [ "${state_dir}" != "${DOCKER_TARGET_STATE_FILE}" ] || state_dir="."
+    if ! mkdir -p "${state_dir}"; then
+        LAST_ERROR="Failed to create the protected node state directory"
+        return 1
+    fi
+    state_tmp=$(mktemp "${DOCKER_TARGET_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary protected node state"
+        return 1
+    }
+    if ! jq -n \
+        --arg target_impl "${PROTECTED_TARGET_IMPL}" \
+        --arg target_container "${PROTECTED_TARGET_CONTAINER}" \
+        '{version:1, target_impl:$target_impl, target_container:$target_container}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${DOCKER_TARGET_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist the protected node state"
+        return 1
+    fi
+}
+
+# Called after a fully verified Standard Mode reconcile. A failed write keeps
+# the record in memory, logs a warning and is retried after the next success.
+record_protected_target() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+    case "${TARGET_IMPL}" in
+        lnd|cln) ;;
+        *) return 0 ;;
+    esac
+    if [ "${PROTECTED_TARGET_PERSISTED}" = "true" ] && \
+       [ "${PROTECTED_TARGET_IMPL}" = "${TARGET_IMPL}" ] && \
+       [ "${PROTECTED_TARGET_CONTAINER}" = "${TARGET_CONTAINER_NAME}" ]; then
+        return 0
+    fi
+
+    local saved_error="${LAST_ERROR}"
+    PROTECTED_TARGET_IMPL="${TARGET_IMPL}"
+    PROTECTED_TARGET_CONTAINER="${TARGET_CONTAINER_NAME}"
+    PROTECTED_TARGET_STATE_LOADED="true"
+    if persist_protected_target_state; then
+        PROTECTED_TARGET_PERSISTED="true"
+        log INFO "Protected node recorded: $(lightning_impl_label "${TARGET_IMPL}") (${TARGET_CONTAINER_NAME})"
+    else
+        PROTECTED_TARGET_PERSISTED="false"
+        log WARN "${LAST_ERROR}; keeping $(lightning_impl_label "${TARGET_IMPL}") as the protected node in memory"
+    fi
+    LAST_ERROR="${saved_error}"
 }
 
 load_managed_ipv6_policy_state() {
@@ -2761,10 +2907,36 @@ detect_k3s_target() {
     return 1
 }
 
+# Prints "<id>|<name>|<impl>" for the first container of the given
+# implementation (lnd or cln) in a /containers/json listing, or nothing.
+pick_running_lightning_container() {
+    local containers="$1"
+    local impl="$2"
+    local pattern='(^|[_-])lnd([_-]|$)'
+    if [ "${impl}" = "cln" ]; then
+        pattern='(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)'
+    fi
+    printf '%s' "${containers}" | jq -r --arg pattern "${pattern}" --arg impl "${impl}" '
+        def cname: (.Names[0] // "") | ltrimstr("/");
+        if type != "array" then error("not a container array") else . end
+        | [ .[]
+            | {id: .Id, name: cname}
+            | select(.name | test($pattern))
+            | select(.name | test("(app|proxy|tor|web|ui)") | not)
+          ]
+        | if length > 0 then .[0] else empty end
+        | "\(.id)|\(.name)|\($impl)"
+    '
+}
+
 detect_lightning_container() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
     TARGET_IPV6_ADDRESSES=()
     TARGET_IPV6_MACS=()
     TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
@@ -2827,56 +2999,90 @@ detect_lightning_container() {
         meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
     fi
 
+    # Standard Mode never switches the protected implementation on its own:
+    # umbrelOS removes and recreates the Lightning container during an app
+    # restart, and protecting the other implementation in that gap would
+    # retire the previous node's policy rules. The selected node type wins;
+    # without one, the last protected implementation is kept. Only without
+    # either (a first start, or an unreadable record) does the LND-first
+    # discovery order apply.
+    local chosen_impl=""
+    case "${meta_node}" in
+        lnd) chosen_impl="lnd" ;;
+        cln|core-lightning) chosen_impl="cln" ;;
+    esac
+    if [ -z "${chosen_impl}" ]; then
+        load_protected_target_state
+        chosen_impl="${PROTECTED_TARGET_IMPL}"
+    fi
+    if [ -n "${chosen_impl}" ]; then
+        TARGET_IMPL="${chosen_impl}"
+        DOCKER_EXPECTED_IMPL="${chosen_impl}"
+        if [ "${PROTECTED_TARGET_IMPL}" = "${chosen_impl}" ]; then
+            DOCKER_EXPECTED_CONTAINER="${PROTECTED_TARGET_CONTAINER}"
+        fi
+    fi
+
     local containers
-    containers=$(docker_api "GET" "/containers/json?all=0") || return 1
+    containers=$(docker_api "GET" "/containers/json?all=0") || {
+        LAST_ERROR="Unable to list running Docker containers"
+        return 1
+    }
 
     local pick=""
-    if [ "${meta_node}" = "cln" ]; then
-        pick=$(echo "${containers}" | jq -r '
-            def cname: (.Names[0] // "") | ltrimstr("/");
-            [ .[]
-              | {id: .Id, name: cname}
-              | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
-              | select(.name | test("(app|proxy|tor|web|ui)") | not)
-            ]
-            | if length > 0 then .[0] else empty end
-            | "\(.id)|\(.name)|cln"
-        ')
-        if [ -z "${pick}" ]; then
-            pick=$(echo "${containers}" | jq -r '
-                def cname: (.Names[0] // "") | ltrimstr("/");
-                [ .[]
-                  | {id: .Id, name: cname}
-                  | select(.name | test("(^|[_-])lnd([_-]|$)"))
-                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
-                ]
-                | if length > 0 then .[0] else empty end
-                | "\(.id)|\(.name)|lnd"
-            ')
+    if [ -n "${chosen_impl}" ]; then
+        if ! pick=$(pick_running_lightning_container "${containers}" "${chosen_impl}" 2>/dev/null); then
+            LAST_ERROR="Unable to parse Docker containers"
+            return 1
         fi
     else
-        pick=$(echo "${containers}" | jq -r '
-            def cname: (.Names[0] // "") | ltrimstr("/");
-            [ .[]
-              | {id: .Id, name: cname}
-              | select(.name | test("(^|[_-])lnd([_-]|$)"))
-              | select(.name | test("(app|proxy|tor|web|ui)") | not)
-            ]
-            | if length > 0 then .[0] else empty end
-            | "\(.id)|\(.name)|lnd"
-        ')
-        if [ -z "${pick}" ]; then
-            pick=$(echo "${containers}" | jq -r '
-                def cname: (.Names[0] // "") | ltrimstr("/");
-                [ .[]
-                  | {id: .Id, name: cname}
-                  | select(.name | test("(^|[_-])(core-lightning|clightning|lightningd)([_-]|$)"))
-                  | select(.name | test("(app|proxy|tor|web|ui)") | not)
-                ]
-                | if length > 0 then .[0] else empty end
-                | "\(.id)|\(.name)|cln"
-            ')
+        if ! pick=$(pick_running_lightning_container "${containers}" "lnd" 2>/dev/null); then
+            LAST_ERROR="Unable to parse Docker containers"
+            return 1
         fi
+        if [ -z "${pick}" ]; then
+            if ! pick=$(pick_running_lightning_container "${containers}" "cln" 2>/dev/null); then
+                LAST_ERROR="Unable to parse Docker containers"
+                return 1
+            fi
+            if [ -n "${pick}" ]; then
+                # Before selecting Core Lightning on a first start, check
+                # whether an LND container exists in any state. When both
+                # implementations are present and LND is stopped or restarting,
+                # wait for LND instead of recording Core Lightning.
+                local all_containers
+                local existing_lnd
+                all_containers=$(docker_api "GET" "/containers/json?all=1") || {
+                    LAST_ERROR="Unable to list Docker containers"
+                    return 1
+                }
+                if ! existing_lnd=$(pick_running_lightning_container "${all_containers}" "lnd" 2>/dev/null); then
+                    LAST_ERROR="Unable to parse Docker containers"
+                    return 1
+                fi
+                if [ -n "${existing_lnd}" ]; then
+                    local existing_lnd_rest="${existing_lnd#*|}"
+                    chosen_impl="lnd"
+                    TARGET_IMPL="lnd"
+                    DOCKER_EXPECTED_IMPL="lnd"
+                    DOCKER_EXPECTED_CONTAINER="${existing_lnd_rest%%|*}"
+                    pick=""
+                fi
+            fi
+        fi
+    fi
+
+    if [ -n "${chosen_impl}" ] && [ -z "${pick}" ]; then
+        # Fail closed through the failed-detection path, which keeps the
+        # fallback blackholes, until the chosen node runs again.
+        local waiting_for
+        waiting_for="$(lightning_impl_label "${chosen_impl}")"
+        if [ -n "${DOCKER_EXPECTED_CONTAINER}" ]; then
+            waiting_for+=" (${DOCKER_EXPECTED_CONTAINER})"
+        fi
+        TARGET_IMPL="${chosen_impl}"
+        LAST_ERROR="Waiting for the protected node to start: ${waiting_for}"
+        return 1
     fi
 
     if [ -z "${pick}" ]; then
@@ -2887,6 +3093,8 @@ detect_lightning_container() {
     local rest="${pick#*|}"
     TARGET_CONTAINER_NAME="${rest%%|*}"
     TARGET_IMPL="${rest##*|}"
+    DOCKER_EXPECTED_IMPL="${TARGET_IMPL}"
+    DOCKER_EXPECTED_CONTAINER="${TARGET_CONTAINER_NAME}"
     DOCKER_TARGET_IP="${DOCKER_TARGET_IP:-10.9.9.9}"
 
     if [ "${TARGET_IMPL}" = "cln" ]; then
@@ -2947,6 +3155,72 @@ resolve_bridge_name() {
     return 0
 }
 
+# Only the protected target may use docker-tunnelsats. A previous target (for
+# example after the user switched implementations) or an orphaned endpoint
+# would otherwise keep DOCKER_TARGET_IP, and a stopped container that still
+# has the network configured would claim its address again when it starts.
+# Endpoints are detached by name with Force, which also removes endpoints
+# whose container no longer exists. Created and exited containers are
+# detached by ID. Dead containers are skipped: Docker never starts them again
+# and refuses to disconnect them ("marked for removal").
+detach_other_docker_network_endpoints() {
+    local entries
+    local stopped
+    local detach_ref
+    local detach_name
+    local endpoint_ip
+
+    if ! docker_api_request "GET" "/networks/${DOCKER_NETWORK_NAME}"; then
+        LAST_ERROR="Unable to inspect ${DOCKER_NETWORK_NAME} endpoints: ${DOCKER_API_ERROR}"
+        return 1
+    fi
+    if ! entries=$(printf '%s' "${DOCKER_API_BODY}" | jq -r --arg target "${TARGET_CONTAINER_ID}" '
+        (.Containers // {})
+        | to_entries[]
+        | select(.key != $target)
+        | ((.value.Name // "") | if . == "" then null else . end) as $name
+        | [($name // .key), ($name // .key), ((.value.IPv4Address // "") | sub("/.*$"; ""))]
+        | join("|")
+    '); then
+        LAST_ERROR="Unable to parse ${DOCKER_NETWORK_NAME} endpoints"
+        return 1
+    fi
+    if ! docker_api_request "GET" "/containers/json?all=1"; then
+        LAST_ERROR="Unable to list containers configured for ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
+        return 1
+    fi
+    if ! stopped=$(printf '%s' "${DOCKER_API_BODY}" | jq -r --arg target "${TARGET_CONTAINER_ID}" --arg net "${DOCKER_NETWORK_NAME}" '
+        .[]
+        | select(.Id != $target)
+        | select(.State == "created" or .State == "exited")
+        | (.NetworkSettings.Networks[$net] // empty) as $endpoint
+        | [.Id, ((.Names[0] // .Id) | ltrimstr("/")), ($endpoint | .IPAMConfig.IPv4Address // .IPAddress // "")]
+        | join("|")
+    '); then
+        LAST_ERROR="Unable to parse the containers configured for ${DOCKER_NETWORK_NAME}"
+        return 1
+    fi
+
+    while IFS='|' read -r detach_ref detach_name endpoint_ip; do
+        [ -n "${detach_ref}" ] || continue
+        log INFO "Detaching ${detach_name} from ${DOCKER_NETWORK_NAME} (IP=${endpoint_ip:-NONE}); only ${TARGET_CONTAINER_NAME} may use it"
+        if docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" \
+            "$(jq -cn --arg c "${detach_ref}" '{Container:$c, Force:true}')"; then
+            continue
+        fi
+        if docker_api_error_is_not_connected; then
+            log INFO "${detach_name} is already detached from ${DOCKER_NETWORK_NAME}"
+            continue
+        fi
+        if [ "${endpoint_ip}" = "${DOCKER_TARGET_IP}" ]; then
+            LAST_ERROR="${DOCKER_TARGET_IP} on ${DOCKER_NETWORK_NAME} is held by ${detach_name}, which could not be detached: ${DOCKER_API_ERROR}"
+        else
+            LAST_ERROR="Failed to detach ${detach_name} from ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
+        fi
+        return 1
+    done <<< "${entries}"$'\n'"${stopped}"
+}
+
 ensure_container_attached() {
     [[ "${K3S_MODE}" == "true" ]] && return 0
     [[ "${SECURE_MODE}" == "true" ]] && return 0
@@ -2955,10 +3229,23 @@ ensure_container_attached() {
     fi
 
     local inspect
-    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || return 1
+    inspect=$(docker_api "GET" "/containers/${TARGET_CONTAINER_ID}/json") || {
+        LAST_ERROR="Failed to inspect ${TARGET_CONTAINER_NAME}"
+        return 1
+    }
 
-    local attached
-    attached=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net] != null')
+    # Docker records the network on the container before it creates the
+    # endpoint and keeps that entry when the connect fails, for example while
+    # another container holds DOCKER_TARGET_IP. Only an entry with an
+    # EndpointID is attached; a stale entry goes straight to connect.
+    local has_entry
+    has_entry=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net] != null')
+    local endpoint_id
+    endpoint_id=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net].EndpointID // empty')
+    local attached="false"
+    if [ "${has_entry}" = "true" ] && [ -n "${endpoint_id}" ]; then
+        attached="true"
+    fi
     local current_ip
     current_ip=$(echo "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" '.NetworkSettings.Networks[$net].IPAddress // empty')
     local current_priority=0
@@ -2984,6 +3271,12 @@ ensure_container_attached() {
         fi
     fi
 
+    # docker-tunnelsats stays exclusive to the target, also while the target
+    # is already attached correctly.
+    if ! detach_other_docker_network_endpoints; then
+        return 1
+    fi
+
     if [ "${attached}" = "true" ] && [ "${current_ip}" = "${DOCKER_TARGET_IP}" ] && \
        { [ "${DOCKER_GW_PRIORITY_SUPPORTED}" != "true" ] || [ "${current_priority}" -eq "${desired_priority}" ]; }; then
         refresh_docker_target_endpoints
@@ -2992,10 +3285,16 @@ ensure_container_attached() {
 
     if [ "${attached}" = "true" ]; then
         log INFO "Disconnecting ${TARGET_CONTAINER_NAME} from ${DOCKER_NETWORK_NAME} (IP=${current_ip:-NONE}, GwPriority=${current_priority})"
-        if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')" >/dev/null; then
-            LAST_ERROR="Failed to disconnect stale ${DOCKER_NETWORK_NAME} endpoint from ${TARGET_CONTAINER_NAME}"
-            return 1
+        if ! docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/disconnect" \
+            "$(jq -cn --arg c "${TARGET_CONTAINER_ID}" '{Container:$c, Force:true}')"; then
+            if ! docker_api_error_is_not_connected; then
+                LAST_ERROR="Failed to disconnect stale ${DOCKER_NETWORK_NAME} endpoint from ${TARGET_CONTAINER_NAME}: ${DOCKER_API_ERROR}"
+                return 1
+            fi
+            log INFO "${TARGET_CONTAINER_NAME} is already detached from ${DOCKER_NETWORK_NAME}"
         fi
+    elif [ "${has_entry}" = "true" ]; then
+        log INFO "${TARGET_CONTAINER_NAME} has a ${DOCKER_NETWORK_NAME} entry without an endpoint; reconnecting"
     fi
 
     local connect_payload
@@ -3011,8 +3310,8 @@ ensure_container_attached() {
             '{Container:$c, EndpointConfig:{IPAMConfig:{IPv4Address:$ip}}}')
         log INFO "Connecting ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME} (${DOCKER_TARGET_IP}, legacy Engine compatibility mode)"
     fi
-    if ! docker_api "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "${connect_payload}" >/dev/null; then
-        LAST_ERROR="Failed to connect ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME}"
+    if ! docker_api_request "POST" "/networks/${DOCKER_NETWORK_NAME}/connect" "${connect_payload}"; then
+        LAST_ERROR="Failed to connect ${TARGET_CONTAINER_NAME} to ${DOCKER_NETWORK_NAME}: ${DOCKER_API_ERROR}"
         return 1
     fi
 
@@ -3020,6 +3319,12 @@ ensure_container_attached() {
         LAST_ERROR="Failed to verify ${DOCKER_NETWORK_NAME} attachment"
         return 1
     }
+    endpoint_id=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
+        '.NetworkSettings.Networks[$net].EndpointID // empty')
+    if [ -z "${endpoint_id}" ]; then
+        LAST_ERROR="Docker did not create a ${DOCKER_NETWORK_NAME} endpoint for ${TARGET_CONTAINER_NAME}"
+        return 1
+    fi
     current_ip=$(printf '%s' "${inspect}" | jq -r --arg net "${DOCKER_NETWORK_NAME}" \
         '.NetworkSettings.Networks[$net].IPAddress // empty')
     if [ "${current_ip}" != "${DOCKER_TARGET_IP}" ]; then
@@ -5182,6 +5487,86 @@ ensure_source_blackhole_rule() {
     SOURCE_BLACKHOLE_CHANGED="1"
 }
 
+resolve_expected_docker_impl() {
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    local meta_node=""
+    if [ -f "${TUNNELSATS_META_PATH}" ]; then
+        meta_node="$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    fi
+    case "${meta_node}" in
+        lnd)
+            RESOLVED_EXPECTED_DOCKER_IMPL="lnd"
+            return 0
+            ;;
+        cln|core-lightning)
+            RESOLVED_EXPECTED_DOCKER_IMPL="cln"
+            return 0
+            ;;
+    esac
+
+    if load_protected_target_state; then
+        case "${PROTECTED_TARGET_IMPL:-}" in
+            lnd|cln)
+                RESOLVED_EXPECTED_DOCKER_IMPL="${PROTECTED_TARGET_IMPL}"
+                return 0
+                ;;
+        esac
+    fi
+
+    case "${DOCKER_EXPECTED_IMPL:-${TARGET_IMPL:-}}" in
+        lnd|cln)
+            RESOLVED_EXPECTED_DOCKER_IMPL="${DOCKER_EXPECTED_IMPL:-${TARGET_IMPL:-}}"
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+expected_docker_target_static_ip() {
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
+    resolve_expected_docker_impl || return 1
+    case "${RESOLVED_EXPECTED_DOCKER_IMPL}" in
+        lnd)
+            [ -n "${UMBREL_LND_IP:-}" ] || return 1
+            RESOLVED_EXPECTED_DOCKER_STATIC_IP="${UMBREL_LND_IP}"
+            return 0
+            ;;
+        cln)
+            [ -n "${UMBREL_CLN_IP:-}" ] || return 1
+            RESOLVED_EXPECTED_DOCKER_STATIC_IP="${UMBREL_CLN_IP}"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+ensure_expected_docker_fallback_blackhole() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+
+    local expected_impl=""
+    local static_ip=""
+    local other_static_ip=""
+    expected_docker_target_static_ip || return 0
+    expected_impl="${RESOLVED_EXPECTED_DOCKER_IMPL}"
+    static_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP}"
+    case "${expected_impl}" in
+        lnd) other_static_ip="${UMBREL_CLN_IP:-}" ;;
+        cln) other_static_ip="${UMBREL_LND_IP:-}" ;;
+    esac
+
+    ensure_fallback_blackhole_rule \
+        "${static_ip}" \
+        "Failed to install fallback blackhole rule for expected ${expected_impl} source ${static_ip}" || return 1
+
+    if [ -n "${other_static_ip}" ] && [ "${other_static_ip}" != "${static_ip}" ] && \
+       ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -qE \
+        "^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${other_static_ip//./\\.}(/32)?[[:space:]]+blackhole[[:space:]]*$"; then
+        remove_source_blackhole_rule "${other_static_ip}" "${K3S_BLACKHOLE_RULE_PREF}" || return 1
+    fi
+}
+
 ensure_docker_target_kill_switches() {
     local refresh_error=""
     local entry
@@ -5241,10 +5626,10 @@ ensure_reconcile_kill_switch() {
 
     if [[ "${SECURE_MODE}" == "true" ]]; then
         ensure_source_blackhole_rule \
-            "10.21.21.9" "${KILL_SWITCH_PREF}" \
+            "${UMBREL_LND_IP}" "${KILL_SWITCH_PREF}" \
             "SecureMode: Failed to install LND reconciliation kill switch" || return 1
         ensure_source_blackhole_rule \
-            "10.21.21.96" "${KILL_SWITCH_PREF}" \
+            "${UMBREL_CLN_IP}" "${KILL_SWITCH_PREF}" \
             "SecureMode: Failed to install CLN reconciliation kill switch" || return 1
         return 0
     fi
@@ -5252,6 +5637,10 @@ ensure_reconcile_kill_switch() {
     if ! ensure_source_blackhole_rule \
         "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}" \
         "Failed to install reconciliation kill switch for ${DOCKER_NETWORK_SUBNET}"; then
+        return 1
+    fi
+
+    if ! ensure_expected_docker_fallback_blackhole; then
         return 1
     fi
 
@@ -5789,8 +6178,12 @@ remove_stale_docker_source_policy_rules() {
     local current_subnet
     local source_is_current
     local subnet_is_current
+    local expected_static_ip=""
     local -a current_managed=()
     DOCKER_STALE_POLICY_CHANGED="0"
+
+    expected_docker_target_static_ip 2>/dev/null || true
+    expected_static_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP:-}"
 
     for managed_entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
         IFS='|' read -r managed_source managed_subnet _ <<< "${managed_entry}"
@@ -5812,7 +6205,9 @@ remove_stale_docker_source_policy_rules() {
         if [ "${source_is_current}" = false ]; then
             ip rule del from "${managed_source}" table 51820 pref 32764 >/dev/null 2>&1 || true
             ip rule del from "${managed_source}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
-            ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            if [ -z "${expected_static_ip}" ] || [ "${managed_source}" != "${expected_static_ip}" ]; then
+                ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
             DOCKER_STALE_POLICY_CHANGED="1"
         fi
     done
@@ -8707,7 +9102,7 @@ cleanup_dataplane() {
     else
         # Clean up all potential node target IP routing rules in Secure Mode
         # unconditionally to prevent stale rules across mode toggles.
-        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "${UMBREL_LND_IP}" "${UMBREL_CLN_IP}"; do
             [ -n "${cleanup_ip}" ] || continue
             local cleanup_subnet
             cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
@@ -9187,6 +9582,7 @@ reconcile_once() {
         RULES_SYNCED="true"
     fi
 
+    record_protected_target
     write_state
 
     if [ -n "${request_id}" ]; then
@@ -9699,7 +10095,7 @@ _verify_dataplane_decommissioned_inner() {
             done < <(ip -6 rule show pref "${pref}" 2>/dev/null || true)
         done
     else
-        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "${UMBREL_LND_IP}" "${UMBREL_CLN_IP}"; do
             [ -n "${cleanup_ip}" ] || continue
             remove_source_blackhole_rule "${cleanup_ip}" "${KILL_SWITCH_PREF}" || return 1
             remove_source_blackhole_rule "${cleanup_ip}" "32765" || return 1
@@ -9884,6 +10280,10 @@ decommission_dataplane() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
     TARGET_IPV6_ADDRESSES=()
     TARGET_IPV6_MACS=()
     TARGET_HAS_IPV6_DEFAULT_ROUTE="false"

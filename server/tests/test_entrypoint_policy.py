@@ -16,6 +16,9 @@ def run_bash(script):
         env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "docker-policy-sources.json"
         )
+        env["DOCKER_TARGET_STATE_FILE"] = os.path.join(
+            temp_dir, "docker-target.json"
+        )
         env["IPV6_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "ipv6-policy-sources.json"
         )
@@ -187,7 +190,7 @@ TARGET_CONTAINER_NAME="lnd"
 DOCKER_POLICY_STATE_LOADED="true"
 persist_managed_docker_policy_state() { :; }
 docker_api() {
-    printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0,"GlobalIPv6Address":"2001:db8:21::9","GlobalIPv6PrefixLen":64,"IPv6Gateway":"2001:db8:21::1","MacAddress":"02:42:ac:11:00:09"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100,"GlobalIPv6Address":"","IPv6Gateway":"","MacAddress":"02:42:0a:09:09:09"}}}}'
+    printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0,"GlobalIPv6Address":"2001:db8:21::9","GlobalIPv6PrefixLen":64,"IPv6Gateway":"2001:db8:21::1","MacAddress":"02:42:ac:11:00:09"},"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100,"GlobalIPv6Address":"","IPv6Gateway":"","MacAddress":"02:42:0a:09:09:09"}}}}'
 }
 
 refresh_docker_target_endpoints
@@ -375,20 +378,37 @@ docker_api() {
             ;;
         "GET:/containers/target-id/json")
             if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":251}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"EndpointID":"b6316b274fb724dd4ded4e27d950138fcdf9cda4ef01e07018fe3dab67fff2b0","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":251}}}}'
             else
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":250},"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}}}}'
             fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
+            ;;
+        "GET:/containers/json?all=1")
+            printf '%s' '[]HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/disconnect")
             printf '%s\n' "disconnect" >> "${POLICY_TEST_STATE_FILE}.events"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/connect")
             printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
             printf '%s\n' "connect" >> "${POLICY_TEST_STATE_FILE}.events"
             touch "${POLICY_TEST_STATE_FILE}.connected"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
-        *) return 1 ;;
+        *) printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500' ;;
     esac
 }
 
@@ -422,22 +442,310 @@ docker_api() {
         "GET:/version") printf '%s\n' '{"ApiVersion":"1.47"}' ;;
         "GET:/containers/target-id/json")
             if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"},"docker-tunnelsats":{"IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1"}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"},"docker-tunnelsats":{"EndpointID":"b6316b274fb724dd4ded4e27d950138fcdf9cda4ef01e07018fe3dab67fff2b0","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1"}}}}'
             else
-                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"}}}}'
+                printf '%s\n' '{"NetworkSettings":{"Networks":{"umbrel":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.0.9","IPPrefixLen":16,"Gateway":"10.21.0.1"}}}}'
             fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            printf '%s' '{"Name":"docker-tunnelsats","Containers":{}}HTTPSTATUS:200'
+            ;;
+        "GET:/containers/json?all=1")
+            printf '%s' '[]HTTPSTATUS:200'
             ;;
         "POST:/networks/docker-tunnelsats/connect")
             printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
             touch "${POLICY_TEST_STATE_FILE}.connected"
+            printf '%s' 'HTTPSTATUS:200'
             ;;
-        *) return 1 ;;
+        *) printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500' ;;
     esac
 }
 
 ensure_container_attached
 [[ "$(jq 'has("GwPriority") or (.EndpointConfig | has("GwPriority"))' "${POLICY_TEST_STATE_FILE}.payload")" == "false" ]]
 [[ "${DOCKER_GW_PRIORITY_SUPPORTED}" == "false" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# Fake Docker Engine for ensure_container_attached (issue #173). The target's
+# docker-tunnelsats entry comes from TARGET_BEFORE until a connect succeeds and
+# from TARGET_AFTER afterwards. NETWORK_CONTAINERS is the network's endpoint
+# list. Every request that changes something is logged to EVENTS.
+DOCKER_ATTACH_HARNESS = r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TARGET_CONTAINER_ID="target-id"
+TARGET_CONTAINER_NAME="lightning_lnd_1"
+DOCKER_GW_PRIORITY_SUPPORTED="unknown"
+EVENTS="${POLICY_TEST_STATE_FILE}.events"
+: > "${EVENTS}"
+
+UMBREL_ENDPOINT='"umbrel_main_network":{"EndpointID":"4aeeabca9295c86ebf25223e70a2f0380f15fa9ec92f85fa26447134a35059c1","IPAddress":"10.21.21.9","IPPrefixLen":16,"Gateway":"10.21.0.1","GwPriority":0}'
+PROTECTED_ENDPOINT='"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100}'
+LOW_PRIORITY_ENDPOINT='"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":0}'
+# Docker keeps this entry when a connect fails before the endpoint exists.
+STALE_ENDPOINT='"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"DNSNames":["lightning_lnd_1","target-id"],"NetworkID":"","EndpointID":"","Gateway":"","IPAddress":"","IPPrefixLen":0,"GwPriority":100,"MacAddress":""}'
+NO_ENDPOINT_ID_ENDPOINT='"docker-tunnelsats":{"EndpointID":"","IPAddress":"10.9.9.9","IPPrefixLen":25,"Gateway":"10.9.9.1","GwPriority":100}'
+TARGET_BEFORE="${UMBREL_ENDPOINT}"
+TARGET_AFTER="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
+NETWORK_CONTAINERS=""
+NETWORK_CODE="200"
+CONTAINERS_ALL="[]"
+CONTAINERS_CODE="200"
+DISCONNECT_CODE="200"
+DISCONNECT_MESSAGE=""
+CONNECT_CODE="200"
+CONNECT_MESSAGE=""
+
+docker_api() {
+    case "$1:$2" in
+        "GET:/version") printf '%s\n' '{"ApiVersion":"1.48"}' ;;
+        "GET:/containers/target-id/json")
+            if [ -f "${POLICY_TEST_STATE_FILE}.connected" ]; then
+                printf '{"Id":"target-id","NetworkSettings":{"Networks":{%s}}}\n' "${TARGET_AFTER}"
+            else
+                printf '{"Id":"target-id","NetworkSettings":{"Networks":{%s}}}\n' "${TARGET_BEFORE}"
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_response() {
+    local code="$1"
+    local message="$2"
+    if [ -n "${message}" ]; then
+        jq -cn --arg message "${message}" '{message:$message}' | tr -d '\n'
+    fi
+    printf 'HTTPSTATUS:%s' "${code}"
+}
+
+docker_api_with_code() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    local container
+    case "${method}:${path}" in
+        "GET:/networks/docker-tunnelsats")
+            if [ "${NETWORK_CODE}" != "200" ]; then
+                docker_response "${NETWORK_CODE}" "network inspect failed"
+                return 0
+            fi
+            printf '{"Name":"docker-tunnelsats","Containers":{%s}}HTTPSTATUS:200' "${NETWORK_CONTAINERS}"
+            ;;
+        "GET:/containers/json?all=1")
+            if [ "${CONTAINERS_CODE}" != "200" ]; then
+                docker_response "${CONTAINERS_CODE}" "container list failed"
+                return 0
+            fi
+            printf '%sHTTPSTATUS:200' "${CONTAINERS_ALL}"
+            ;;
+        "POST:/networks/docker-tunnelsats/disconnect")
+            container=$(printf '%s' "${data}" | jq -r 'if .Force == true then .Container else "unforced:" + .Container end')
+            printf 'disconnect:%s\n' "${container}" >> "${EVENTS}"
+            if [ "${container}" = "dead-id" ]; then
+                docker_response "500" "Container dead-id is marked for removal and cannot be connected or disconnected to the network"
+                return 0
+            fi
+            docker_response "${DISCONNECT_CODE}" "${DISCONNECT_MESSAGE}"
+            ;;
+        "POST:/networks/docker-tunnelsats/connect")
+            printf '%s' "${data}" > "${POLICY_TEST_STATE_FILE}.payload"
+            printf 'connect\n' >> "${EVENTS}"
+            if [ "${CONNECT_CODE}" = "200" ]; then
+                touch "${POLICY_TEST_STATE_FILE}.connected"
+            fi
+            docker_response "${CONNECT_CODE}" "${CONNECT_MESSAGE}"
+            ;;
+        *) docker_response "500" "unexpected ${method} ${path}" ;;
+    esac
+}
+'''
+
+
+def test_docker_attach_keeps_a_verified_endpoint_and_detaches_every_other_container():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${PROTECTED_ENDPOINT}"
+NETWORK_CONTAINERS='"target-id":{"Name":"lightning_lnd_1","EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPv4Address":"10.9.9.9/25"},"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.2/25"}'
+# A stopped container that still has the network configured would claim its
+# address again on start. A running container whose entry has no endpoint
+# holds no address, a dead container never starts again (and Docker refuses
+# to disconnect it), and the target is never detached.
+CONTAINERS_ALL='[
+  {"Id":"target-id","Names":["/lightning_lnd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPAddress":"10.9.9.9"}}}},
+  {"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPAddress":"10.9.9.2"}}}},
+  {"Id":"stopped-id","Names":["/old-lightning_lnd_1"],"State":"exited","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"dead-id","Names":["/1a2b3c4d5e6f_lightning_lnd_1"],"State":"dead","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.9"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"stale-id","Names":["/other_app_1"],"State":"running","NetworkSettings":{"Networks":{"docker-tunnelsats":{"IPAMConfig":{"IPv4Address":"10.9.9.3"},"EndpointID":"","IPAddress":""}}}},
+  {"Id":"unrelated-id","Names":["/bitcoin_bitcoind_1"],"State":"exited","NetworkSettings":{"Networks":{"umbrel_main_network":{"EndpointID":"","IPAddress":""}}}}
+]'
+
+ensure_container_attached
+[[ "$(cat "${EVENTS}")" == $'disconnect:core-lightning_lightningd_1\ndisconnect:stopped-id' ]]
+[[ ! -f "${POLICY_TEST_STATE_FILE}.payload" ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Detaching old-lightning_lnd_1 from docker-tunnelsats (IP=10.9.9.9)" in result.stderr
+
+
+def test_docker_attach_treats_entry_without_endpoint_as_detached():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${STALE_ENDPOINT}"
+
+# The B3 state: the entry exists, but it is no attachment.
+[[ "$(docker_api GET /containers/target-id/json | jq -r '.NetworkSettings.Networks["docker-tunnelsats"].EndpointID')" == "" ]]
+
+ensure_container_attached
+[[ "$(cat "${EVENTS}")" == "connect" ]]
+[[ "$(jq -r '.EndpointConfig.IPAMConfig.IPv4Address' "${POLICY_TEST_STATE_FILE}.payload")" == "10.9.9.9" ]]
+[[ "$(jq -r '.EndpointConfig.GwPriority' "${POLICY_TEST_STATE_FILE}.payload")" == "100" ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "docker-tunnelsats entry without an endpoint; reconnecting" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "tolerated"),
+    [
+        ("500", "container target-id is not connected to network docker-tunnelsats", True),
+        ("404", "container target-id is not connected to the network docker-tunnelsats", True),
+        ("500", "failed to remove endpoint: device or resource busy", False),
+        ("404", "network docker-tunnelsats not found", False),
+    ],
+)
+def test_docker_attach_tolerates_only_not_connected_disconnect_errors(code, message, tolerated):
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + f'DISCONNECT_CODE="{code}"\nDISCONNECT_MESSAGE="{message}"\nEXPECT_TOLERATED="{tolerated}"\n'
+        + r'''
+TARGET_BEFORE="${UMBREL_ENDPOINT},${LOW_PRIORITY_ENDPOINT}"
+# Docker may still list the target itself; it is never detached as another endpoint.
+NETWORK_CONTAINERS='"target-id":{"Name":"lightning_lnd_1","EndpointID":"13a69fbb945541b8cb833fc8e0a5eb48d894955168177229946436c5ac63fc8f","IPv4Address":"10.9.9.9/25"}'
+
+if [ "${EXPECT_TOLERATED}" = "True" ]; then
+    ensure_container_attached
+    [[ "$(cat "${EVENTS}")" == $'disconnect:target-id\nconnect' ]]
+else
+    if ensure_container_attached; then exit 1; fi
+    [[ "$(cat "${EVENTS}")" == "disconnect:target-id" ]]
+    [[ "${LAST_ERROR}" == "Failed to disconnect stale docker-tunnelsats endpoint from lightning_lnd_1: ${DISCONNECT_MESSAGE}" ]]
+fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_detaches_every_other_endpoint_before_connecting():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+# Core Lightning holds the protected IP and an endpoint outlived its container.
+NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"10.9.9.9/25"},"ep-1541c6aef9bb26cda145b9b2f91c613492ef15460da91cac79b31cce40881e65":{"Name":"old-lightning","EndpointID":"1541c6aef9bb26cda145b9b2f91c613492ef15460da91cac79b31cce40881e65","IPv4Address":"10.9.9.2/25"}'
+
+ensure_container_attached
+[[ "$(cat "${EVENTS}")" == $'disconnect:core-lightning_lightningd_1\ndisconnect:old-lightning\nconnect' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Detaching core-lightning_lightningd_1 from docker-tunnelsats (IP=10.9.9.9)" in result.stderr
+    assert "Detaching old-lightning from docker-tunnelsats (IP=10.9.9.2)" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("holder_ip", "network_code", "containers_code", "expected_error"),
+    [
+        (
+            "10.9.9.9/25",
+            "200",
+            "200",
+            "10.9.9.9 on docker-tunnelsats is held by core-lightning_lightningd_1, which could not be detached: endpoint is busy",
+        ),
+        (
+            "10.9.9.2/25",
+            "200",
+            "200",
+            "Failed to detach core-lightning_lightningd_1 from docker-tunnelsats: endpoint is busy",
+        ),
+        (
+            "10.9.9.9/25",
+            "500",
+            "200",
+            "Unable to inspect docker-tunnelsats endpoints: network inspect failed",
+        ),
+        (
+            "10.9.9.9/25",
+            "200",
+            "500",
+            "Unable to list containers configured for docker-tunnelsats: container list failed",
+        ),
+    ],
+)
+def test_docker_attach_fails_closed_when_another_endpoint_cannot_be_detached(
+    holder_ip, network_code, containers_code, expected_error
+):
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + f'HOLDER_IP="{holder_ip}"\nNETWORK_CODE="{network_code}"\n'
+        + f'CONTAINERS_CODE="{containers_code}"\nEXPECTED_ERROR="{expected_error}"\n'
+        + r'''
+NETWORK_CONTAINERS='"cln-id":{"Name":"core-lightning_lightningd_1","EndpointID":"4efd2fa106abd32e9e44a8f549ee2391db1810f0c2fdb175260a4cc9f2b9ea13","IPv4Address":"'"${HOLDER_IP}"'"}'
+DISCONNECT_CODE="500"
+DISCONNECT_MESSAGE="endpoint is busy"
+
+if ensure_container_attached; then exit 1; fi
+[[ "${LAST_ERROR}" == "${EXPECTED_ERROR}" ]]
+if grep -qx "connect" "${EVENTS}"; then exit 1; fi
+[[ ! -f "${POLICY_TEST_STATE_FILE}.payload" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_attach_reports_docker_connect_error_and_requires_endpoint_id():
+    result = run_bash(
+        DOCKER_ATTACH_HARNESS
+        + r'''
+CONNECT_CODE="403"
+CONNECT_MESSAGE="Address already in use"
+if ensure_container_attached; then exit 1; fi
+[[ "${LAST_ERROR}" == "Failed to connect lightning_lnd_1 to docker-tunnelsats: Address already in use" ]]
+
+# A connect that reports success but leaves no endpoint is not an attachment.
+: > "${EVENTS}"
+CONNECT_CODE="200"
+CONNECT_MESSAGE=""
+TARGET_AFTER="${UMBREL_ENDPOINT},${NO_ENDPOINT_ID_ENDPOINT}"
+if ensure_container_attached; then exit 1; fi
+[[ "$(cat "${EVENTS}")" == "connect" ]]
+[[ "${LAST_ERROR}" == "Docker did not create a docker-tunnelsats endpoint for lightning_lnd_1" ]]
 '''
     )
 
@@ -657,6 +965,577 @@ write_state() { EVENTS+="state:${RULES_SYNCED}"$'\n'; }
 if reconcile_once "test"; then exit 1; fi
 
 [[ "${EVENTS}" == $'guard:10.21.21.9\nguard:10.21.21.96\ndetect\nguard:10.21.21.9\nguard:10.21.21.96\ncleanup:--keep-tunnel\nguard:10.21.21.9\nguard:10.21.21.96\nstate:false\n' ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# Issue #173: Standard Mode target selection. RUNNING is the /containers/json
+# listing of running containers.
+DOCKER_DETECTION_HARNESS = r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+LND_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"running"}'
+CLN_RUNNING='{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"}'
+CLN_UI_RUNNING='{"Id":"cln-app-id","Names":["/core-lightning_app_1"],"State":"running"}'
+RUNNING="[]"
+ALL_CONTAINERS=""
+ALL_CONTAINERS_FAIL="false"
+
+docker_api() {
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' "${RUNNING}"
+        return 0
+    fi
+    if [ "$1:$2" = "GET:/containers/json?all=1" ]; then
+        if [ "${ALL_CONTAINERS_FAIL}" = "true" ]; then
+            return 1
+        fi
+        printf '%s\n' "${ALL_CONTAINERS:-${RUNNING}}"
+        return 0
+    fi
+    return 1
+}
+
+restart_daemon_state() {
+    PROTECTED_TARGET_IMPL=""
+    PROTECTED_TARGET_CONTAINER=""
+    PROTECTED_TARGET_STATE_LOADED="false"
+    PROTECTED_TARGET_PERSISTED="false"
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
+}
+'''
+
+
+def test_selected_node_type_is_never_switched_while_it_restarts():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# Core Lightning runs while umbrelOS recreates the selected LND container.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+RUNNING="[${CLN_RUNNING},${CLN_UI_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+[[ -z "${TARGET_CONTAINER_NAME}" ]]
+
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${LN_TARGET_PORT}" == "9735" ]]
+
+# The same holds for Core Lightning: no fallback to a running LND.
+printf '%s\n' '{"nodeType":"CLN"}' > "${TUNNELSATS_META_PATH}"
+RUNNING="[${LND_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: Core Lightning" ]]
+[[ "${TARGET_IMPL}" == "cln" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+
+# Detection alone never records a protected node.
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_last_protected_node_is_kept_without_node_type_across_daemon_restarts():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# A verified reconcile protected LND.
+TARGET_IMPL="lnd"
+TARGET_CONTAINER_NAME="lightning_lnd_1"
+record_protected_target
+[[ "$(jq -r '.version' "${DOCKER_TARGET_STATE_FILE}")" == "1" ]]
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "lnd" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "lightning_lnd_1" ]]
+[[ "$(stat -c '%a' "${DOCKER_TARGET_STATE_FILE}")" == "600" ]]
+
+# The daemon restarts while umbrelOS recreates LND and Core Lightning runs.
+restart_daemon_state
+RUNNING="[${CLN_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+
+# A record that cannot be written stays in memory for this daemon.
+restart_daemon_state
+rm -f "${DOCKER_TARGET_STATE_FILE}"
+DOCKER_TARGET_STATE_FILE="${POLICY_TEST_STATE_FILE}.blocked/docker-target.json"
+: > "${POLICY_TEST_STATE_FILE}.blocked"
+LAST_ERROR=""
+TARGET_IMPL="cln"
+TARGET_CONTAINER_NAME="core-lightning_lightningd_1"
+record_protected_target
+[[ -z "${LAST_ERROR}" ]]
+[[ "${PROTECTED_TARGET_IMPL}" == "cln" ]]
+[[ "${PROTECTED_TARGET_PERSISTED}" == "false" ]]
+RUNNING="[${LND_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: Core Lightning (core-lightning_lightningd_1)" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "keeping Core Lightning as the protected node in memory" in result.stderr
+
+
+def test_first_start_without_node_type_or_record_keeps_lnd_first_discovery():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# Only Core Lightning is installed.
+RUNNING="[${CLN_UI_RUNNING},${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+[[ "${TARGET_CONTAINER_NAME}" == "core-lightning_lightningd_1" ]]
+[[ "${TARGET_IMPL}" == "cln" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "cln" ]]
+[[ "${LN_TARGET_PORT}" == "9736" ]]
+
+# Both run and nothing is recorded yet: LND first, as before.
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+
+RUNNING="[${CLN_UI_RUNNING}]"
+if detect_lightning_container; then exit 1; fi
+[[ -z "${LAST_ERROR}" ]]
+[[ -z "${TARGET_IMPL}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "lnd_state",
+    ["created", "restarting", "exited", "paused", "removing"],
+)
+def test_first_start_waits_for_lnd_when_lnd_container_exists_alongside_cln(lnd_state):
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + f'LND_STATE="{lnd_state}"\n'
+        + r'''
+LND_NON_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"'"${LND_STATE}"'"}'
+RUNNING="[${CLN_UI_RUNNING},${CLN_RUNNING}]"
+ALL_CONTAINERS="[${CLN_UI_RUNNING},${CLN_RUNNING},${LND_NON_RUNNING}]"
+
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_CONTAINER}" == "lightning_lnd_1" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+[[ -z "${TARGET_CONTAINER_NAME}" ]]
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+
+# If the all=1 container check fails, discovery fails closed instead of
+# falling back to Core Lightning.
+ALL_CONTAINERS_FAIL="true"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Unable to list Docker containers" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_unreadable_protected_node_record_falls_back_to_discovery():
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + r'''
+# A record that cannot be used counts as no record: discovery protects the
+# running node, as on a first start, and the record is read once per start.
+printf '%s\n' '{"version":1,"target_impl":"eclair","target_container":"eclair_1"}' > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ -z "${PROTECTED_TARGET_IMPL}" ]]
+RUNNING="[${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+
+# The next verified reconcile rewrites the record.
+record_protected_target
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "cln" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "core-lightning_lightningd_1" ]]
+
+# An unsafe container name and an empty file are ignored the same way.
+restart_daemon_state
+printf '%s\n' '{"version":1,"target_impl":"cln","target_container":"cln; rm -rf /"}' > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
+[[ -z "${PROTECTED_TARGET_CONTAINER}" ]]
+restart_daemon_state
+: > "${DOCKER_TARGET_STATE_FILE}"
+RUNNING="[${CLN_RUNNING}]"
+detect_lightning_container
+[[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
+
+# A selected node type takes precedence and never reads the record.
+restart_daemon_state
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "${PROTECTED_TARGET_STATE_LOADED}" == "false" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("because it is malformed; using node discovery") == 3
+
+
+def test_protected_node_is_recorded_only_after_a_verified_reconcile():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+ensure_reconcile_kill_switch() { return 0; }
+detect_lightning_container() {
+    TARGET_CONTAINER_ID="cln-id"
+    TARGET_CONTAINER_NAME="core-lightning_lightningd_1"
+    TARGET_IMPL="cln"
+    DOCKER_TARGET_IP="10.9.9.9"
+}
+ensure_ipv6_containment() { return 0; }
+ipv6_containment_is_synced() { return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { LAST_ERROR="attach failed"; return 1; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED=0; return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED=0; return 0; }
+rules_are_synced() { return 0; }
+remove_reconcile_kill_switch() { return 0; }
+cleanup_dataplane() { :; }
+
+if reconcile_once "periodic"; then exit 1; fi
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+
+ensure_container_attached() { return 0; }
+reconcile_once "periodic"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ -z "${LAST_ERROR}" ]]
+[[ "$(jq -r '.target_impl' "${DOCKER_TARGET_STATE_FILE}")" == "cln" ]]
+[[ "$(jq -r '.target_container' "${DOCKER_TARGET_STATE_FILE}")" == "core-lightning_lightningd_1" ]]
+[[ "$(jq -r '.last_error' "${STATE_FILE}")" == "null" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_waiting_for_the_protected_node_keeps_its_fallback_blackholes():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+DOCKER_LOG="${POLICY_TEST_STATE_FILE}.docker"
+: > "${DOCKER_LOG}"
+
+# The previous reconcile protected LND. umbrelOS is recreating it and only
+# Core Lightning runs right now.
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|100"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|0"
+)
+RULES=$'32500:\tfrom 10.9.9.9 to 10.9.9.0/25 lookup main\n32500:\tfrom 10.21.21.9 to 10.21.0.0/16 lookup main\n32764:\tfrom 10.9.9.9 lookup 51820\n32764:\tfrom 10.21.21.9 lookup 51820\n32765:\tfrom 10.9.9.9 blackhole\n32765:\tfrom 10.21.21.9 blackhole\n'
+
+docker_api() {
+    printf '%s %s\n' "$1" "$2" >> "${DOCKER_LOG}"
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' '[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"]},{"Id":"cln-app-id","Names":["/core-lightning_app_1"]}]'
+        return 0
+    fi
+    return 1
+}
+docker_api_with_code() {
+    printf '%s %s\n' "$1" "$2" >> "${DOCKER_LOG}"
+    printf '%s' '{"message":"unexpected request"}HTTPSTATUS:500'
+}
+remove_tagged_iptables_rules() { :; }
+get_target_subnet() { printf '%s\n' "10.21.0.0/16"; }
+ip() {
+    local spec
+    local pref
+    local line
+    case "$1 $2" in
+        "rule show")
+            if [ "${3:-}" = "pref" ]; then
+                printf '%s' "${RULES}" | grep "^${4}:" || true
+            else
+                printf '%s' "${RULES}"
+            fi
+            return 0
+            ;;
+        "rule add"|"rule del")
+            spec="${*:3}"
+            pref="${spec##* pref }"
+            spec="${spec% pref *}"
+            spec="${spec/ table / lookup }"
+            line="${pref}:"$'\t'"${spec}"
+            if [ "$2" = "add" ]; then
+                RULES+="${line}"$'\n'
+                return 0
+            fi
+            if ! printf '%s' "${RULES}" | grep -qxF -- "${line}"; then
+                return 2
+            fi
+            RULES="$(printf '%s' "${RULES}" | grep -vxF -- "${line}" || true)"$'\n'
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+if reconcile_once "periodic"; then exit 1; fi
+
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND" ]]
+[[ "$(jq -r '.target_impl' "${STATE_FILE}")" == "lnd" ]]
+[[ "$(jq -r '.rules_synced' "${STATE_FILE}")" == "false" ]]
+[[ "$(jq -r '.last_error' "${STATE_FILE}")" == "Waiting for the protected node to start: LND" ]]
+
+# Core Lightning was neither attached nor routed.
+[[ "$(cat "${DOCKER_LOG}")" == "GET /containers/json?all=0" ]]
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# LND keeps its fallback blackholes while its tunnel routes are withdrawn, so
+# the recreated container is blocked from its first packet.
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.9.9.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32762:\tfrom 10.9.9.0/25 blackhole'
+if printf '%s' "${RULES}" | grep -qF $'32764:\tfrom 10.21.21.9 lookup 51820'; then exit 1; fi
+if printf '%s' "${RULES}" | grep -qF $'32500:\tfrom 10.21.21.9 to'; then exit 1; fi
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_expected_docker_node_static_ip_fallback_blackhole_is_installed_before_discovery():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+RULES=""
+PRE_DISCOVERY_RULES_FILE="${POLICY_TEST_STATE_FILE}.pre_rules"
+: > "${PRE_DISCOVERY_RULES_FILE}"
+ALL_CONTAINERS='[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"},{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"exited"}]'
+
+remove_tagged_iptables_rules() { :; }
+get_target_subnet() { printf '%s\n' "10.21.0.0/16"; }
+ip() {
+    local spec
+    local pref
+    local line
+    case "$1 $2" in
+        "rule show")
+            if [ "${3:-}" = "pref" ]; then
+                printf '%s' "${RULES}" | grep "^${4}:" || true
+            else
+                printf '%s' "${RULES}"
+            fi
+            return 0
+            ;;
+        "rule add"|"rule del")
+            spec="${*:3}"
+            pref="${spec##* pref }"
+            spec="${spec% pref *}"
+            spec="${spec/ table / lookup }"
+            line="${pref}:"$'\t'"${spec}"
+            if [ "$2" = "add" ]; then
+                RULES+="${line}"$'\n'
+                return 0
+            fi
+            if ! printf '%s' "${RULES}" | grep -qxF -- "${line}"; then
+                return 2
+            fi
+            RULES="$(printf '%s' "${RULES}" | grep -vxF -- "${line}" || true)"$'\n'
+            return 0
+            ;;
+    esac
+    return 1
+}
+docker_api() {
+    printf '%s' "${RULES}" > "${PRE_DISCOVERY_RULES_FILE}"
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' '[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"}]'
+        return 0
+    fi
+    if [ "$1:$2" = "GET:/containers/json?all=1" ]; then
+        printf '%s\n' "${ALL_CONTAINERS}"
+        return 0
+    fi
+    return 1
+}
+
+# 1. Host reboot with nodeType=lnd: daemon startup and pre-discovery install
+# the 10.21.21.9 fallback blackhole before container discovery runs.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32762:\tfrom 10.9.9.0/25 blackhole'
+
+RULES=""
+: > "${PRE_DISCOVERY_RULES_FILE}"
+if reconcile_once "startup"; then exit 1; fi
+grep -qxF $'32765:\tfrom 10.21.21.9 blackhole' "${PRE_DISCOVERY_RULES_FILE}"
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# 2. nodeType=core-lightning (and cln) installs 10.21.21.96 at startup and
+# retires the previous 10.21.21.9 pre-discovery blackhole.
+printf '%s\n' '{"nodeType":"core-lightning"}' > "${TUNNELSATS_META_PATH}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.96 blackhole'
+[[ "${RULES}" != *"from 10.21.21.9 "* ]]
+
+# 3. Without nodeType, /data/tunnelsats-docker-target.json installs the
+# recorded implementation's static IP blackhole before container discovery
+# and caches PROTECTED_TARGET_STATE_LOADED in the current shell.
+rm -f "${TUNNELSATS_META_PATH}"
+RULES=""
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
+printf '%s\n' '{"version":1,"target_impl":"cln","target_container":"core-lightning_lightningd_1"}' > "${DOCKER_TARGET_STATE_FILE}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.96 blackhole'
+[[ "${PROTECTED_TARGET_STATE_LOADED}" == "true" ]]
+[[ "${PROTECTED_TARGET_IMPL}" == "cln" ]]
+
+# 4. First start without nodeType or record, when LND exists stopped alongside
+# a running CLN container: waiting path installs the 10.21.21.9 blackhole.
+rm -f "${DOCKER_TARGET_STATE_FILE}"
+RULES=""
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
+TARGET_IMPL=""
+if reconcile_once "startup"; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# 5. If /containers/json?all=0 fails or returns non-array JSON while nodeType
+# is configured, TARGET_IMPL stays set and the Docker API/parse error is kept.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+docker_api() { return 1; }
+if detect_lightning_container; then exit 1; fi
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${LAST_ERROR}" == "Unable to list running Docker containers" ]]
+
+docker_api() { printf '%s\n' '{"message":"bad response"}'; return 0; }
+if detect_lightning_container; then exit 1; fi
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${LAST_ERROR}" == "Unable to parse Docker containers" ]]
+
+rm -f "${TUNNELSATS_META_PATH}"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Unable to parse Docker containers" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_remove_stale_docker_source_policy_rules_preserves_expected_static_umbrel_ip_blackhole():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+
+TARGET_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.10|10.21.0.0/16|10.21.0.1|0|100"
+)
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|100"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+)
+DELETED=""
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+
+remove_stale_docker_source_policy_rules
+[[ "${DOCKER_STALE_POLICY_CHANGED}" == "1" ]]
+[[ "${DELETED}" == *"from 10.21.21.9 to 10.21.0.0/16 table main pref 32500"* ]]
+[[ "${DELETED}" == *"from 10.21.21.9 table 51820 pref 32764"* ]]
+[[ "${DELETED}" == *"from 10.21.21.9 blackhole pref 32762"* ]]
+[[ "${DELETED}" != *"from 10.21.21.9 blackhole pref 32765"* ]]
+[[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32765"* ]]
+
+# Switching expected node to CLN retires LND's 10.21.21.9 blackhole while
+# preserving CLN's 10.21.21.96 blackhole.
+printf '%s\n' '{"nodeType":"cln"}' > "${TUNNELSATS_META_PATH}"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|100"
+    "10.21.21.96|10.21.0.0/16|10.21.0.1|0|100"
+)
+DELETED=""
+remove_stale_docker_source_policy_rules
+[[ "${DELETED}" == *"from 10.21.21.9 blackhole pref 32765"* ]]
+[[ "${DELETED}" != *"from 10.21.21.96 blackhole pref 32765"* ]]
 '''
     )
 
