@@ -1347,6 +1347,201 @@ if printf '%s' "${RULES}" | grep -qF $'32500:\tfrom 10.21.21.9 to'; then exit 1;
     assert result.returncode == 0, result.stderr
 
 
+def test_expected_docker_node_static_ip_fallback_blackhole_is_installed_before_discovery():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+STATE_FILE="${POLICY_TEST_STATE_FILE}.json"
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${DOCKER_SOCK}"
+RULES=""
+PRE_DISCOVERY_RULES_FILE="${POLICY_TEST_STATE_FILE}.pre_rules"
+: > "${PRE_DISCOVERY_RULES_FILE}"
+ALL_CONTAINERS='[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"},{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"exited"}]'
+
+remove_tagged_iptables_rules() { :; }
+get_target_subnet() { printf '%s\n' "10.21.0.0/16"; }
+ip() {
+    local spec
+    local pref
+    local line
+    case "$1 $2" in
+        "rule show")
+            if [ "${3:-}" = "pref" ]; then
+                printf '%s' "${RULES}" | grep "^${4}:" || true
+            else
+                printf '%s' "${RULES}"
+            fi
+            return 0
+            ;;
+        "rule add"|"rule del")
+            spec="${*:3}"
+            pref="${spec##* pref }"
+            spec="${spec% pref *}"
+            spec="${spec/ table / lookup }"
+            line="${pref}:"$'\t'"${spec}"
+            if [ "$2" = "add" ]; then
+                RULES+="${line}"$'\n'
+                return 0
+            fi
+            if ! printf '%s' "${RULES}" | grep -qxF -- "${line}"; then
+                return 2
+            fi
+            RULES="$(printf '%s' "${RULES}" | grep -vxF -- "${line}" || true)"$'\n'
+            return 0
+            ;;
+    esac
+    return 1
+}
+docker_api() {
+    printf '%s' "${RULES}" > "${PRE_DISCOVERY_RULES_FILE}"
+    if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
+        printf '%s\n' '[{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"}]'
+        return 0
+    fi
+    if [ "$1:$2" = "GET:/containers/json?all=1" ]; then
+        printf '%s\n' "${ALL_CONTAINERS}"
+        return 0
+    fi
+    return 1
+}
+
+# 1. Host reboot with nodeType=lnd: daemon startup and pre-discovery install
+# the 10.21.21.9 fallback blackhole before container discovery runs.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+printf '%s' "${RULES}" | grep -qxF $'32762:\tfrom 10.9.9.0/25 blackhole'
+
+RULES=""
+: > "${PRE_DISCOVERY_RULES_FILE}"
+if reconcile_once "startup"; then exit 1; fi
+grep -qxF $'32765:\tfrom 10.21.21.9 blackhole' "${PRE_DISCOVERY_RULES_FILE}"
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# 2. nodeType=core-lightning (and cln) installs 10.21.21.96 at startup and
+# retires the previous 10.21.21.9 pre-discovery blackhole.
+printf '%s\n' '{"nodeType":"core-lightning"}' > "${TUNNELSATS_META_PATH}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.96 blackhole'
+[[ "${RULES}" != *"from 10.21.21.9 "* ]]
+
+# 3. Without nodeType, /data/tunnelsats-docker-target.json installs the
+# recorded implementation's static IP blackhole before container discovery
+# and caches PROTECTED_TARGET_STATE_LOADED in the current shell.
+rm -f "${TUNNELSATS_META_PATH}"
+RULES=""
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
+printf '%s\n' '{"version":1,"target_impl":"cln","target_container":"core-lightning_lightningd_1"}' > "${DOCKER_TARGET_STATE_FILE}"
+ensure_reconcile_kill_switch
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.96 blackhole'
+[[ "${PROTECTED_TARGET_STATE_LOADED}" == "true" ]]
+[[ "${PROTECTED_TARGET_IMPL}" == "cln" ]]
+
+# 4. First start without nodeType or record, when LND exists stopped alongside
+# a running CLN container: waiting path installs the 10.21.21.9 blackhole.
+rm -f "${DOCKER_TARGET_STATE_FILE}"
+RULES=""
+PROTECTED_TARGET_IMPL=""
+PROTECTED_TARGET_CONTAINER=""
+PROTECTED_TARGET_STATE_LOADED="false"
+PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
+TARGET_IMPL=""
+if reconcile_once "startup"; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+printf '%s' "${RULES}" | grep -qxF $'32765:\tfrom 10.21.21.9 blackhole'
+[[ "${RULES}" != *"10.21.21.96"* ]]
+
+# 5. If /containers/json?all=0 fails or returns non-array JSON while nodeType
+# is configured, TARGET_IMPL stays set and the Docker API/parse error is kept.
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+docker_api() { return 1; }
+if detect_lightning_container; then exit 1; fi
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${LAST_ERROR}" == "Unable to list running Docker containers" ]]
+
+docker_api() { printf '%s\n' '{"message":"bad response"}'; return 0; }
+if detect_lightning_container; then exit 1; fi
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${LAST_ERROR}" == "Unable to parse Docker containers" ]]
+
+rm -f "${TUNNELSATS_META_PATH}"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Unable to parse Docker containers" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_remove_stale_docker_source_policy_rules_preserves_expected_static_umbrel_ip_blackhole():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
+printf '%s\n' '{"nodeType":"lnd"}' > "${TUNNELSATS_META_PATH}"
+
+TARGET_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.0.10|10.21.0.0/16|10.21.0.1|0|100"
+)
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|100"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|100"
+)
+DELETED=""
+ip() {
+    if [[ "$1 $2" == "rule del" ]]; then
+        DELETED+="$*"$'\n'
+        return 0
+    fi
+    return 1
+}
+
+remove_stale_docker_source_policy_rules
+[[ "${DOCKER_STALE_POLICY_CHANGED}" == "1" ]]
+[[ "${DELETED}" == *"from 10.21.21.9 to 10.21.0.0/16 table main pref 32500"* ]]
+[[ "${DELETED}" == *"from 10.21.21.9 table 51820 pref 32764"* ]]
+[[ "${DELETED}" == *"from 10.21.21.9 blackhole pref 32762"* ]]
+[[ "${DELETED}" != *"from 10.21.21.9 blackhole pref 32765"* ]]
+[[ "${DELETED}" == *"from 10.21.0.9 blackhole pref 32765"* ]]
+
+# Switching expected node to CLN retires LND's 10.21.21.9 blackhole while
+# preserving CLN's 10.21.21.96 blackhole.
+printf '%s\n' '{"nodeType":"cln"}' > "${TUNNELSATS_META_PATH}"
+MANAGED_DOCKER_IPV4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|101"
+    "10.21.21.9|10.21.0.0/16|10.21.0.1|0|100"
+    "10.21.21.96|10.21.0.0/16|10.21.0.1|0|100"
+)
+DELETED=""
+remove_stale_docker_source_policy_rules
+[[ "${DELETED}" == *"from 10.21.21.9 blackhole pref 32765"* ]]
+[[ "${DELETED}" != *"from 10.21.21.96 blackhole pref 32765"* ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "failed_stage",
     ["docker_network", "container_attach", "bridge", "wireguard", "policy", "nat"],

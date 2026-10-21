@@ -17,6 +17,8 @@ TUNNELSATS_META_PATH="${TUNNELSATS_META_PATH:-/data/tunnelsats-meta.json}"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
 DOCKER_TARGET_IP="10.9.9.9"
+UMBREL_LND_IP="${UMBREL_LND_IP:-10.21.21.9}"
+UMBREL_CLN_IP="${UMBREL_CLN_IP:-10.21.21.96}"
 DOCKER_MIN_GW_PRIORITY=100
 DOCKER_ROUTE_PROBE_DESTINATIONS=("1.1.1.1" "8.8.8.8")
 DOCKER_POLICY_STATE_FILE="${DOCKER_POLICY_STATE_FILE:-/data/tunnelsats-docker-policy-sources.json}"
@@ -2933,6 +2935,8 @@ detect_lightning_container() {
     TARGET_IMPL=""
     DOCKER_EXPECTED_IMPL=""
     DOCKER_EXPECTED_CONTAINER=""
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
     TARGET_IPV6_ADDRESSES=()
     TARGET_IPV6_MACS=()
     TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
@@ -2995,12 +2999,6 @@ detect_lightning_container() {
         meta_node=$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
     fi
 
-    local containers
-    containers=$(docker_api "GET" "/containers/json?all=0") || {
-        LAST_ERROR="Unable to list running Docker containers"
-        return 1
-    }
-
     # Standard Mode never switches the protected implementation on its own:
     # umbrelOS removes and recreates the Lightning container during an app
     # restart, and protecting the other implementation in that gap would
@@ -3018,19 +3016,35 @@ detect_lightning_container() {
         chosen_impl="${PROTECTED_TARGET_IMPL}"
     fi
     if [ -n "${chosen_impl}" ]; then
+        TARGET_IMPL="${chosen_impl}"
         DOCKER_EXPECTED_IMPL="${chosen_impl}"
         if [ "${PROTECTED_TARGET_IMPL}" = "${chosen_impl}" ]; then
             DOCKER_EXPECTED_CONTAINER="${PROTECTED_TARGET_CONTAINER}"
         fi
     fi
 
+    local containers
+    containers=$(docker_api "GET" "/containers/json?all=0") || {
+        LAST_ERROR="Unable to list running Docker containers"
+        return 1
+    }
+
     local pick=""
     if [ -n "${chosen_impl}" ]; then
-        pick=$(pick_running_lightning_container "${containers}" "${chosen_impl}")
+        if ! pick=$(pick_running_lightning_container "${containers}" "${chosen_impl}" 2>/dev/null); then
+            LAST_ERROR="Unable to parse Docker containers"
+            return 1
+        fi
     else
-        pick=$(pick_running_lightning_container "${containers}" "lnd")
+        if ! pick=$(pick_running_lightning_container "${containers}" "lnd" 2>/dev/null); then
+            LAST_ERROR="Unable to parse Docker containers"
+            return 1
+        fi
         if [ -z "${pick}" ]; then
-            pick=$(pick_running_lightning_container "${containers}" "cln")
+            if ! pick=$(pick_running_lightning_container "${containers}" "cln" 2>/dev/null); then
+                LAST_ERROR="Unable to parse Docker containers"
+                return 1
+            fi
             if [ -n "${pick}" ]; then
                 # Before selecting Core Lightning on a first start, check
                 # whether an LND container exists in any state. When both
@@ -3049,6 +3063,7 @@ detect_lightning_container() {
                 if [ -n "${existing_lnd}" ]; then
                     local existing_lnd_rest="${existing_lnd#*|}"
                     chosen_impl="lnd"
+                    TARGET_IMPL="lnd"
                     DOCKER_EXPECTED_IMPL="lnd"
                     DOCKER_EXPECTED_CONTAINER="${existing_lnd_rest%%|*}"
                     pick=""
@@ -5472,6 +5487,86 @@ ensure_source_blackhole_rule() {
     SOURCE_BLACKHOLE_CHANGED="1"
 }
 
+resolve_expected_docker_impl() {
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    local meta_node=""
+    if [ -f "${TUNNELSATS_META_PATH}" ]; then
+        meta_node="$(jq -r '.nodeType // empty' "${TUNNELSATS_META_PATH}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    fi
+    case "${meta_node}" in
+        lnd)
+            RESOLVED_EXPECTED_DOCKER_IMPL="lnd"
+            return 0
+            ;;
+        cln|core-lightning)
+            RESOLVED_EXPECTED_DOCKER_IMPL="cln"
+            return 0
+            ;;
+    esac
+
+    if load_protected_target_state; then
+        case "${PROTECTED_TARGET_IMPL:-}" in
+            lnd|cln)
+                RESOLVED_EXPECTED_DOCKER_IMPL="${PROTECTED_TARGET_IMPL}"
+                return 0
+                ;;
+        esac
+    fi
+
+    case "${DOCKER_EXPECTED_IMPL:-${TARGET_IMPL:-}}" in
+        lnd|cln)
+            RESOLVED_EXPECTED_DOCKER_IMPL="${DOCKER_EXPECTED_IMPL:-${TARGET_IMPL:-}}"
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+expected_docker_target_static_ip() {
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
+    resolve_expected_docker_impl || return 1
+    case "${RESOLVED_EXPECTED_DOCKER_IMPL}" in
+        lnd)
+            [ -n "${UMBREL_LND_IP:-}" ] || return 1
+            RESOLVED_EXPECTED_DOCKER_STATIC_IP="${UMBREL_LND_IP}"
+            return 0
+            ;;
+        cln)
+            [ -n "${UMBREL_CLN_IP:-}" ] || return 1
+            RESOLVED_EXPECTED_DOCKER_STATIC_IP="${UMBREL_CLN_IP}"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+ensure_expected_docker_fallback_blackhole() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+    [[ "${SECURE_MODE}" == "true" ]] && return 0
+
+    local expected_impl=""
+    local static_ip=""
+    local other_static_ip=""
+    expected_docker_target_static_ip || return 0
+    expected_impl="${RESOLVED_EXPECTED_DOCKER_IMPL}"
+    static_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP}"
+    case "${expected_impl}" in
+        lnd) other_static_ip="${UMBREL_CLN_IP:-}" ;;
+        cln) other_static_ip="${UMBREL_LND_IP:-}" ;;
+    esac
+
+    ensure_fallback_blackhole_rule \
+        "${static_ip}" \
+        "Failed to install fallback blackhole rule for expected ${expected_impl} source ${static_ip}" || return 1
+
+    if [ -n "${other_static_ip}" ] && [ "${other_static_ip}" != "${static_ip}" ] && \
+       ip rule show pref "${K3S_BLACKHOLE_RULE_PREF}" 2>/dev/null | grep -qE \
+        "^${K3S_BLACKHOLE_RULE_PREF}:[[:space:]]+from[[:space:]]+${other_static_ip//./\\.}(/32)?[[:space:]]+blackhole[[:space:]]*$"; then
+        remove_source_blackhole_rule "${other_static_ip}" "${K3S_BLACKHOLE_RULE_PREF}" || return 1
+    fi
+}
+
 ensure_docker_target_kill_switches() {
     local refresh_error=""
     local entry
@@ -5531,10 +5626,10 @@ ensure_reconcile_kill_switch() {
 
     if [[ "${SECURE_MODE}" == "true" ]]; then
         ensure_source_blackhole_rule \
-            "10.21.21.9" "${KILL_SWITCH_PREF}" \
+            "${UMBREL_LND_IP}" "${KILL_SWITCH_PREF}" \
             "SecureMode: Failed to install LND reconciliation kill switch" || return 1
         ensure_source_blackhole_rule \
-            "10.21.21.96" "${KILL_SWITCH_PREF}" \
+            "${UMBREL_CLN_IP}" "${KILL_SWITCH_PREF}" \
             "SecureMode: Failed to install CLN reconciliation kill switch" || return 1
         return 0
     fi
@@ -5542,6 +5637,10 @@ ensure_reconcile_kill_switch() {
     if ! ensure_source_blackhole_rule \
         "${DOCKER_NETWORK_SUBNET}" "${KILL_SWITCH_PREF}" \
         "Failed to install reconciliation kill switch for ${DOCKER_NETWORK_SUBNET}"; then
+        return 1
+    fi
+
+    if ! ensure_expected_docker_fallback_blackhole; then
         return 1
     fi
 
@@ -6079,8 +6178,12 @@ remove_stale_docker_source_policy_rules() {
     local current_subnet
     local source_is_current
     local subnet_is_current
+    local expected_static_ip=""
     local -a current_managed=()
     DOCKER_STALE_POLICY_CHANGED="0"
+
+    expected_docker_target_static_ip 2>/dev/null || true
+    expected_static_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP:-}"
 
     for managed_entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
         IFS='|' read -r managed_source managed_subnet _ <<< "${managed_entry}"
@@ -6102,7 +6205,9 @@ remove_stale_docker_source_policy_rules() {
         if [ "${source_is_current}" = false ]; then
             ip rule del from "${managed_source}" table 51820 pref 32764 >/dev/null 2>&1 || true
             ip rule del from "${managed_source}" blackhole pref "${KILL_SWITCH_PREF}" >/dev/null 2>&1 || true
-            ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            if [ -z "${expected_static_ip}" ] || [ "${managed_source}" != "${expected_static_ip}" ]; then
+                ip rule del from "${managed_source}" blackhole pref 32765 >/dev/null 2>&1 || true
+            fi
             DOCKER_STALE_POLICY_CHANGED="1"
         fi
     done
@@ -8997,7 +9102,7 @@ cleanup_dataplane() {
     else
         # Clean up all potential node target IP routing rules in Secure Mode
         # unconditionally to prevent stale rules across mode toggles.
-        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "${UMBREL_LND_IP}" "${UMBREL_CLN_IP}"; do
             [ -n "${cleanup_ip}" ] || continue
             local cleanup_subnet
             cleanup_subnet=$(get_target_subnet "${cleanup_ip}")
@@ -9990,7 +10095,7 @@ _verify_dataplane_decommissioned_inner() {
             done < <(ip -6 rule show pref "${pref}" 2>/dev/null || true)
         done
     else
-        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "10.21.21.9" "10.21.21.96"; do
+        for cleanup_ip in "${DOCKER_TARGET_IP:-}" "${UMBREL_LND_IP}" "${UMBREL_CLN_IP}"; do
             [ -n "${cleanup_ip}" ] || continue
             remove_source_blackhole_rule "${cleanup_ip}" "${KILL_SWITCH_PREF}" || return 1
             remove_source_blackhole_rule "${cleanup_ip}" "32765" || return 1
@@ -10175,6 +10280,10 @@ decommission_dataplane() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
+    RESOLVED_EXPECTED_DOCKER_IMPL=""
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP=""
     TARGET_IPV6_ADDRESSES=()
     TARGET_IPV6_MACS=()
     TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
