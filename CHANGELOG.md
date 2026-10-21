@@ -23,3 +23,7 @@
 ## [3.4.2]
 
 - Fix ingress reverse proxy authentication on umbrelOS 2.0+ host gateway while preserving full umbrelOS 1.6.x backward compatibility
+
+## [3.4.3]
+
+- Add actionable announcement conflict diagnostics, keep the protected node across app restarts while recovering stale Docker endpoints, and harden k3s routing and fail-closed startup
