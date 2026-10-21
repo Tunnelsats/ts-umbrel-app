@@ -979,14 +979,23 @@ source "$1"
 K3S_MODE="false"
 SECURE_MODE="false"
 TUNNELSATS_META_PATH="${POLICY_TEST_STATE_FILE}.meta"
-LND_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"]}'
-CLN_RUNNING='{"Id":"cln-id","Names":["/core-lightning_lightningd_1"]}'
-CLN_UI_RUNNING='{"Id":"cln-app-id","Names":["/core-lightning_app_1"]}'
+LND_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"running"}'
+CLN_RUNNING='{"Id":"cln-id","Names":["/core-lightning_lightningd_1"],"State":"running"}'
+CLN_UI_RUNNING='{"Id":"cln-app-id","Names":["/core-lightning_app_1"],"State":"running"}'
 RUNNING="[]"
+ALL_CONTAINERS=""
+ALL_CONTAINERS_FAIL="false"
 
 docker_api() {
     if [ "$1:$2" = "GET:/containers/json?all=0" ]; then
         printf '%s\n' "${RUNNING}"
+        return 0
+    fi
+    if [ "$1:$2" = "GET:/containers/json?all=1" ]; then
+        if [ "${ALL_CONTAINERS_FAIL}" = "true" ]; then
+            return 1
+        fi
+        printf '%s\n' "${ALL_CONTAINERS:-${RUNNING}}"
         return 0
     fi
     return 1
@@ -997,6 +1006,8 @@ restart_daemon_state() {
     PROTECTED_TARGET_CONTAINER=""
     PROTECTED_TARGET_STATE_LOADED="false"
     PROTECTED_TARGET_PERSISTED="false"
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
 }
 '''
 
@@ -1094,6 +1105,7 @@ detect_lightning_container
 [[ "${TARGET_CONTAINER_ID}" == "cln-id" ]]
 [[ "${TARGET_CONTAINER_NAME}" == "core-lightning_lightningd_1" ]]
 [[ "${TARGET_IMPL}" == "cln" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "cln" ]]
 [[ "${LN_TARGET_PORT}" == "9736" ]]
 
 # Both run and nothing is recorded yet: LND first, as before.
@@ -1101,11 +1113,46 @@ RUNNING="[${CLN_RUNNING},${LND_RUNNING}]"
 detect_lightning_container
 [[ "${TARGET_CONTAINER_ID}" == "lnd-id" ]]
 [[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
 
 RUNNING="[${CLN_UI_RUNNING}]"
 if detect_lightning_container; then exit 1; fi
 [[ -z "${LAST_ERROR}" ]]
 [[ -z "${TARGET_IMPL}" ]]
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "lnd_state",
+    ["created", "restarting", "exited", "paused", "removing"],
+)
+def test_first_start_waits_for_lnd_when_lnd_container_exists_alongside_cln(lnd_state):
+    result = run_bash(
+        DOCKER_DETECTION_HARNESS
+        + f'LND_STATE="{lnd_state}"\n'
+        + r'''
+LND_NON_RUNNING='{"Id":"lnd-id","Names":["/lightning_lnd_1"],"State":"'"${LND_STATE}"'"}'
+RUNNING="[${CLN_UI_RUNNING},${CLN_RUNNING}]"
+ALL_CONTAINERS="[${CLN_UI_RUNNING},${CLN_RUNNING},${LND_NON_RUNNING}]"
+
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Waiting for the protected node to start: LND (lightning_lnd_1)" ]]
+[[ "${TARGET_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_IMPL}" == "lnd" ]]
+[[ "${DOCKER_EXPECTED_CONTAINER}" == "lightning_lnd_1" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
+[[ -z "${TARGET_CONTAINER_NAME}" ]]
+[[ ! -e "${DOCKER_TARGET_STATE_FILE}" ]]
+
+# If the all=1 container check fails, discovery fails closed instead of
+# falling back to Core Lightning.
+ALL_CONTAINERS_FAIL="true"
+if detect_lightning_container; then exit 1; fi
+[[ "${LAST_ERROR}" == "Unable to list Docker containers" ]]
+[[ -z "${TARGET_CONTAINER_ID}" ]]
 '''
     )
 

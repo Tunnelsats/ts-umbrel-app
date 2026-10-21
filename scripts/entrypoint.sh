@@ -244,6 +244,8 @@ PROTECTED_TARGET_IMPL=""
 PROTECTED_TARGET_CONTAINER=""
 PROTECTED_TARGET_STATE_LOADED="false"
 PROTECTED_TARGET_PERSISTED="false"
+DOCKER_EXPECTED_IMPL=""
+DOCKER_EXPECTED_CONTAINER=""
 DOCKER_API_BODY=""
 DOCKER_API_CODE=""
 DOCKER_API_ERROR=""
@@ -2903,7 +2905,7 @@ detect_k3s_target() {
     return 1
 }
 
-# Prints "<id>|<name>|<impl>" for the first running container of the given
+# Prints "<id>|<name>|<impl>" for the first container of the given
 # implementation (lnd or cln) in a /containers/json listing, or nothing.
 pick_running_lightning_container() {
     local containers="$1"
@@ -2914,11 +2916,12 @@ pick_running_lightning_container() {
     fi
     printf '%s' "${containers}" | jq -r --arg pattern "${pattern}" --arg impl "${impl}" '
         def cname: (.Names[0] // "") | ltrimstr("/");
-        [ .[]
-          | {id: .Id, name: cname}
-          | select(.name | test($pattern))
-          | select(.name | test("(app|proxy|tor|web|ui)") | not)
-        ]
+        if type != "array" then error("not a container array") else . end
+        | [ .[]
+            | {id: .Id, name: cname}
+            | select(.name | test($pattern))
+            | select(.name | test("(app|proxy|tor|web|ui)") | not)
+          ]
         | if length > 0 then .[0] else empty end
         | "\(.id)|\(.name)|\($impl)"
     '
@@ -2928,6 +2931,8 @@ detect_lightning_container() {
     TARGET_CONTAINER_ID=""
     TARGET_CONTAINER_NAME=""
     TARGET_IMPL=""
+    DOCKER_EXPECTED_IMPL=""
+    DOCKER_EXPECTED_CONTAINER=""
     TARGET_IPV6_ADDRESSES=()
     TARGET_IPV6_MACS=()
     TARGET_HAS_IPV6_DEFAULT_ROUTE="false"
@@ -3005,33 +3010,64 @@ detect_lightning_container() {
     # discovery order apply.
     local chosen_impl=""
     case "${meta_node}" in
-        lnd|cln) chosen_impl="${meta_node}" ;;
+        lnd) chosen_impl="lnd" ;;
+        cln|core-lightning) chosen_impl="cln" ;;
     esac
     if [ -z "${chosen_impl}" ]; then
         load_protected_target_state
         chosen_impl="${PROTECTED_TARGET_IMPL}"
     fi
+    if [ -n "${chosen_impl}" ]; then
+        DOCKER_EXPECTED_IMPL="${chosen_impl}"
+        if [ "${PROTECTED_TARGET_IMPL}" = "${chosen_impl}" ]; then
+            DOCKER_EXPECTED_CONTAINER="${PROTECTED_TARGET_CONTAINER}"
+        fi
+    fi
 
     local pick=""
     if [ -n "${chosen_impl}" ]; then
         pick=$(pick_running_lightning_container "${containers}" "${chosen_impl}")
-        if [ -z "${pick}" ]; then
-            # Fail closed through the failed-detection path, which keeps the
-            # fallback blackholes, until the chosen node runs again.
-            local waiting_for
-            waiting_for="$(lightning_impl_label "${chosen_impl}")"
-            if [ "${PROTECTED_TARGET_IMPL}" = "${chosen_impl}" ] && [ -n "${PROTECTED_TARGET_CONTAINER}" ]; then
-                waiting_for+=" (${PROTECTED_TARGET_CONTAINER})"
-            fi
-            TARGET_IMPL="${chosen_impl}"
-            LAST_ERROR="Waiting for the protected node to start: ${waiting_for}"
-            return 1
-        fi
     else
         pick=$(pick_running_lightning_container "${containers}" "lnd")
         if [ -z "${pick}" ]; then
             pick=$(pick_running_lightning_container "${containers}" "cln")
+            if [ -n "${pick}" ]; then
+                # Before selecting Core Lightning on a first start, check
+                # whether an LND container exists in any state. When both
+                # implementations are present and LND is stopped or restarting,
+                # wait for LND instead of recording Core Lightning.
+                local all_containers
+                local existing_lnd
+                all_containers=$(docker_api "GET" "/containers/json?all=1") || {
+                    LAST_ERROR="Unable to list Docker containers"
+                    return 1
+                }
+                if ! existing_lnd=$(pick_running_lightning_container "${all_containers}" "lnd" 2>/dev/null); then
+                    LAST_ERROR="Unable to parse Docker containers"
+                    return 1
+                fi
+                if [ -n "${existing_lnd}" ]; then
+                    local existing_lnd_rest="${existing_lnd#*|}"
+                    chosen_impl="lnd"
+                    DOCKER_EXPECTED_IMPL="lnd"
+                    DOCKER_EXPECTED_CONTAINER="${existing_lnd_rest%%|*}"
+                    pick=""
+                fi
+            fi
         fi
+    fi
+
+    if [ -n "${chosen_impl}" ] && [ -z "${pick}" ]; then
+        # Fail closed through the failed-detection path, which keeps the
+        # fallback blackholes, until the chosen node runs again.
+        local waiting_for
+        waiting_for="$(lightning_impl_label "${chosen_impl}")"
+        if [ -n "${DOCKER_EXPECTED_CONTAINER}" ]; then
+            waiting_for+=" (${DOCKER_EXPECTED_CONTAINER})"
+        fi
+        TARGET_IMPL="${chosen_impl}"
+        LAST_ERROR="Waiting for the protected node to start: ${waiting_for}"
+        return 1
     fi
 
     if [ -z "${pick}" ]; then
@@ -3042,6 +3078,8 @@ detect_lightning_container() {
     local rest="${pick#*|}"
     TARGET_CONTAINER_NAME="${rest%%|*}"
     TARGET_IMPL="${rest##*|}"
+    DOCKER_EXPECTED_IMPL="${TARGET_IMPL}"
+    DOCKER_EXPECTED_CONTAINER="${TARGET_CONTAINER_NAME}"
     DOCKER_TARGET_IP="${DOCKER_TARGET_IP:-10.9.9.9}"
 
     if [ "${TARGET_IMPL}" = "cln" ]; then
