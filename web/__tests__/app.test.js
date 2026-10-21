@@ -14,6 +14,47 @@ describe('Favicon Optimization Contracts', () => {
     });
 });
 
+describe('Tailwind CSS v4 Build Contracts', () => {
+    test('root package.json pairs tailwindcss with @tailwindcss/cli and defines build:css', () => {
+        const pkgPath = path.resolve(__dirname, '../../package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        expect(pkg.scripts['build:css']).toBe(
+            'tailwindcss -i web/css/input.css -o web/dist/tailwind.css --minify'
+        );
+        expect(pkg.devDependencies['tailwindcss']).toBeDefined();
+        expect(pkg.devDependencies['@tailwindcss/cli']).toBe(pkg.devDependencies['tailwindcss']);
+    });
+
+    test('input.css uses Tailwind v4 directives and preserves custom pulse animations', () => {
+        const inputCssPath = path.resolve(__dirname, '../css/input.css');
+        const inputCss = fs.readFileSync(inputCssPath, 'utf8');
+        expect(inputCss).toContain('@import "tailwindcss";');
+        expect(inputCss).toContain('@config "../../tailwind.config.js";');
+        expect(inputCss).not.toContain('@tailwind base');
+        expect(inputCss).toContain('.pulse-green');
+        expect(inputCss).toContain('.pulse-yellow');
+        expect(inputCss).toContain('@keyframes pulse-green');
+        expect(inputCss).toContain('@keyframes pulse-yellow');
+    });
+
+    test('compiled dist/tailwind.css includes custom theme tokens and diagnostic error classes', () => {
+        const distCssPath = path.resolve(__dirname, '../dist/tailwind.css');
+        const distCss = fs.readFileSync(distCssPath, 'utf8');
+        expect(distCss).toContain('tailwindcss v4.');
+        expect(distCss).toContain('.bg-tsgreen');
+        expect(distCss).toContain('.text-tsgreen');
+        expect(distCss).toContain('.bg-tsyellow');
+        expect(distCss).toContain('.text-tsyellow');
+        expect(distCss).toContain('.pulse-green');
+        expect(distCss).toContain('.pulse-yellow');
+        expect(distCss).toContain('@keyframes pulse-green');
+        expect(distCss).toContain('@keyframes pulse-yellow');
+        expect(distCss).toContain('.bg-red-950\\/40');
+        expect(distCss).toContain('.text-red-300');
+        expect(distCss).toContain('.border-red-800\\/70');
+    });
+});
+
 // --- Helpers ---
 
 function createMockGlobeInstance() {
