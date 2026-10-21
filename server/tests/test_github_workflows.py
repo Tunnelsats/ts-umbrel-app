@@ -17,6 +17,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 AUTO_MERGE_PATH = WORKFLOWS_DIR / "dependabot-auto-merge.yml"
+TEST_WORKFLOW_PATH = WORKFLOWS_DIR / "test.yml"
 
 
 def load_workflow(path):
@@ -77,3 +78,33 @@ def test_dependabot_auto_merge_runs_on_pull_request_for_dependabot_only():
     action, _, ref = uses[0].partition("@")
     assert action == "dependabot/fetch-metadata"
     assert re.fullmatch(r"[0-9a-f]{40}", ref)
+
+
+def test_frontend_tests_workflow_uses_supported_node_lts_and_verifies_css_build():
+    workflow = load_workflow(TEST_WORKFLOW_PATH)
+    job = workflow["jobs"]["frontend-tests"]
+    steps = job["steps"]
+
+    setup_node_steps = [
+        step for step in steps if str(step.get("uses", "")).startswith("actions/setup-node@")
+    ]
+    assert len(setup_node_steps) == 1
+    node_version = str(setup_node_steps[0]["with"]["node-version"])
+    assert node_version == "22"
+
+    cache_paths = str(setup_node_steps[0]["with"]["cache-dependency-path"]).splitlines()
+    assert "package-lock.json" in [p.strip() for p in cache_paths]
+    assert "web/package-lock.json" in [p.strip() for p in cache_paths]
+
+    run_commands = [
+        (step.get("working-directory", "."), str(step.get("run", "")).strip())
+        for step in steps
+        if "run" in step
+    ]
+    assert (".", "npm ci") in run_commands
+    assert (
+        ".",
+        "npm run build:css\ngit diff --exit-code -- web/dist/tailwind.css",
+    ) in run_commands
+    assert ("./web", "npm ci") in run_commands
+    assert ("./web", "npm test") in run_commands
