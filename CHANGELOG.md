@@ -27,3 +27,7 @@
 ## [3.4.3]
 
 - Add actionable announcement conflict diagnostics, keep the protected node across app restarts while recovering stale Docker endpoints, and harden k3s routing and fail-closed startup
+
+## [3.4.4]
+
+- Harden container CA trust store by distrusting compromised eMudhra (emSign) root CAs and enforcing system CA bundle validation
