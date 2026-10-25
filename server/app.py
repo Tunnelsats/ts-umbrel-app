@@ -1,3 +1,5 @@
+import errno
+import fcntl
 import json
 import os
 import re
@@ -27,6 +29,25 @@ from daemon_transport import (
     DaemonUnavailable,
     UnixWSGIServer,
     request_over_unix_socket,
+)
+from nwc import (
+    NWC_MAX_AUTO_RENEW_SATS,
+    NWC_MAX_RELAYS,
+    NWC_WALLET_FILE,
+    REFERRAL_CODE_RE,
+    assemble_wg_config,
+    compute_bandwidth_telemetry,
+    delete_nwc_wallet,
+    derive_wg_public_key as _derive_wg_pubkey_pure,
+    evaluate_subscription_notices,
+    generate_wg_keypair,
+    load_nwc_wallet,
+    maybe_nwc_auto_renew,
+    parse_nwc_uri,
+    pay_invoice_via_nwc,
+    save_nwc_wallet,
+    validate_wg_public_key,
+    verify_bolt11_invoice,
 )
 
 # Ensure verbose logging for container restarts is visible and unbuffered
@@ -153,8 +174,13 @@ MANAGEMENT_JSON_PATHS = frozenset(
     {
         "/api/local/upload-config",
         "/api/local/configure-node",
+        "/api/subscription/create",
         "/api/subscription/renew",
         "/api/subscription/claim",
+        "/api/subscription/bandwidth-reset",
+        "/api/nwc/connect",
+        "/api/nwc/pay",
+        "/api/reachability",
     }
 )
 def dashboard_bind_config():
@@ -309,7 +335,7 @@ CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
 K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-# Shared HTTP session for k8s API calls — enables TLS keep-alive across helpers so
+# Shared HTTP session for k8s API calls - enables TLS keep-alive across helpers so
 # the dashboard does not pay a fresh TCP+TLS handshake on every request.
 _k8s_session = requests.Session()
 
@@ -352,23 +378,70 @@ ALLOWED_NETWORKS = (
 
 
 NUREMBERG_DE = {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'}
+FRANKFURT_DE = {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'}
 NEW_YORK_US = {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'}
+HILLSBORO_US = {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'}
+ASHBURN_US = {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'}
+SYDNEY_AU = {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'}
+SAO_PAULO_BR = {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'}
+GENEVA_CH = {'lat': 46.2044, 'lng': 6.1432, 'label': 'GENEVA, CH', 'flag': '🇨🇭'}
+HELSINKI_FI = {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'}
+SINGAPORE_SG = {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'}
+JOHANNESBURG_ZA = {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'}
+MONTREAL_CA = {'lat': 45.5017, 'lng': -73.5673, 'label': 'MONTREAL, CA', 'flag': '🇨🇦'}
+TOKYO_JP = {'lat': 35.6762, 'lng': 139.6503, 'label': 'TOKYO, JP', 'flag': '🇯🇵'}
+AMSTERDAM_NL = {'lat': 52.3676, 'lng': 4.9041, 'label': 'AMSTERDAM, NL', 'flag': '🇳🇱'}
+LONDON_UK = {'lat': 51.5074, 'lng': -0.1278, 'label': 'LONDON, UK', 'flag': '🇬🇧'}
+PARIS_FR = {'lat': 48.8566, 'lng': 2.3522, 'label': 'PARIS, FR', 'flag': '🇫🇷'}
 
 TUNNELSATS_SERVER_METADATA = {
-    'au1': {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'},
-    'br1': {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'},
-    'de1': {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'},
+    'au1': SYDNEY_AU,
+    'oc-au': SYDNEY_AU,
+    'br1': SAO_PAULO_BR,
+    'sa-br': SAO_PAULO_BR,
+    'ch1': GENEVA_CH,
+    'eu-ch': GENEVA_CH,
+    'de1': FRANKFURT_DE,
     'de2': NUREMBERG_DE,
     'de3': NUREMBERG_DE,
-    'fi1': {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'},
-    'sg1': {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'},
+    'eu-de': NUREMBERG_DE,
+    'fi1': HELSINKI_FI,
+    'eu-fi': HELSINKI_FI,
+    'sg1': SINGAPORE_SG,
+    'asia-sg': SINGAPORE_SG,
     'us1': NEW_YORK_US,
-    'us2': {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'},
-    'us3': {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'},
-    'za1': {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'},
+    'us2': HILLSBORO_US,
+    'us-west': HILLSBORO_US,
+    'us3': ASHBURN_US,
+    'us-east': ASHBURN_US,
+    'za1': JOHANNESBURG_ZA,
+    'af-za': JOHANNESBURG_ZA,
+    'ca1': MONTREAL_CA,
+    'na-ca': MONTREAL_CA,
+    'jp1': TOKYO_JP,
+    'asia-jp': TOKYO_JP,
+    'nl1': AMSTERDAM_NL,
+    'eu-nl': AMSTERDAM_NL,
+    'uk1': LONDON_UK,
+    'gb1': LONDON_UK,
+    'eu-uk': LONDON_UK,
+    'fr1': PARIS_FR,
+    'eu-fr': PARIS_FR,
     # Regional Defaults
+    'au': SYDNEY_AU,
+    'br': SAO_PAULO_BR,
+    'ch': GENEVA_CH,
     'de': NUREMBERG_DE,
+    'fi': HELSINKI_FI,
+    'sg': SINGAPORE_SG,
     'us': NEW_YORK_US,
+    'za': JOHANNESBURG_ZA,
+    'ca': MONTREAL_CA,
+    'jp': TOKYO_JP,
+    'nl': AMSTERDAM_NL,
+    'uk': LONDON_UK,
+    'gb': LONDON_UK,
+    'fr': PARIS_FR,
 }
 
 
@@ -414,7 +487,17 @@ def _management_browser_security_enabled():
 def _management_request_is_sensitive():
     return (
         request.path.startswith("/api/local")
-        or request.path in ("/api/subscription/renew", "/api/subscription/claim")
+        or request.path
+        in (
+            "/api/subscription/create",
+            "/api/subscription/renew",
+            "/api/subscription/claim",
+            "/api/subscription/bandwidth-reset",
+            "/api/nwc/connect",
+            "/api/nwc/disconnect",
+            "/api/nwc/pay",
+            "/api/reachability",
+        )
         or request.endpoint == "check_subscription"
     )
 
@@ -463,6 +546,25 @@ def read_app_version():
     except Exception:
         # Graceful fallback for all manifest-reading failures
         return APP_VERSION
+
+
+_PACKAGE_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}")
+
+
+def get_user_agent() -> str:
+    """Return the first-party Umbrel User-Agent header for TunnelSats Public API attribution."""
+    raw = str(read_app_version() or APP_VERSION).strip()
+    semver = raw[1:] if raw.startswith(("v", "V")) else raw
+    version = semver if _PACKAGE_VERSION_RE.fullmatch(semver) else "unknown"
+    return f"TunnelSats-Umbrel/{version}"
+
+
+def _upstream_headers() -> Dict[str, str]:
+    """Return canonical HTTP headers for outbound TunnelSats Public API requests."""
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": get_user_agent(),
+    }
 
 def get_server_geodata(s_id):
     """Unified lookup for server coordinates, labels and flags."""
@@ -1747,11 +1849,11 @@ def _parse_config_comments(config_text):
             meta["vpnPort"] = int(match.group(1))
         elif match := re.match(r"^#\s*VPNPort\s*(?:[:=]\s*|\s+)(\d+)", line):
             meta["vpnPort"] = int(match.group(1))
-        elif match := re.match(r"^#\s*Server:\s*(.+)", line):
+        elif match := re.match(r"^#\s*(?:Server|VPN Server Domain):\s*(.+)", line):
             meta["serverDomain"] = match.group(1).strip()
-        elif match := re.match(r"^#\s*myPubKey:\s*(.+)", line):
+        elif match := re.match(r"^#\s*(?:myPubKey|WG Public Key):\s*(.+)", line):
             meta["wgPublicKey"] = match.group(1).strip()
-        elif match := re.match(r"^#\s*Valid Until:\s*(.+)", line):
+        elif match := re.match(r"^#\s*(?:Valid Until|Subscription End):\s*(.+)", line):
             meta["expiresAt"] = match.group(1).strip()
         elif match := re.match(r"^Endpoint\s*=\s*(.+)", line):
             endpoint_val = match.group(1).strip()
@@ -1769,7 +1871,8 @@ def _write_file_secure(path, content):
     parent_dir = os.path.dirname(path) or "."
     os.makedirs(parent_dir, exist_ok=True)
     tmp_path = os.path.join(parent_dir, f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
-    with open(tmp_path, "w", encoding="utf-8") as fp:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fp:
         fp.write(content)
     os.chmod(tmp_path, 0o600)
     try:
@@ -1784,15 +1887,129 @@ def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
     with _metadata_lock:
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
+            meta_path = os.path.join(DATA_DIR, META_FILE)
+            merged_meta = dict(meta)
+            existing_meta: Dict[str, Any] = {}
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as existing_fp:
+                        loaded_existing = json.load(existing_fp)
+                    if isinstance(loaded_existing, dict):
+                        existing_meta = loaded_existing
+                        for preserved_key in (
+                            "nwcConnected",
+                            "nwcRelayHost",
+                            "nwcAutoRenewDuration",
+                            "nwcRouteViaTor",
+                            "nwcAutoRenewState",
+                            "lastDuration",
+                            "lastAmountSats",
+                        ):
+                            if preserved_key in existing_meta and preserved_key not in merged_meta:
+                                merged_meta[preserved_key] = existing_meta[preserved_key]
+                except (IOError, OSError, json.JSONDecodeError):
+                    pass
+
+            claimed_hash = str(merged_meta.get("paymentHash") or "").strip()
+            if claimed_hash and isinstance(existing_meta.get("pendingOrders"), dict):
+                rem_orders = {
+                    k: v
+                    for k, v in existing_meta["pendingOrders"].items()
+                    if k != claimed_hash and isinstance(v, dict)
+                }
+                if rem_orders:
+                    merged_meta["pendingOrders"] = rem_orders
+                else:
+                    merged_meta.pop("pendingOrders", None)
+                existing_po = (
+                    existing_meta.get("pendingOrder")
+                    if isinstance(existing_meta.get("pendingOrder"), dict)
+                    else None
+                )
+                if existing_po and existing_po.get("paymentHash") and existing_po.get("paymentHash") != claimed_hash:
+                    merged_meta["pendingOrder"] = existing_po
+                elif rem_orders:
+                    merged_meta["pendingOrder"] = list(rem_orders.values())[-1]
+                else:
+                    merged_meta.pop("pendingOrder", None)
+            else:
+                merged_meta.pop("pendingOrder", None)
+                merged_meta.pop("pendingOrders", None)
+
             backup_existing_wireguard_configs()
             conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
-            meta_path = os.path.join(DATA_DIR, META_FILE)
             _write_file_secure(conf_path, config_text)
-            _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            _write_file_secure(meta_path, json.dumps(merged_meta, indent=2))
             return True
         except (IOError, OSError) as exc:
             app.logger.error(f"Failed to persist tunnelsats.conf and metadata: {exc}")
             return False
+
+
+def apply_vpn_port(
+    port: Any,
+    data_dir: Optional[str] = None,
+    expected_pubkey: Optional[str] = None,
+) -> bool:
+    """Synchronize a dynamic vpn_port across tunnelsats-meta.json and active WireGuard .conf files."""
+    if isinstance(port, bool) or port is None:
+        return False
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not (1 <= port_int <= 65535):
+        return False
+
+    target_dir = data_dir or DATA_DIR
+    if not os.path.exists(target_dir):
+        return False
+
+    changed_any = False
+    meta_path = os.path.join(target_dir, META_FILE)
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                if isinstance(meta, dict):
+                    active_pubkey = str(meta.get("wgPublicKey") or "").strip()
+                    if expected_pubkey and active_pubkey and active_pubkey != str(expected_pubkey).strip():
+                        return False
+                    if meta.get("vpnPort") != port_int:
+                        meta["vpnPort"] = port_int
+                        _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                        changed_any = True
+            except (IOError, OSError, json.JSONDecodeError) as exc:
+                app.logger.warning(f"Failed to update vpnPort in {meta_path}: {exc}")
+
+        for conf_name in ("tunnelsats.conf", "tunnelsatsv2.conf"):
+            conf_path = os.path.join(target_dir, conf_name)
+            if not os.path.exists(conf_path):
+                continue
+            try:
+                with open(conf_path, "r", encoding="utf-8") as fp:
+                    lines = fp.readlines()
+                new_lines: List[str] = []
+                replaced = False
+                for line in lines:
+                    stripped = line.strip()
+                    if re.match(r"^#\s*(?:Port Forwarding:|VPNPort\b)", stripped):
+                        if not replaced:
+                            new_lines.append(f"# Port Forwarding: {port_int}\n")
+                            replaced = True
+                        continue
+                    new_lines.append(line)
+                if not replaced:
+                    new_lines.insert(0, f"# Port Forwarding: {port_int}\n")
+                new_content = "".join(new_lines)
+                if new_content != "".join(lines):
+                    _write_file_secure(conf_path, new_content)
+                    changed_any = True
+            except (IOError, OSError) as exc:
+                app.logger.warning(f"Failed to update Port Forwarding comment in {conf_path}: {exc}")
+
+    return changed_any or True
 
 
 def _set_restart_pending(meta_path, _ignored_meta, key, is_pending):
@@ -2090,6 +2307,10 @@ def _derive_wg_public_key(private_key):
         )
         return result.stdout.strip()
     except (subprocess.SubprocessError, OSError) as exc:
+        if validate_wg_public_key(private_key):
+            derived = _derive_wg_pubkey_pure(private_key)
+            if derived:
+                return derived
         app.logger.warning(f"Failed to derive WireGuard public key: {exc}")
         return ""
 
@@ -3092,7 +3313,18 @@ def restrict_local_api():
             )
         return None
 
-    if request.path.startswith("/api/local") or request.path == "/api/subscription/renew":
+    if (
+        request.path.startswith("/api/local")
+        or request.path
+        in (
+            "/api/subscription/renew",
+            "/api/subscription/bandwidth-reset",
+            "/api/nwc/connect",
+            "/api/nwc/disconnect",
+            "/api/nwc/pay",
+            "/api/reachability",
+        )
+    ):
         direct_remote_addr = _get_direct_remote_addr()
 
         # Trust X-Forwarded-For only after authenticating the immediate proxy peer.
@@ -3117,7 +3349,7 @@ def protect_management_response(response):
 # Proxy function to forward requests to the core Tunnelsats API
 def proxy_request(method, endpoint, payload=None):
     url = f"{TUNNELSATS_API_URL}/{endpoint}"
-    headers = {"Content-Type": "application/json"}
+    headers = _upstream_headers()
     try:
         if method == "GET":
             resp = requests.get(url, headers=headers, timeout=10)
@@ -3232,7 +3464,12 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     """Fetch subscription status from the TunnelSats Public API."""
     try:
         url = f"{TUNNELSATS_API_URL}/subscription/status"
-        res = requests.post(url, json={"wgPublicKey": wg_public_key}, timeout=10)
+        res = requests.post(
+            url,
+            json={"wgPublicKey": wg_public_key},
+            headers=_upstream_headers(),
+            timeout=10,
+        )
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict):
@@ -3322,6 +3559,84 @@ _next_subscription_sync_time: Dict[str, float] = {}
 SYNC_INTERVAL_SECONDS = 86400  # 24 hours
 RETRY_INTERVAL_SECONDS = 3600  # 1 hour
 EVICTION_INTERVAL_SECONDS = 172800  # 48 hours
+NWC_SCHEDULER_INTERVAL_SECONDS = 300  # 5 minutes
+
+_nwc_scheduler_lock = threading.Lock()
+_nwc_scheduler_thread: Optional[threading.Thread] = None
+_nwc_scheduler_stop = threading.Event()
+_nwc_retry_in_flight_lock = threading.Lock()
+_nwc_retry_in_flight = False
+_nwc_autorenew_exec_lock = threading.Lock()
+
+
+def _nwc_auto_renew_due_without_sync() -> bool:
+    """Return True if NWC auto-renewal is due now (initial 7d window or 1h/6h retry elapsed)."""
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if not os.path.exists(meta_path):
+            return False
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, OSError, json.JSONDecodeError):
+            return False
+    if not isinstance(meta, dict) or not meta.get("nwcConnected"):
+        return False
+    exp_raw = meta.get("expiresAt")
+    if not isinstance(exp_raw, str) or not exp_raw.strip():
+        return False
+    try:
+        exp_dt = datetime.fromisoformat(exp_raw.strip().replace("Z", "+00:00"))
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    now_dt = datetime.now(timezone.utc)
+    if (exp_dt - now_dt).total_seconds() > 7 * 86400:
+        return False
+    state = meta.get("nwcAutoRenewState") if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+    if state.get("paidForExpiry") == exp_raw:
+        return False
+    if state.get("targetExpiry") == exp_raw:
+        if state.get("fallbackTaskRaised") or int(state.get("attempts") or 0) >= 3:
+            return False
+        next_retry_raw = state.get("nextRetryAt")
+        if isinstance(next_retry_raw, str) and next_retry_raw.strip():
+            try:
+                nr_dt = datetime.fromisoformat(next_retry_raw.strip().replace("Z", "+00:00"))
+                if nr_dt.tzinfo is None:
+                    nr_dt = nr_dt.replace(tzinfo=timezone.utc)
+                if now_dt < nr_dt:
+                    return False
+            except (ValueError, TypeError):
+                pass
+    return True
+
+
+def _trigger_async_nwc_auto_renew_if_due():
+    global _nwc_retry_in_flight
+    if TUNNELSATS_ROLE == "daemon":
+        return
+    if not _nwc_auto_renew_due_without_sync():
+        return
+    with _nwc_retry_in_flight_lock:
+        if _nwc_retry_in_flight:
+            return
+        _nwc_retry_in_flight = True
+
+    def _retry_worker():
+        global _nwc_retry_in_flight
+        try:
+            _run_background_nwc_auto_renew()
+        except Exception as exc:
+            app.logger.error(f"Error in async NWC auto-renewal worker: {exc}")
+        finally:
+            with _nwc_retry_in_flight_lock:
+                _nwc_retry_in_flight = False
+
+    t = threading.Thread(target=_retry_worker, name="nwc_auto_renew_worker", daemon=True)
+    t.start()
+
 
 def _trigger_lazy_subscription_sync(wg_pubkey: str):
     """
@@ -3342,6 +3657,7 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
 
         next_sync = _next_subscription_sync_time.get(wg_pubkey, 0.0)
         if now < next_sync:
+            _trigger_async_nwc_auto_renew_if_due()
             return
         # Prevent concurrent duplicate threads by immediately pushing the next sync time
         _next_subscription_sync_time[wg_pubkey] = now + SYNC_INTERVAL_SECONDS
@@ -3352,11 +3668,31 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
             # Fetch directly from public API bypassing cache to get absolute truth
             status_info = _fetch_subscription_status(pubkey)
             if status_info and isinstance(status_info, dict):
-                expiry = status_info.get("expiry")
+                expiry = status_info.get("expiry") or status_info.get("expiresAt")
                 if expiry:
-                    success = _update_local_metadata({"expiresAt": expiry}, wg_pubkey=pubkey)
+                    sync_payload: Dict[str, Any] = {"expiresAt": expiry}
+                    for key in (
+                        "bandwidth_used_gb",
+                        "bandwidthUsedGb",
+                        "bandwidth_limit_gb",
+                        "bandwidthLimitGb",
+                        "bandwidth_resets_this_month",
+                        "resetsThisMonth",
+                        "max_resets_per_month",
+                        "maxResetsPerMonth",
+                        "status",
+                        "subscription_status",
+                    ):
+                        if key in status_info:
+                            sync_payload[key] = status_info[key]
+                    success = _update_local_metadata(sync_payload, wg_pubkey=pubkey)
                     if success:
+                        raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
+                        if raw_vpn_port is not None:
+                            apply_vpn_port(raw_vpn_port, expected_pubkey=pubkey)
                         app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
+                        if TUNNELSATS_ROLE != "daemon":
+                            _run_background_nwc_auto_renew()
                     else:
                         app.logger.warning("Background subscription sync: Failed to update local metadata")
                         with _subscription_sync_lock:
@@ -3412,9 +3748,318 @@ def get_servers():
     return content, status_code, headers
 
 
+def _is_pending_invoice_active(pending_obj: Any, wg_pubkey: str = "") -> bool:
+    """Return True if a pending invoice record is unpaid and has not expired."""
+    if not isinstance(pending_obj, dict):
+        return False
+    if wg_pubkey and pending_obj.get("wgPublicKey") and pending_obj.get("wgPublicKey") != wg_pubkey:
+        return False
+    if not pending_obj.get("invoice") or not pending_obj.get("paymentHash"):
+        return False
+    if pending_obj.get("paid") is True or pending_obj.get("status") == "paid":
+        return False
+    exp_at = pending_obj.get("expiresAt")
+    if exp_at:
+        return not _is_timestamp_expired(str(exp_at))
+    inv = str(pending_obj.get("invoice") or "")
+    chk = verify_bolt11_invoice(inv, check_expiry=True)
+    if chk.get("valid"):
+        return True
+    created_at = pending_obj.get("createdAt")
+    if created_at:
+        try:
+            c_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if c_dt.tzinfo is None:
+                c_dt = c_dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - c_dt).total_seconds() < 3600
+        except (ValueError, TypeError):
+            pass
+    return False
+
+
+def _sanitize_pending_record(record: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(record, dict):
+        return None
+    cleaned = dict(record)
+    cleaned.pop("wgPrivateKey", None)
+    return cleaned
+
+
+def _create_renewal_invoice_upstream(
+    wg_pubkey: str, server_id: str, duration_months: int
+) -> Optional[Dict[str, Any]]:
+    url = f"{TUNNELSATS_API_URL}/subscription/renew"
+    resp = requests.post(
+        url,
+        json={"wgPublicKey": wg_pubkey, "serverId": server_id, "duration": duration_months},
+        headers=_upstream_headers(),
+        timeout=15,
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _run_background_nwc_auto_renew() -> Dict[str, Any]:
+    if not os.path.exists(DATA_DIR):
+        return {"attempted": False, "reason": "no_meta"}
+    if not _nwc_autorenew_exec_lock.acquire(blocking=False):
+        return {"attempted": False, "reason": "already_in_progress"}
+
+    lock_path = os.path.join(DATA_DIR, ".nwc-autorenew.lock")
+    lock_fd: Optional[int] = None
+    try:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"attempted": False, "reason": "already_in_progress"}
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                return {"attempted": False, "reason": "already_in_progress"}
+
+        meta_path = os.path.join(DATA_DIR, META_FILE)
+        with _metadata_lock:
+            if not os.path.exists(meta_path):
+                return {"attempted": False, "reason": "no_meta"}
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+            except (IOError, OSError, json.JSONDecodeError):
+                return {"attempted": False, "reason": "meta_unreadable"}
+            if not isinstance(meta, dict) or not meta.get("nwcConnected"):
+                return {"attempted": False, "reason": "nwc_not_connected"}
+            meta_snapshot = dict(meta)
+
+        def _persist_nwc_meta_snapshot(snapshot: Dict[str, Any]) -> None:
+            with _metadata_lock:
+                try:
+                    current_meta: Dict[str, Any] = {}
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r", encoding="utf-8") as fp:
+                            loaded = json.load(fp)
+                            if isinstance(loaded, dict):
+                                current_meta = loaded
+                    for key in (
+                        "nwcAutoRenewState",
+                        "pendingRenewal",
+                        "lastDuration",
+                        "lastAmountSats",
+                    ):
+                        if key in snapshot:
+                            current_meta[key] = snapshot[key]
+                        else:
+                            current_meta.pop(key, None)
+                    _write_file_secure(meta_path, json.dumps(current_meta, indent=2))
+                except (IOError, OSError, json.JSONDecodeError) as exc:
+                    app.logger.warning(f"Failed to persist NWC auto-renewal state: {exc}")
+
+        result = maybe_nwc_auto_renew(
+            DATA_DIR,
+            meta_snapshot,
+            create_renewal_fn=_create_renewal_invoice_upstream,
+            persist_meta_fn=_persist_nwc_meta_snapshot,
+        )
+        if result.get("state_changed") or result.get("attempted"):
+            _persist_nwc_meta_snapshot(meta_snapshot)
+
+        # Refresh subscription expiry immediately after a successful NWC auto-renewal payment
+        if result.get("success"):
+            wg_pubkey = str(meta_snapshot.get("wgPublicKey") or "").strip()
+            if wg_pubkey:
+                try:
+                    status_info = _fetch_subscription_status(wg_pubkey)
+                    if isinstance(status_info, dict):
+                        expiry = status_info.get("expiry") or status_info.get("expiresAt")
+                        if expiry:
+                            _update_local_metadata(
+                                {"expiresAt": expiry, **status_info},
+                                payment_hash=result.get("payment_hash"),
+                                wg_pubkey=wg_pubkey,
+                            )
+                except Exception as exc:
+                    app.logger.debug(f"Post-NWC renewal status sync skipped: {exc}")
+        return result
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        _nwc_autorenew_exec_lock.release()
+
+
+def _nwc_auto_renew_scheduler_tick() -> Dict[str, Any]:
+    """
+    Server-side periodic tick that syncs subscription expiry when needed and executes
+    NWC auto-renewal on its 7-day window and 1h/6h retry schedule without requiring dashboard visits.
+    """
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    wg_pubkey = ""
+    has_expiry = False
+    with _metadata_lock:
+        if not os.path.exists(meta_path):
+            return {"attempted": False, "reason": "no_meta"}
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except (IOError, OSError, json.JSONDecodeError):
+            return {"attempted": False, "reason": "meta_unreadable"}
+        if not isinstance(meta, dict) or not meta.get("nwcConnected"):
+            return {"attempted": False, "reason": "nwc_not_connected"}
+        wg_pubkey = str(meta.get("wgPublicKey") or "").strip()
+        has_expiry = bool(meta.get("expiresAt"))
+
+    if wg_pubkey:
+        now = time.time()
+        should_sync = not has_expiry
+        with _subscription_sync_lock:
+            if now >= _next_subscription_sync_time.get(wg_pubkey, 0.0):
+                should_sync = True
+                _next_subscription_sync_time[wg_pubkey] = now + SYNC_INTERVAL_SECONDS
+        if should_sync:
+            status_info = _fetch_subscription_status(wg_pubkey)
+            if isinstance(status_info, dict):
+                expiry = status_info.get("expiry") or status_info.get("expiresAt")
+                if expiry:
+                    if _update_local_metadata({"expiresAt": expiry, **status_info}, wg_pubkey=wg_pubkey):
+                        raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
+                        if raw_vpn_port is not None:
+                            apply_vpn_port(raw_vpn_port, expected_pubkey=wg_pubkey)
+                else:
+                    with _subscription_sync_lock:
+                        _next_subscription_sync_time[wg_pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+            else:
+                with _subscription_sync_lock:
+                    _next_subscription_sync_time[wg_pubkey] = time.time() + RETRY_INTERVAL_SECONDS
+
+    return _run_background_nwc_auto_renew()
+
+
+def start_nwc_auto_renew_scheduler(interval_seconds: Optional[float] = None) -> bool:
+    """Start the background server-side NWC auto-renewal scheduler daemon thread if not running."""
+    global _nwc_scheduler_thread
+    if TUNNELSATS_ROLE == "daemon":
+        return False
+    interval = max(10.0, float(interval_seconds or NWC_SCHEDULER_INTERVAL_SECONDS))
+    with _nwc_scheduler_lock:
+        if _nwc_scheduler_thread is not None and _nwc_scheduler_thread.is_alive():
+            return False
+        _nwc_scheduler_stop.clear()
+
+        def _scheduler_loop():
+            while not _nwc_scheduler_stop.is_set():
+                try:
+                    _nwc_auto_renew_scheduler_tick()
+                except Exception as exc:
+                    app.logger.error(f"Error in NWC auto-renew scheduler tick: {exc}")
+                if _nwc_scheduler_stop.wait(timeout=interval):
+                    break
+
+        _nwc_scheduler_thread = threading.Thread(
+            target=_scheduler_loop,
+            name="nwc_auto_renew_scheduler",
+            daemon=True,
+        )
+        _nwc_scheduler_thread.start()
+        return True
+
+
 @app.route("/api/subscription/create", methods=["POST"])
 def create_subscription():
-    return proxy_request("POST", "subscription/create", request.json)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+    else:
+        payload = dict(payload)
+
+    if "referralCode" in payload and payload["referralCode"] is not None and payload["referralCode"] != "":
+        ref_code = payload["referralCode"]
+        if not isinstance(ref_code, str) or not REFERRAL_CODE_RE.fullmatch(ref_code.strip()):
+            return jsonify({"success": False, "error": "Invalid referralCode format."}), 400
+        payload["referralCode"] = ref_code.strip()
+
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    custom_pub = str(payload.get("wgPublicKey") or "").strip()
+    if not custom_pub and os.path.exists(meta_path):
+        with _metadata_lock:
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded_meta = json.load(fp)
+                if isinstance(loaded_meta, dict):
+                    existing_po = loaded_meta.get("pendingOrder")
+                    if (
+                        isinstance(existing_po, dict)
+                        and _is_pending_invoice_active(existing_po)
+                        and str(existing_po.get("serverId") or "") == str(payload.get("serverId") or "")
+                        and str(existing_po.get("duration") or "") == str(payload.get("duration") or "")
+                        and str(existing_po.get("referralCode") or "") == str(payload.get("referralCode") or "")
+                        and existing_po.get("wgPublicKey")
+                        and existing_po.get("wgPrivateKey")
+                    ):
+                        sanitized = _sanitize_pending_record(existing_po) or {}
+                        return jsonify({**sanitized, "reused": True}), 200
+            except (IOError, OSError, json.JSONDecodeError):
+                pass
+
+    local_priv = ""
+    local_pub = custom_pub
+    if not local_pub:
+        local_priv, local_pub = generate_wg_keypair()
+        if payload.get("generateLocalKey") is True:
+            payload["wgPublicKey"] = local_pub
+
+    proxy_res = proxy_request("POST", "subscription/create", payload)
+    if len(proxy_res) == 3:
+        content, status_code, headers = proxy_res
+        if status_code == 200 and os.path.exists(DATA_DIR):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and data.get("paymentHash"):
+                    pending_order = {
+                        "paymentHash": str(data.get("paymentHash")),
+                        "invoice": str(data.get("invoice") or ""),
+                        "amountSats": data.get("amountSats", data.get("amount")),
+                        "serverId": str(payload.get("serverId") or ""),
+                        "duration": payload.get("duration"),
+                        "referralCode": str(payload.get("referralCode") or ""),
+                        "wgPublicKey": local_pub,
+                        "wgPrivateKey": local_priv,
+                        "expiresAt": str(data.get("expiresAt") or ""),
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                    }
+                    with _metadata_lock:
+                        meta: Dict[str, Any] = {}
+                        if os.path.exists(meta_path):
+                            try:
+                                with open(meta_path, "r", encoding="utf-8") as fp:
+                                    loaded = json.load(fp)
+                                    if isinstance(loaded, dict):
+                                        meta = loaded
+                            except (IOError, OSError, json.JSONDecodeError):
+                                meta = {}
+                        pending_orders = (
+                            dict(meta.get("pendingOrders") or {})
+                            if isinstance(meta.get("pendingOrders"), dict)
+                            else {}
+                        )
+                        ph_key = str(pending_order["paymentHash"])
+                        pending_orders.pop(ph_key, None)
+                        pending_orders[ph_key] = pending_order
+                        while len(pending_orders) > 20:
+                            oldest_key = next(iter(pending_orders))
+                            pending_orders.pop(oldest_key, None)
+                        meta["pendingOrders"] = pending_orders
+                        meta["pendingOrder"] = pending_order
+                        _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            except Exception as exc:
+                app.logger.warning(f"Failed to record pendingOrder metadata: {exc}")
+    return proxy_res
 
 
 @app.route("/api/subscription/<paymentHash>", methods=["GET"])
@@ -3422,27 +4067,121 @@ def check_subscription(paymentHash):
     # Proxy the check request to the core API
     url = f"{TUNNELSATS_API_URL}/subscription/{paymentHash}"
     try:
-        resp = requests.get(url, headers={"Content-Type": "application/json"}, timeout=10)
-        if resp.status_code == 200:
+        resp = requests.get(url, headers=_upstream_headers(), timeout=10)
+        if resp.status_code in (200, 202):
             try:
                 data = resp.json()
-                # If the subscription is paid, ensure our local metadata is in sync.
                 if not isinstance(data, dict):
                     app.logger.warning("Unexpected subscription response shape: expected JSON object.")
                 elif data.get("status") == "paid":
-                    # Support both standard 'subscription' object and top-level renewal fields
-                    new_expiry = data.get("newExpiry")
-                    sub_data = data.get("subscription")
-                    
-                    if isinstance(sub_data, dict):
-                        sync_payload = dict(sub_data)
-                        # Renewal APIs may include top-level newExpiry even when subscription exists.
-                        if new_expiry:
-                            sync_payload["newExpiry"] = new_expiry
-                        _update_local_metadata(sync_payload, payment_hash=paymentHash)
-                    elif new_expiry:
-                        # Direct renewal response format
-                        _update_local_metadata({"newExpiry": new_expiry}, payment_hash=paymentHash)
+                    is_bandwidth_reset = data.get("type") == "bandwidth_reset"
+                    meta_path = os.path.join(DATA_DIR, META_FILE)
+                    if not is_bandwidth_reset and os.path.exists(meta_path):
+                        with _metadata_lock:
+                            try:
+                                with open(meta_path, "r", encoding="utf-8") as fp:
+                                    cur_meta = json.load(fp)
+                                if (
+                                    isinstance(cur_meta, dict)
+                                    and isinstance(cur_meta.get("pendingReset"), dict)
+                                    and cur_meta["pendingReset"].get("paymentHash") == paymentHash
+                                ):
+                                    is_bandwidth_reset = True
+                            except (IOError, OSError, json.JSONDecodeError):
+                                pass
+
+                    if is_bandwidth_reset:
+                        pubkey_to_sync = ""
+                        with _metadata_lock:
+                            if os.path.exists(meta_path):
+                                try:
+                                    with open(meta_path, "r", encoding="utf-8") as fp:
+                                        meta = json.load(fp)
+                                    if isinstance(meta, dict):
+                                        active_wg_pub = str(meta.get("wgPublicKey") or "").strip()
+                                        sub_obj = data.get("subscription") if isinstance(data.get("subscription"), dict) else {}
+                                        resp_wg_pub = str(
+                                            data.get("wgPublicKey") or sub_obj.get("wgPublicKey") or ""
+                                        ).strip()
+                                        pending_reset = (
+                                            meta.get("pendingReset")
+                                            if isinstance(meta.get("pendingReset"), dict)
+                                            else {}
+                                        )
+                                        matches_pending = bool(
+                                            pending_reset and pending_reset.get("paymentHash") == paymentHash
+                                        )
+                                        pending_pub = str(pending_reset.get("wgPublicKey") or "").strip()
+                                        applied_hashes = (
+                                            list(meta.get("appliedResetHashes") or [])
+                                            if isinstance(meta.get("appliedResetHashes"), list)
+                                            else []
+                                        )
+                                        already_applied = paymentHash in applied_hashes
+                                        pubkey_conflict = bool(
+                                            active_wg_pub
+                                            and (
+                                                (resp_wg_pub and resp_wg_pub != active_wg_pub)
+                                                or (matches_pending and pending_pub and pending_pub != active_wg_pub)
+                                            )
+                                        )
+                                        belongs_to_current = not pubkey_conflict and (
+                                            matches_pending
+                                            or (bool(active_wg_pub) and resp_wg_pub == active_wg_pub)
+                                            or (not pending_reset and not resp_wg_pub)
+                                        )
+                                        if belongs_to_current and not already_applied:
+                                            if matches_pending:
+                                                meta.pop("pendingReset", None)
+                                            sub_tel = (
+                                                dict(meta.get("subscriptionTelemetry") or {})
+                                                if isinstance(meta.get("subscriptionTelemetry"), dict)
+                                                else {}
+                                            )
+                                            sub_tel["bandwidthUsedGb"] = 0.0
+                                            max_resets = int(sub_tel.get("maxResetsPerMonth") or 2)
+                                            rem_resets = data.get(
+                                                "bandwidthResetsRemaining", data.get("resetsRemaining")
+                                            )
+                                            if rem_resets is not None and not isinstance(rem_resets, bool):
+                                                try:
+                                                    sub_tel["resetsThisMonth"] = max(
+                                                        0, max_resets - int(rem_resets)
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    sub_tel["resetsThisMonth"] = (
+                                                        int(sub_tel.get("resetsThisMonth") or 0) + 1
+                                                    )
+                                            else:
+                                                sub_tel["resetsThisMonth"] = (
+                                                    int(sub_tel.get("resetsThisMonth") or 0) + 1
+                                                )
+                                            sub_tel["status"] = "active"
+                                            sub_tel["lastSyncedAt"] = datetime.now(timezone.utc).isoformat()
+                                            meta["subscriptionTelemetry"] = sub_tel
+                                            if paymentHash:
+                                                applied_hashes.append(paymentHash)
+                                                meta["appliedResetHashes"] = applied_hashes[-20:]
+                                            pubkey_to_sync = active_wg_pub
+                                            _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                                except (IOError, OSError, json.JSONDecodeError) as exc:
+                                    app.logger.warning(f"Failed to update metadata on bandwidth reset: {exc}")
+                        if pubkey_to_sync:
+                            with _subscription_sync_lock:
+                                _next_subscription_sync_time.pop(pubkey_to_sync, None)
+                            _trigger_lazy_subscription_sync(pubkey_to_sync)
+                    else:
+                        # Support both standard 'subscription' object and top-level renewal fields
+                        new_expiry = data.get("newExpiry")
+                        sub_data = data.get("subscription")
+
+                        if isinstance(sub_data, dict):
+                            sync_payload = dict(sub_data)
+                            if new_expiry:
+                                sync_payload["newExpiry"] = new_expiry
+                            _update_local_metadata(sync_payload, payment_hash=paymentHash)
+                        elif new_expiry:
+                            _update_local_metadata({"newExpiry": new_expiry}, payment_hash=paymentHash)
             except ValueError as exc:
                 app.logger.warning(f"Failed to parse subscription data or update metadata: {exc}")
             except Exception as exc:
@@ -3510,6 +4249,90 @@ def _update_local_metadata(
             meta["paymentHash"] = payment_hash
             changed = True
 
+        if payment_hash and isinstance(meta.get("pendingRenewal"), dict):
+            if meta["pendingRenewal"].get("paymentHash") == payment_hash:
+                pending_ren = meta.pop("pendingRenewal")
+                if pending_ren.get("duration") and not subscription_data.get("duration"):
+                    meta["lastDuration"] = pending_ren["duration"]
+                if pending_ren.get("amountSats") and not subscription_data.get("amountSats"):
+                    meta["lastAmountSats"] = pending_ren["amountSats"]
+                changed = True
+
+        if subscription_data.get("duration") is not None:
+            meta["lastDuration"] = subscription_data["duration"]
+            changed = True
+        if subscription_data.get("amountSats") is not None:
+            meta["lastAmountSats"] = subscription_data["amountSats"]
+            changed = True
+
+        bandwidth_counter_keys = (
+            "bandwidth_used_gb",
+            "bandwidthUsedGb",
+            "bandwidth_limit_gb",
+            "bandwidthLimitGb",
+            "bandwidth_resets_this_month",
+            "resetsThisMonth",
+            "max_resets_per_month",
+            "maxResetsPerMonth",
+        )
+        telemetry_keys = bandwidth_counter_keys + (
+            "status",
+            "subscription_status",
+            "subscriptionStatus",
+            "lastSyncedAt",
+        )
+        if any(k in subscription_data for k in telemetry_keys):
+            sub_tel = (
+                dict(meta.get("subscriptionTelemetry") or {})
+                if isinstance(meta.get("subscriptionTelemetry"), dict)
+                else {}
+            )
+            if "bandwidth_used_gb" in subscription_data or "bandwidthUsedGb" in subscription_data:
+                val = subscription_data.get("bandwidth_used_gb", subscription_data.get("bandwidthUsedGb"))
+                if val is not None and not isinstance(val, bool):
+                    try:
+                        sub_tel["bandwidthUsedGb"] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+            if "bandwidth_limit_gb" in subscription_data or "bandwidthLimitGb" in subscription_data:
+                val = subscription_data.get("bandwidth_limit_gb", subscription_data.get("bandwidthLimitGb"))
+                if val is not None and not isinstance(val, bool):
+                    try:
+                        sub_tel["bandwidthLimitGb"] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+            if "bandwidth_resets_this_month" in subscription_data or "resetsThisMonth" in subscription_data:
+                val = subscription_data.get(
+                    "bandwidth_resets_this_month", subscription_data.get("resetsThisMonth")
+                )
+                if val is not None and not isinstance(val, bool):
+                    try:
+                        sub_tel["resetsThisMonth"] = int(val)
+                    except (TypeError, ValueError):
+                        pass
+            if "max_resets_per_month" in subscription_data or "maxResetsPerMonth" in subscription_data:
+                val = subscription_data.get(
+                    "max_resets_per_month", subscription_data.get("maxResetsPerMonth")
+                )
+                if val is not None and not isinstance(val, bool):
+                    try:
+                        sub_tel["maxResetsPerMonth"] = int(val)
+                    except (TypeError, ValueError):
+                        pass
+            status_val = (
+                subscription_data.get("subscription_status")
+                or subscription_data.get("subscriptionStatus")
+                or subscription_data.get("status")
+            )
+            if status_val:
+                sub_tel["status"] = str(status_val)
+            if any(k in subscription_data for k in bandwidth_counter_keys) or "lastSyncedAt" in subscription_data:
+                sub_tel["lastSyncedAt"] = (
+                    subscription_data.get("lastSyncedAt") or datetime.now(timezone.utc).isoformat()
+                )
+            meta["subscriptionTelemetry"] = sub_tel
+            changed = True
+
         if changed:
             try:
                 _write_file_secure(meta_path, json.dumps(meta, indent=2))
@@ -3528,13 +4351,58 @@ def claim_subscription():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         payload = {}
-    
+    else:
+        payload = dict(payload)
+
+    if "referralCode" in payload and payload["referralCode"] is not None and payload["referralCode"] != "":
+        ref_code = payload["referralCode"]
+        if not isinstance(ref_code, str) or not REFERRAL_CODE_RE.fullmatch(ref_code.strip()):
+            return jsonify({"success": False, "error": "Invalid referralCode format."}), 400
+        payload["referralCode"] = ref_code.strip()
+
+    pending_order: Dict[str, Any] = {}
+    req_hash = str(payload.get("paymentHash") or "").strip()
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded_meta = json.load(fp)
+                if isinstance(loaded_meta, dict):
+                    pending_orders_map = (
+                        loaded_meta.get("pendingOrders")
+                        if isinstance(loaded_meta.get("pendingOrders"), dict)
+                        else {}
+                    )
+                    if req_hash and isinstance(pending_orders_map.get(req_hash), dict):
+                        pending_order = dict(pending_orders_map[req_hash])
+                    elif isinstance(loaded_meta.get("pendingOrder"), dict):
+                        po = loaded_meta["pendingOrder"]
+                        if not po.get("paymentHash") or po.get("paymentHash") == req_hash:
+                            pending_order = dict(po)
+            except (IOError, OSError, json.JSONDecodeError):
+                pass
+
+    if not payload.get("wgPublicKey") and pending_order.get("wgPublicKey"):
+        payload["wgPublicKey"] = pending_order["wgPublicKey"]
+
+    upstream_payload = dict(payload)
+    upstream_payload.pop("wgPrivateKey", None)
+
     # Hide sensitive logs
     app.logger.info("Initiating subscription claim upstream")
     
     try:
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(url, json=upstream_payload, headers=_upstream_headers(), timeout=10)
         app.logger.info(f"Upstream claim responded with HTTP {resp.status_code}, len: {len(resp.content)}")
+
+        excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
+        filtered_headers = [
+            (name, value) for (name, value) in resp.headers.items() if name.lower() not in excluded_headers
+        ]
+
+        if resp.status_code == 202:
+            return (resp.content, 202, filtered_headers)
         
         if resp.status_code == 200:
             try:
@@ -3547,13 +4415,65 @@ def claim_subscription():
                 app.logger.error(f"Upstream claim returned non-object JSON payload: {type(data).__name__}")
                 return jsonify({"success": False, "error": "Invalid upstream payload (expected JSON object)"}), 400
 
+            if data.get("status") == "processing":
+                return (resp.content, 202, filtered_headers)
+
             # If the upstream actively rejected the claim with a 200 OK (semantic failure)
             if data.get("success") is False or data.get("status") == "error":
                 msg = data.get("message", "Subscription already claimed or invalid payload.")
                 app.logger.error(f"Upstream claim semantic failure: {msg}")
                 return jsonify({"success": False, "error": msg}), 400
 
+            sub = data.get("subscription")
+            subscription_data = sub if isinstance(sub, dict) else {}
+            srv = data.get("server")
+            server_data = srv if isinstance(srv, dict) else {}
+            peer = data.get("peer")
+            peer_data = peer if isinstance(peer, dict) else {}
+            server_id = secure_filename(
+                subscription_data.get("serverId")
+                or server_data.get("id")
+                or pending_order.get("serverId")
+                or "unknown"
+            ) or "unknown"
+
+            expected_client_pub = str(
+                pending_order.get("wgPublicKey") or payload.get("wgPublicKey") or ""
+            ).strip()
+            has_server_pub = bool(
+                server_data.get("publicKey")
+                or server_data.get("wgPublicKey")
+                or peer_data.get("serverPublicKey")
+                or data.get("serverPublicKey")
+                or data.get("peerPublicKey")
+            )
+            if (
+                peer_data.get("publicKey")
+                and has_server_pub
+                and expected_client_pub
+                and str(peer_data.get("publicKey")).strip() != expected_client_pub
+            ):
+                app.logger.error("Upstream claim returned mismatched client peer.publicKey.")
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "Invalid upstream payload: peer.publicKey does not match local WireGuard public key",
+                        }
+                    ),
+                    400,
+                )
+
             full_config = data.get("config") or data.get("fullConfig") or data.get("wireguardConfig")
+            if not full_config:
+                local_priv = (
+                    pending_order.get("wgPrivateKey")
+                    or payload.get("wgPrivateKey")
+                    or peer_data.get("privateKey")
+                    or ""
+                )
+                if local_priv:
+                    full_config = assemble_wg_config(str(local_priv), data, fallback_server_id=server_id)
             if not full_config:
                 app.logger.error(f"Upstream claim response omitted fullConfig. Received keys: {list(data.keys())}")
                 return jsonify({"success": False, "error": "Invalid upstream payload: Missing WireGuard configuration"}), 400
@@ -3568,39 +4488,39 @@ def claim_subscription():
                 return jsonify({"success": False, "error": "Invalid upstream payload: Unsafe WireGuard configuration"}), 400
             full_config = _ensure_peer_persistent_keepalive(sanitized_full_config or "", keepalive=25)
 
-            sub = data.get("subscription")
-            subscription_data = sub if isinstance(sub, dict) else {}
-            srv = data.get("server")
-            server_data = srv if isinstance(srv, dict) else {}
-            peer = data.get("peer")
-            peer_data = peer if isinstance(peer, dict) else {}
-            
-            server_id = secure_filename(subscription_data.get("serverId") or server_data.get("id") or "unknown") or "unknown"
-
             parsed = _parse_config_comments(full_config)
             payment_hash = payload.get("paymentHash", "")
             meta = {
                 "serverId": server_id,
                 "paymentHash": payment_hash,
-                "wgPublicKey": parsed.get("wgPublicKey", ""),
+                "wgPublicKey": parsed.get("wgPublicKey") or payload.get("wgPublicKey") or pending_order.get("wgPublicKey") or "",
                 "peerAddress": peer_data.get("address", parsed.get("peerAddress", "")),
                 "presharedKey": peer_data.get("presharedKey", parsed.get("presharedKey", "")),
-                "vpnPort": parsed.get("vpnPort", 0),
+                "vpnPort": data.get("vpnPort") or parsed.get("vpnPort", 0),
                 "serverDomain": parsed.get("serverDomain", ""),
                 "wgEndpoint": server_data.get("endpoint", parsed.get("wgEndpoint", "")),
                 "claimedAt": datetime.now(timezone.utc).isoformat(),
-                "expiresAt": data.get("subscriptionEnd") or subscription_data.get("expiresAt", parsed.get("expiresAt", "")),
+                "expiresAt": (
+                    data.get("expiresAt")
+                    or data.get("subscriptionEnd")
+                    or subscription_data.get("expiresAt", parsed.get("expiresAt", ""))
+                ),
             }
+            claimed_dur = (
+                pending_order.get("duration")
+                or subscription_data.get("duration")
+                or payload.get("duration")
+            )
+            if claimed_dur in (1, 3, 6, 12):
+                meta["lastDuration"] = int(claimed_dur)
+            if pending_order.get("amountSats"):
+                meta["lastAmountSats"] = pending_order["amountSats"]
 
             if _persist_tunnelsats_config_and_meta(full_config, meta):
                 app.logger.info("Successfully persisted claimed configuration and metadata.")
             else:
                 return jsonify({"success": False, "error": "Failed to write configuration to local disk."}), 500
 
-        excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
-        filtered_headers = [
-            (name, value) for (name, value) in resp.headers.items() if name.lower() not in excluded_headers
-        ]
         return (resp.content, resp.status_code, filtered_headers)
     except requests.RequestException as exc:
         app.logger.error(f"Network error during upstream claim: {exc}")
@@ -3612,6 +4532,15 @@ def renew_subscription():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         payload = {}
+    else:
+        payload = dict(payload)
+
+    if "referralCode" in payload and payload["referralCode"] is not None and payload["referralCode"] != "":
+        ref_code = payload["referralCode"]
+        if not isinstance(ref_code, str) or not REFERRAL_CODE_RE.fullmatch(ref_code.strip()):
+            return jsonify({"success": False, "error": "Invalid referralCode format."}), 400
+        payload["referralCode"] = ref_code.strip()
+
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
         try:
@@ -3629,8 +4558,461 @@ def renew_subscription():
 
     app.logger.info("Initiating renewal upstream...")
     res = proxy_request("POST", "subscription/renew", payload)
+    if len(res) == 3:
+        content, status_code, _headers = res
+        if status_code == 200 and os.path.exists(meta_path):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and data.get("paymentHash"):
+                    with _metadata_lock:
+                        with open(meta_path, "r", encoding="utf-8") as fp:
+                            cur_meta = json.load(fp)
+                        if isinstance(cur_meta, dict):
+                            cur_meta["pendingRenewal"] = {
+                                "paymentHash": str(data.get("paymentHash")),
+                                "invoice": str(data.get("invoice") or ""),
+                                "amountSats": data.get("amountSats", data.get("amount")),
+                                "serverId": str(payload.get("serverId") or ""),
+                                "wgPublicKey": str(payload.get("wgPublicKey") or ""),
+                                "duration": payload.get("duration"),
+                                "expiresAt": str(data.get("expiresAt") or ""),
+                                "createdAt": datetime.now(timezone.utc).isoformat(),
+                            }
+                            _write_file_secure(meta_path, json.dumps(cur_meta, indent=2))
+            except Exception as exc:
+                app.logger.warning(f"Failed to persist pendingRenewal metadata: {exc}")
     app.logger.info("Upstream renewal completed.")
     return res
+
+
+@app.route("/api/subscription/bandwidth-reset", methods=["POST"])
+def bandwidth_reset():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+    else:
+        payload = dict(payload)
+
+    wg_pubkey = str(payload.get("wgPublicKey") or "").strip()
+    server_id = str(payload.get("serverId") or "").strip()
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    cached_pending: Optional[Dict[str, Any]] = None
+
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                if isinstance(meta, dict):
+                    if not wg_pubkey:
+                        wg_pubkey = str(meta.get("wgPublicKey") or "").strip()
+                    if not server_id:
+                        server_id = str(meta.get("serverId") or "").strip()
+                    pr = meta.get("pendingReset")
+                    if _is_pending_invoice_active(pr, wg_pubkey):
+                        cached_pending = dict(pr)
+            except (IOError, OSError, json.JSONDecodeError) as exc:
+                app.logger.warning(f"Failed to read metadata for bandwidth-reset: {exc}")
+
+    if not wg_pubkey or not server_id:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Missing wgPublicKey or serverId for bandwidth reset.",
+                }
+            ),
+            400,
+        )
+
+    if cached_pending is not None:
+        return jsonify({**cached_pending, "reused": True}), 200
+
+    res = proxy_request(
+        "POST",
+        "subscription/bandwidth-reset",
+        {"wgPublicKey": wg_pubkey, "serverId": server_id},
+    )
+    if len(res) == 3:
+        content, status_code, _headers = res
+        if status_code == 200 and os.path.exists(DATA_DIR):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and data.get("paymentHash"):
+                    pending_reset = {
+                        "paymentHash": str(data.get("paymentHash")),
+                        "invoice": str(data.get("invoice") or ""),
+                        "amountSats": data.get("amountSats", data.get("amount")),
+                        "expiresAt": str(data.get("expiresAt") or ""),
+                        "resetsRemaining": data.get("resetsRemaining"),
+                        "wgPublicKey": wg_pubkey,
+                        "serverId": server_id,
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                    }
+                    with _metadata_lock:
+                        cur_meta: Dict[str, Any] = {}
+                        if os.path.exists(meta_path):
+                            try:
+                                with open(meta_path, "r", encoding="utf-8") as fp:
+                                    loaded = json.load(fp)
+                                    if isinstance(loaded, dict):
+                                        cur_meta = loaded
+                            except (IOError, OSError, json.JSONDecodeError):
+                                cur_meta = {}
+                        cur_meta["pendingReset"] = pending_reset
+                        _write_file_secure(meta_path, json.dumps(cur_meta, indent=2))
+            except Exception as exc:
+                app.logger.warning(f"Failed to save pendingReset metadata: {exc}")
+    return res
+
+
+@app.route("/api/nwc/connect", methods=["POST"])
+def nwc_connect():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+    uri = str(payload.get("uri") or payload.get("nwcUri") or payload.get("nwc_uri") or "").strip()
+    auto_renew_duration = payload.get(
+        "autoRenewDuration",
+        payload.get(
+            "auto_renew_duration",
+            payload.get("renewalDuration", payload.get("renewal_duration", "match")),
+        ),
+    )
+    route_via_tor = bool(payload.get("routeViaTor", payload.get("route_via_tor", False)))
+
+    try:
+        wallet_record = save_nwc_wallet(
+            DATA_DIR,
+            uri=uri,
+            auto_renew_duration=auto_renew_duration,
+            route_via_tor=route_via_tor,
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"success": False, "error": f"Failed to save NWC wallet: {exc}"}), 500
+
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        meta: Dict[str, Any] = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                    if isinstance(loaded, dict):
+                        meta = loaded
+            except (IOError, OSError, json.JSONDecodeError):
+                meta = {}
+        meta["nwcConnected"] = True
+        meta["nwcRelayHost"] = wallet_record["relayHost"]
+        meta["nwcAutoRenewDuration"] = wallet_record["autoRenewDuration"]
+        meta["nwcRouteViaTor"] = wallet_record["routeViaTor"]
+        meta["nwcAutoRenewState"] = {
+            "targetExpiry": meta.get("expiresAt"),
+            "attempts": 0,
+            "lastAttemptAt": None,
+            "nextRetryAt": None,
+            "lastError": None,
+            "budgetWarning": False,
+            "fallbackTaskRaised": False,
+            "restoreReconnectNeeded": False,
+        }
+        try:
+            _write_file_secure(meta_path, json.dumps(meta, indent=2))
+        except OSError as exc:
+            return jsonify({"success": False, "error": f"Failed to update metadata: {exc}"}), 500
+
+    if not app.config.get("TESTING") and not os.environ.get("PYTEST_CURRENT_TEST"):
+        start_nwc_auto_renew_scheduler()
+
+    return jsonify(
+        {
+            "success": True,
+            "nwcConnected": True,
+            "relayHost": wallet_record["relayHost"],
+            "relays": wallet_record["relays"],
+            "autoRenewDuration": wallet_record["autoRenewDuration"],
+            "routeViaTor": wallet_record["routeViaTor"],
+        }
+    )
+
+
+@app.route("/api/nwc/disconnect", methods=["POST"])
+def nwc_disconnect():
+    delete_nwc_wallet(DATA_DIR)
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                if isinstance(meta, dict):
+                    meta["nwcConnected"] = False
+                    meta.pop("nwcRelayHost", None)
+                    meta.pop("nwcAutoRenewState", None)
+                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
+            except (IOError, OSError, json.JSONDecodeError) as exc:
+                app.logger.warning(f"Failed to update metadata on NWC disconnect: {exc}")
+    return jsonify({"success": True, "nwcConnected": False})
+
+
+@app.route("/api/nwc/pay", methods=["POST"])
+def nwc_pay():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    invoice = str(payload.get("invoice") or "").strip()
+    payment_hash = str(payload.get("paymentHash") or "").strip() or None
+    amount_sats = payload.get("amountSats")
+
+    if not invoice and payment_hash:
+        meta_path = os.path.join(DATA_DIR, META_FILE)
+        with _metadata_lock:
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as fp:
+                        meta = json.load(fp)
+                    if isinstance(meta, dict):
+                        for key in ("pendingOrder", "pendingRenewal", "pendingReset"):
+                            cand = meta.get(key)
+                            if isinstance(cand, dict) and cand.get("paymentHash") == payment_hash:
+                                invoice = str(cand.get("invoice") or "").strip()
+                                if amount_sats is None:
+                                    amount_sats = cand.get("amountSats")
+                                break
+                        if not invoice and isinstance(meta.get("pendingOrders"), dict):
+                            cand = meta["pendingOrders"].get(payment_hash)
+                            if isinstance(cand, dict):
+                                invoice = str(cand.get("invoice") or "").strip()
+                                if amount_sats is None:
+                                    amount_sats = cand.get("amountSats")
+                except (IOError, OSError, json.JSONDecodeError):
+                    pass
+
+    if not invoice:
+        return jsonify({"success": False, "error": "Missing BOLT11 invoice."}), 400
+
+    res = pay_invoice_via_nwc(
+        DATA_DIR,
+        invoice=invoice,
+        expected_payment_hash=payment_hash,
+        expected_amount_sats=amount_sats,
+    )
+    if not res.get("success"):
+        status_code = 400 if res.get("code") in ("INVALID_INVOICE", "NOT_CONNECTED") else 502
+        return jsonify(res), status_code
+    return jsonify(res), 200
+
+
+NODE_PUBKEY_RE = re.compile(r"^(02|03)[0-9a-fA-F]{64}$")
+
+
+def _discover_local_node_pubkey_direct(meta: Dict[str, Any]) -> str:
+    """Discover the local LND or CLN node identity pubkey via docker_exec when Docker socket is available."""
+    if SECURE_MODE or K3S_MODE:
+        return ""
+    preferred = str(meta.get("nodeType") or "").strip().lower()
+    candidates = [preferred] if preferred in ("lnd", "cln") else ["lnd", "cln"]
+    for node_type in candidates:
+        if node_type == "lnd":
+            cid = container_id_by_match(LND_CONTAINER_PATTERN)
+            if cid:
+                ok, out = docker_exec(cid, ["lncli", "getinfo"])
+                if ok and out:
+                    start = out.find("{")
+                    if start >= 0:
+                        try:
+                            info, _ = json.JSONDecoder().raw_decode(out[start:])
+                            pk = str(info.get("identity_pubkey") or "").strip()
+                            if pk:
+                                return pk
+                        except Exception:
+                            pass
+        elif node_type == "cln":
+            cid = container_id_by_match(CLN_CONTAINER_PATTERN)
+            if cid:
+                ok, out = docker_exec(cid, ["lightning-cli", "getinfo"])
+                if ok and out:
+                    start = out.find("{")
+                    if start >= 0:
+                        try:
+                            info, _ = json.JSONDecoder().raw_decode(out[start:])
+                            pk = str(info.get("id") or "").strip()
+                            if pk:
+                                return pk
+                        except Exception:
+                            pass
+    return ""
+
+
+def _discover_local_node_pubkey(meta: Dict[str, Any]) -> str:
+    """
+    Discover the local LND or CLN node identity pubkey directly or through tunnelsats-daemon
+    when running inside the unprivileged web container.
+    """
+    if TUNNELSATS_ROLE == "web":
+        try:
+            daemon_resp = request_over_unix_socket(
+                DAEMON_SOCKET_PATH,
+                "GET",
+                "/api/local/node-pubkey",
+                timeout=10.0,
+            )
+            if daemon_resp.status == 200 and daemon_resp.body:
+                parsed = json.loads(daemon_resp.body.decode("utf-8", errors="replace"))
+                if isinstance(parsed, dict):
+                    pk = str(parsed.get("pubkey") or "").strip()
+                    if pk:
+                        return pk
+        except Exception as exc:
+            app.logger.debug(f"Daemon node-pubkey discovery unavailable: {exc}")
+        return ""
+
+    pk = _discover_local_node_pubkey_direct(meta)
+    if pk and os.path.exists(DATA_DIR):
+        meta_path = os.path.join(DATA_DIR, META_FILE)
+        with _metadata_lock:
+            try:
+                cur_meta: Dict[str, Any] = {}
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as fp:
+                        loaded = json.load(fp)
+                        if isinstance(loaded, dict):
+                            cur_meta = loaded
+                if cur_meta.get("nodePubkey") != pk:
+                    cur_meta["nodePubkey"] = pk
+                    _write_file_secure(meta_path, json.dumps(cur_meta, indent=2))
+            except (IOError, OSError, json.JSONDecodeError):
+                pass
+    return pk
+
+
+@app.route("/api/local/node-pubkey", methods=["GET"])
+def local_node_pubkey():
+    meta: Dict[str, Any] = {}
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                    if isinstance(loaded, dict):
+                        meta = loaded
+            except (IOError, OSError, json.JSONDecodeError):
+                meta = {}
+    pubkey = str(meta.get("nodePubkey") or "").strip()
+    if not pubkey:
+        pubkey = _discover_local_node_pubkey(meta)
+    return jsonify({"success": bool(pubkey), "pubkey": pubkey, "secure_mode": SECURE_MODE})
+
+
+@app.route("/api/reachability", methods=["POST"])
+def reachability_test():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    target_socket = str(payload.get("socket") or "").strip()
+    explicit_pubkey = str(payload.get("pubkey") or "").strip()
+    if not explicit_pubkey and "@" in target_socket:
+        cand_pk = target_socket.split("@", 1)[0].strip()
+        if NODE_PUBKEY_RE.fullmatch(cand_pk):
+            explicit_pubkey = cand_pk
+
+    meta: Dict[str, Any] = {}
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    with _metadata_lock:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                    if isinstance(loaded, dict):
+                        meta = loaded
+            except (IOError, OSError, json.JSONDecodeError):
+                meta = {}
+        if explicit_pubkey and NODE_PUBKEY_RE.fullmatch(explicit_pubkey) and os.path.exists(DATA_DIR):
+            if meta.get("nodePubkey") != explicit_pubkey:
+                meta["nodePubkey"] = explicit_pubkey
+                try:
+                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                except (IOError, OSError):
+                    pass
+
+    if not target_socket:
+        server_domain = str(payload.get("serverDomain") or meta.get("serverDomain") or "").strip()
+        vpn_port = payload.get("vpnPort") or meta.get("vpnPort")
+        pubkey = str(explicit_pubkey or meta.get("nodePubkey") or "").strip()
+        if not pubkey:
+            pubkey = _discover_local_node_pubkey(meta)
+        if not pubkey or not server_domain or not vpn_port:
+            missing_pubkey = not bool(pubkey)
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "needsPubkey": missing_pubkey,
+                        "error": (
+                            "Node public key could not be discovered automatically. Enter your 66-character Lightning node pubkey to test reachability."
+                            if missing_pubkey
+                            else "Missing node pubkey, serverDomain, or vpnPort for reachability check."
+                        ),
+                    }
+                ),
+                400,
+            )
+        target_socket = f"{pubkey}@{server_domain}:{vpn_port}"
+
+    if "@" not in target_socket or ":" not in target_socket.rsplit("@", 1)[-1]:
+        return jsonify({"success": False, "error": "Invalid Lightning socket format (expected pubkey@host:port)."}), 400
+
+    url = f"{TUNNELSATS_API_URL}/ping/test"
+    try:
+        resp = requests.post(
+            url,
+            json={"socket": target_socket},
+            headers=_upstream_headers(),
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json() if resp.content else {}
+            if not isinstance(data, dict):
+                data = {}
+            reachable = bool(
+                data.get(
+                    "reachable",
+                    data.get("status") == "reachable" or data.get("success") is True,
+                )
+            )
+            latency_ms = data.get("latency_ms", data.get("latencyMs", data.get("latency")))
+            endpoint_part = (
+                target_socket.rsplit("@", 1)[-1] if "@" in target_socket else target_socket
+            )
+            return jsonify(
+                {
+                    "success": True,
+                    "reachable": reachable,
+                    "latency_ms": latency_ms,
+                    "rtt_ms": latency_ms,
+                    "socket": target_socket,
+                    "endpoint": endpoint_part,
+                    "details": data,
+                }
+            )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "reachable": False,
+                    "socket": target_socket,
+                    "error": f"Reachability check failed with HTTP {resp.status_code}",
+                }
+            ),
+            resp.status_code,
+        )
+    except requests.RequestException as exc:
+        return jsonify({"success": False, "reachable": False, "socket": target_socket, "error": str(exc)}), 502
 
 
 # --- LOCAL APP ROUTES ---
@@ -3950,6 +5332,54 @@ def local_status():
             label = meta["label"]
             flag = meta["flag"]
 
+    telemetry_src = (
+        meta_data.get("subscriptionTelemetry")
+        if isinstance(meta_data.get("subscriptionTelemetry"), dict)
+        else meta_data
+    )
+    telemetry = compute_bandwidth_telemetry(telemetry_src)
+    notices = evaluate_subscription_notices(DATA_DIR, meta_data)
+    wallet_on_disk = load_nwc_wallet(DATA_DIR)
+    nwc_connected = bool(meta_data.get("nwcConnected") and wallet_on_disk)
+    nwc_state_dict = (
+        meta_data.get("nwcAutoRenewState")
+        if isinstance(meta_data.get("nwcAutoRenewState"), dict)
+        else {}
+    )
+    nwc_auto_dur = (
+        (wallet_on_disk.get("autoRenewDuration") if wallet_on_disk else None)
+        or meta_data.get("nwcAutoRenewDuration")
+        or "match"
+    )
+    nwc_last_error = nwc_state_dict.get("lastError")
+    nwc_healthy = bool(
+        nwc_connected
+        and not nwc_state_dict.get("budgetWarning")
+        and not nwc_state_dict.get("fallbackTaskRaised")
+        and not nwc_state_dict.get("restoreReconnectNeeded")
+        and not nwc_last_error
+    )
+    nwc_info = {
+        "connected": nwc_connected,
+        "healthy": nwc_healthy,
+        "last_error": nwc_last_error,
+        "relay_host": str(
+            (wallet_on_disk.get("relayHost") if wallet_on_disk else None)
+            or meta_data.get("nwcRelayHost")
+            or ""
+        ),
+        "auto_renew_duration": nwc_auto_dur,
+        "renewal_duration": nwc_auto_dur,
+        "route_via_tor": bool(
+            (wallet_on_disk.get("routeViaTor") if wallet_on_disk else None)
+            or meta_data.get("nwcRouteViaTor")
+            or False
+        ),
+        "last_duration": meta_data.get("lastDuration"),
+        "last_amount_sats": meta_data.get("lastAmountSats"),
+        "state": nwc_state_dict,
+    }
+
     return jsonify(
         {
             "wg_status": wg_status,
@@ -4000,6 +5430,22 @@ def local_status():
                 active_target_impl, str(server_domain), expected_port, target_container
             ),
             "announcement_verification_required": verification_required,
+            "subscription_telemetry": telemetry,
+            "bandwidth_used_gb": telemetry["bandwidth_used_gb"],
+            "bandwidth_limit_gb": telemetry["bandwidth_limit_gb"],
+            "bandwidth_resets_this_month": telemetry["bandwidth_resets_this_month"],
+            "max_resets_per_month": telemetry["max_resets_per_month"],
+            "resets_remaining_this_month": telemetry["resets_remaining_this_month"],
+            "next_free_reset_utc": telemetry["next_free_reset_utc"],
+            "pace_pct": telemetry["pace_pct"],
+            "projected_gb": telemetry["projected_gb"],
+            "subscription_status": telemetry["subscription_status"],
+            "last_synced_at": telemetry["last_synced_at"],
+            "nwc": nwc_info,
+            "notices": notices,
+            "pending_order": _sanitize_pending_record(meta_data.get("pendingOrder")),
+            "pending_renewal": _sanitize_pending_record(meta_data.get("pendingRenewal")),
+            "pending_reset": _sanitize_pending_record(meta_data.get("pendingReset")),
         }
     )
 
@@ -4128,7 +5574,7 @@ def export_config():
         return jsonify({"success": False, "error": "No configuration directory found."}), 404
     conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
     if not os.path.exists(conf_path):
-        # Filter to tunnelsats-prefixed profiles only — matching runtime discovery;
+        # Filter to tunnelsats-prefixed profiles only - matching runtime discovery;
         # non-TunnelSats configs (e.g. mullvad.conf) must never be exported as a backup.
         confs = [
             f for f in os.listdir(DATA_DIR)
@@ -4209,6 +5655,17 @@ def get_metadata():
                 if isinstance(meta_data, dict):
                     meta_data.pop("presharedKey", None)
                     meta_data.pop("paymentHash", None)
+                    meta_data.pop("wgPrivateKey", None)
+                    if isinstance(meta_data.get("pendingOrder"), dict):
+                        meta_data["pendingOrder"] = _sanitize_pending_record(
+                            meta_data["pendingOrder"]
+                        )
+                    if isinstance(meta_data.get("pendingOrders"), dict):
+                        meta_data["pendingOrders"] = {
+                            k: _sanitize_pending_record(v)
+                            for k, v in meta_data["pendingOrders"].items()
+                            if isinstance(v, dict)
+                        }
                 else:
                     meta_data = {}
         except FileNotFoundError:
@@ -4709,6 +6166,7 @@ if __name__ == "__main__":
             daemon_server.server_close()
         raise SystemExit(0)
 
+    start_nwc_auto_renew_scheduler()
     dashboard_host, dashboard_port = dashboard_bind_config()
     app.logger.info(
         "Starting internal dashboard backend on %s:%d",

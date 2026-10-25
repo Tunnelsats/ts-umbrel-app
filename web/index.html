@@ -38,9 +38,6 @@
         <!-- Main Content Area -->
         <main
             class="order-first md:order-last flex-1 p-8 md:p-12 overflow-y-auto scrollbar-hide relative bg-gradient-to-br from-gray-900/40 to-black/60 main-content-mask">
-            
-            <!-- 3D Globe Background -->
-            <div id="globe-container" class="absolute inset-0 z-0"></div>
 
             <!-- Dynamic Background Glows -->
             <div
@@ -52,6 +49,9 @@
 
             <!-- 1. Dashboard View -->
             <section id="view-dashboard" class="relative z-10 space-y-6">
+                <!-- Actionable Subscription & Bandwidth Notice Banners (v3.5.0) -->
+                <div id="notice-region" class="space-y-3 mb-6 hidden" role="region" aria-label="Subscription and Bandwidth Notices" aria-live="polite"></div>
+
                 <div>
                     <h2 class="text-xl font-bold text-white mb-4">VPN Status</h2>
                     <div class="grid grid-cols-1 gap-4">
@@ -133,6 +133,153 @@
                     </div>
                 </div>
 
+                <!-- Visual Gauges Row: Subscription Timeline & Monthly Bandwidth (v3.5.0) -->
+                <div class="mt-6">
+                    <h2 class="text-xl font-bold text-white mb-4">Subscription &amp; Bandwidth Telemetry</h2>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <!-- Card A: Subscription Timeline Ring -->
+                        <div id="card-subscription-timeline"
+                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 transition-all duration-300 flex flex-col justify-between relative overflow-hidden">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center space-x-2.5">
+                                    <svg class="w-5 h-5 text-tsgreen" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                    </svg>
+                                    <h3 class="text-sm font-semibold text-gray-300">Subscription Timeline</h3>
+                                </div>
+                                <span id="subscription-phase-badge"
+                                    class="text-[10px] uppercase font-bold px-2.5 py-0.5 rounded-full border border-gray-700 bg-gray-800 text-gray-400">No subscription</span>
+                            </div>
+
+                            <div class="flex flex-col sm:flex-row items-center gap-5 my-2">
+                                <div id="subscription-ring-wrap" class="w-40 h-40 relative flex items-center justify-center shrink-0">
+                                    <svg viewBox="0 0 120 120" class="w-full h-full -rotate-90" aria-hidden="true">
+                                        <circle cx="60" cy="60" r="50" stroke-width="6" fill="none"
+                                            class="text-gray-800" stroke="currentColor"></circle>
+                                        <circle id="subscription-ring-progress" cx="60" cy="60" r="50" stroke-width="6" fill="none"
+                                            stroke-linecap="round" stroke-dasharray="314.16" stroke-dashoffset="314.16"
+                                            class="text-tsgreen transition-all duration-500" stroke="currentColor"></circle>
+                                    </svg>
+                                    <div class="absolute inset-6 flex flex-col items-center justify-center text-center pointer-events-none">
+                                        <span id="subscription-countdown" class="text-base font-mono font-bold text-white tracking-tight leading-tight whitespace-nowrap">--</span>
+                                        <span id="subscription-expiry-sub" class="text-[10px] font-mono text-gray-400 mt-1 leading-tight whitespace-nowrap">Not setup</span>
+                                    </div>
+                                </div>
+                                <progress id="subscription-progress-sr" class="sr-only" max="100" value="0">0%</progress>
+
+                                <div class="flex-1 space-y-3 w-full text-center sm:text-left">
+                                    <p id="subscription-timeline-desc" class="text-xs text-gray-400 leading-relaxed">
+                                        Activate or import a TunnelSats subscription to monitor remaining time and enable NWC auto-renewal.
+                                    </p>
+                                    <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2 pt-1">
+                                        <button id="btn-dash-renew" type="button"
+                                            class="bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3.5 py-2 rounded-xl transition shadow">
+                                            Renew
+                                        </button>
+                                        <button id="dash-nwc-pill" type="button"
+                                            class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 font-semibold text-xs px-3 py-2 rounded-xl transition flex items-center gap-1.5">
+                                            <span class="w-2 h-2 rounded-full bg-gray-500" id="dash-nwc-dot"></span>
+                                            <span id="dash-nwc-pill-text">Auto-Renew: Off</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Card B: Monthly Bandwidth Arc Gauge -->
+                        <div id="card-bandwidth-gauge"
+                            class="bg-gray-900/80 p-6 rounded-2xl border border-gray-800 shadow-[0_4px_20px_rgba(0,0,0,0.5)] hover:border-tsgreen/50 transition-all duration-300 flex flex-col justify-between relative overflow-hidden">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="flex items-center space-x-2.5">
+                                    <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                    </svg>
+                                    <h3 class="text-sm font-semibold text-gray-300">Monthly Bandwidth</h3>
+                                </div>
+                                <span id="bandwidth-status-badge"
+                                    class="text-[10px] uppercase font-bold px-2.5 py-0.5 rounded-full border border-gray-700 bg-gray-800 text-gray-400">Normal</span>
+                            </div>
+
+                            <div class="flex flex-col sm:flex-row items-center gap-4 my-1">
+                                <div id="bandwidth-arc-wrap" class="relative flex flex-col items-center justify-center shrink-0">
+                                    <svg viewBox="0 0 140 86" class="w-44 h-28" aria-hidden="true">
+                                        <path d="M 12 72 A 58 58 0 0 1 128 72" fill="none" stroke-width="10"
+                                            stroke-linecap="round" class="text-gray-800" stroke="currentColor"></path>
+                                        <path id="bandwidth-arc-fill" d="M 12 72 A 58 58 0 0 1 128 72" fill="none"
+                                            stroke-width="10" stroke-linecap="round" stroke-dasharray="182.21"
+                                            stroke-dashoffset="182.21" class="text-tsgreen transition-all duration-500"
+                                            stroke="currentColor"></path>
+                                        <circle id="bandwidth-pace-marker" cx="12" cy="72" r="4"
+                                            class="hidden fill-white stroke-gray-900" stroke-width="1.5"></circle>
+                                    </svg>
+                                    <div class="text-center -mt-6">
+                                        <p id="bandwidth-pct-text" class="text-lg font-mono font-bold text-white">0%</p>
+                                        <p id="bandwidth-used-text" class="text-xs font-mono text-gray-400">0.00 / 90 GB</p>
+                                    </div>
+                                </div>
+                                <meter id="bandwidth-meter-sr" class="sr-only" min="0" max="100" low="70" high="90" optimum="20" value="0">0%</meter>
+
+                                <div class="flex-1 space-y-1.5 text-center sm:text-left w-full">
+                                    <p id="bandwidth-pace-text" class="text-xs font-semibold text-gray-300">Pace: Waiting for telemetry</p>
+                                    <p id="bandwidth-resets-text" class="text-[11px] text-gray-400">Resets monthly</p>
+                                    <p id="bandwidth-next-free-reset" class="text-[11px] font-mono text-gray-500">Next free reset: --</p>
+                                    <div class="pt-2">
+                                        <button id="btn-bandwidth-reset" type="button"
+                                            class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 font-bold text-xs px-3.5 py-2 rounded-xl transition shadow">
+                                            Reset Bandwidth ($1)
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Inline Bandwidth Reset Invoice Box -->
+                            <div id="bandwidth-reset-invoice-box"
+                                class="hidden mt-4 p-4 bg-gray-950/90 rounded-xl border border-gray-800 space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <h4 class="text-xs font-bold text-white uppercase tracking-wider">Bandwidth Reset Invoice ($1)</h4>
+                                    <button id="btn-close-reset-invoice" type="button" class="text-xs text-gray-400 hover:text-white">Close</button>
+                                </div>
+                                <div id="bandwidth-reset-invoice-controls" class="flex flex-col items-center">
+                                    <a id="pay-link-reset" href="#" class="block bg-white p-2 rounded-lg mb-3 hover:opacity-80 transition">
+                                        <div id="qr-placeholder-reset"
+                                            class="w-40 h-40 bg-gray-200 flex items-center justify-center text-gray-500 text-xs font-bold">
+                                            QR Loading...</div>
+                                    </a>
+                                    <div class="flex items-center gap-2 w-full mb-2">
+                                        <input id="invoice-bolt11-reset" type="text" readonly
+                                            class="flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-2.5 rounded text-center overflow-hidden text-ellipsis invoice-input" />
+                                        <button id="btn-copy-invoice-reset" type="button" title="Copy Reset Invoice"
+                                            class="flex-shrink-0 p-2 bg-gray-800 hover:bg-tsgreen/20 border border-gray-700 rounded-lg transition-colors group">
+                                            <svg id="copy-icon-reset"
+                                                class="w-4 h-4 text-gray-400 group-hover:text-tsgreen transition-colors"
+                                                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z">
+                                                </path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    <div class="flex flex-wrap items-center justify-center gap-2 w-full">
+                                        <button id="btn-pay-nwc-reset" type="button"
+                                            class="hidden bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-3 py-1.5 rounded-lg transition">
+                                            Pay with Connected NWC Wallet
+                                        </button>
+                                        <button id="btn-pay-webln-reset" type="button"
+                                            class="hidden bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3 py-1.5 rounded-lg transition">
+                                            Pay with Browser Wallet (WebLN)
+                                        </button>
+                                    </div>
+                                    <p id="invoice-expiry-reset" class="text-[11px] font-mono text-gray-400 mt-1"></p>
+                                    <p class="text-xs text-tsgreen animate-pulse mt-1">Waiting for reset confirmation...</p>
+                                </div>
+                                <div id="bandwidth-reset-success-msg" class="hidden py-2"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Node & Tunnelsats Details Section -->
                 <div class="mt-6">
                     <h2 class="text-xl font-bold text-white mb-4">Node &amp; Tunnelsats Details</h2>
@@ -193,7 +340,7 @@
                             </div>
                         </div>
 
-                        <div class="flex items-center space-x-4">
+                        <div class="flex items-center space-x-4 border-b border-gray-800 pb-3">
                             <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -204,6 +351,32 @@
                                 <p id="box-expiration" class="text-sm font-mono text-gray-400 truncate w-full"><span
                                         class="skeleton w-24"></span></p>
                             </div>
+                        </div>
+
+                        <!-- Inbound Reachability Probe Row (v3.5.0) -->
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                            <div class="flex items-center space-x-4 flex-1 min-w-0">
+                                <svg class="w-6 h-6 text-tsgreen shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z">
+                                    </path>
+                                </svg>
+                                <div class="flex-1 min-w-0">
+                                    <p class="text-xs text-gray-500 font-bold uppercase tracking-wider">Inbound Reachability</p>
+                                    <div id="reachability-result" class="text-xs text-gray-400 mt-0.5" aria-live="polite">
+                                        Verify external TCP reachability to your forwarded Lightning port.
+                                    </div>
+                                    <div id="reachability-pubkey-wrap" data-secure-mode="only" class="hidden mt-2">
+                                        <input id="reachability-pubkey-input" type="text"
+                                            placeholder="Optional: 66-hex Lightning node pubkey (02.../03...)"
+                                            class="w-full bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-tsgreen" />
+                                    </div>
+                                </div>
+                            </div>
+                            <button id="btn-test-reachability" type="button"
+                                class="bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-tsgreen/50 text-gray-200 font-bold text-xs px-4 py-2 rounded-xl transition shrink-0">
+                                Test Reachability
+                            </button>
                         </div>
 
                     </div>
@@ -225,33 +398,44 @@
                     <p class="text-sm text-gray-400 mb-6">Create a fresh VPN config. This will override existing
                         auto-configurations for your node.</p>
 
-                    <div id="buy-form" class="space-y-4">
+                    <div id="buy-form" class="space-y-5">
+                        <!-- Compact Nested 3D Globe + Server Selection Card (v3.5.0) -->
                         <div class="relative group" id="buy-server-dropdown-container">
-                            <label class="block text-sm font-semibold text-gray-300 mb-2">Select Server</label>
-                            <div class="relative">
-                                <button type="button" id="buy-server-btn"
-                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-gray-400 rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
-                                    <span id="buy-server-label">
-                                        <span class="skeleton w-24"></span></span>
-                                    <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
-                                        id="buy-server-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                            d="M19 9l-7 7-7-7"></path>
-                                    </svg>
-                                </button>
-                                <div id="buy-server-list"
-                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] max-h-96 overflow-y-auto origin-top transition-all duration-200 scale-95 opacity-0">
-                                    <!-- Options injected via JS -->
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Select Server Region</label>
+                            <div id="globe-widget-card"
+                                class="flex flex-col sm:flex-row items-center gap-4 bg-gray-900/70 border border-gray-800 rounded-2xl p-4 mb-3">
+                                <div id="globe-container"
+                                    class="w-36 h-36 md:w-40 md:h-40 rounded-2xl border border-gray-800 bg-black/60 overflow-hidden relative shrink-0 shadow-inner">
                                 </div>
-                                <input type="hidden" id="buy-server-select" value="">
+                                <div class="flex-1 w-full space-y-2">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-[10px] uppercase tracking-wider font-bold text-tsgreen">Selected Endpoint</span>
+                                        <span id="globe-selected-caption" class="text-xs font-mono text-gray-400">Global Network</span>
+                                    </div>
+                                    <button type="button" id="buy-server-btn"
+                                        class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-gray-300 rounded-xl px-4 py-2.5 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                        <span id="buy-server-label">
+                                            <span class="skeleton w-24"></span></span>
+                                        <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
+                                            id="buy-server-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M19 9l-7 7-7-7"></path>
+                                        </svg>
+                                    </button>
+                                </div>
                             </div>
+                            <div id="buy-server-list" role="radiogroup" aria-label="Select Server"
+                                class="space-y-4 bg-gray-900/50 border border-gray-800 rounded-2xl p-4 max-h-96 overflow-y-auto">
+                                <!-- Region-grouped server pills injected via JS -->
+                            </div>
+                            <input type="hidden" id="buy-server-select" value="">
                         </div>
 
                         <div class="relative group" id="buy-duration-dropdown-container">
                             <label class="block text-sm font-semibold text-gray-300 mb-2">Duration</label>
                             <div class="relative">
                                 <button type="button" id="buy-duration-btn"
-                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-2.5 mb-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
                                     <span id="buy-duration-label">1 Month</span>
                                     <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
                                         id="buy-duration-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -259,12 +443,24 @@
                                             d="M19 9l-7 7-7-7"></path>
                                     </svg>
                                 </button>
-                                <div id="buy-duration-list"
-                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] overflow-hidden origin-top transition-all duration-200 scale-95 opacity-0">
-                                    <!-- Options injected via JS -->
+                                <div id="buy-duration-list" role="radiogroup" aria-label="Select Duration"
+                                    class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                    <!-- 4-column duration pills injected via JS -->
                                 </div>
                                 <input type="hidden" id="buy-duration-select" value="1">
                             </div>
+                        </div>
+
+                        <!-- Referral / Promo Code Input (v3.5.0) -->
+                        <div class="bg-gray-900/50 border border-gray-800 rounded-xl p-4">
+                            <label for="buy-referral-code" class="block text-xs font-semibold text-gray-300 mb-1.5">
+                                Referral or Promo Code <span class="text-gray-500 font-normal">(Optional)</span>
+                            </label>
+                            <input id="buy-referral-code" type="text" placeholder="Enter referral code"
+                                class="w-full bg-gray-900 border border-gray-700 text-white font-mono text-xs rounded-lg px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen transition-all" />
+                            <p id="buy-referral-helper" class="text-[11px] text-gray-400 mt-1.5">
+                                Referral bonus: +1/+2/+3 bonus months on 3/6/12m plans.
+                            </p>
                         </div>
 
                         <div class="mt-8">
@@ -283,7 +479,7 @@
                     <!-- Payment Box -->
                     <div id="invoice-box-buy"
                         class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
-                        <div class="flex flex-col items-center">
+                        <div id="invoice-controls-buy" class="flex flex-col items-center">
                             <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
                             <a id="pay-link-buy" href="#"
                                 class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
@@ -305,8 +501,20 @@
                                     </svg>
                                 </button>
                             </div>
+                            <div class="flex flex-wrap items-center justify-center gap-2 w-full my-2">
+                                <button id="btn-pay-nwc-buy" type="button"
+                                    class="hidden bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-3.5 py-2 rounded-lg transition">
+                                    Pay with Connected NWC Wallet
+                                </button>
+                                <button id="btn-pay-webln-buy" type="button"
+                                    class="hidden bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3.5 py-2 rounded-lg transition">
+                                    Pay with Browser Wallet (WebLN)
+                                </button>
+                            </div>
+                            <p id="invoice-expiry-buy" class="text-xs font-mono text-gray-400 mb-1"></p>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for payment confirmation...</p>
                         </div>
+                        <div id="invoice-success-msg-buy" class="hidden"></div>
                     </div>
                 </div>
 
@@ -364,35 +572,48 @@
                             </div>
                         </div>
 
-                        <!-- 🚀 NWC Auto-Renew Promo Card -->
+                        <!-- NWC Auto-Renew Card (v3.5.0) -->
                         <div
                             class="bg-gradient-to-br from-tsgreen/20 to-blue-600/10 border border-tsgreen/30 rounded-2xl p-6 shadow-lg shadow-tsgreen/5 relative overflow-hidden group">
                             <div
                                 class="absolute -right-8 -top-8 w-24 h-24 bg-tsgreen/10 rounded-full blur-2xl group-hover:bg-tsgreen/20 transition-all duration-700">
                             </div>
                             <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                                <div class="space-y-1">
-                                    <h3 class="text-white font-bold flex items-center gap-2">
-                                        <span class="text-xl">🚀</span> Never Let Your VPN Expire!
-                                    </h3>
+                                <div class="space-y-2">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <h3 class="text-white font-bold flex items-center gap-2">
+                                            <span>NWC Auto-Renew</span>
+                                        </h3>
+                                        <span id="nwc-status-badge"
+                                            class="text-[10px] uppercase font-bold px-2.5 py-0.5 rounded-full border border-gray-700 bg-gray-900/70 text-gray-300">
+                                            Disabled
+                                        </span>
+                                        <span id="nwc-active-duration" class="text-xs font-mono text-tsgreen hidden"></span>
+                                    </div>
                                     <p class="text-xs text-gray-300 leading-relaxed max-w-md">
-                                        Link your subscription in the <a
+                                        Connect a Nostr Wallet Connect (NWC) wallet locally or link your subscription in the <a
+                                            id="nwc-dashboard-link"
                                             href="https://tunnelsats.com/dashboard?section=link" target="_blank"
                                             rel="noopener noreferrer"
                                             class="text-tsgreen font-semibold hover:underline">Tunnelsats Dashboard</a>
                                         to activate <span class="text-white font-semibold">Auto-Renew via NWC</span>.
-                                        It's automated and hassle-free.
                                     </p>
-                                    <a href="https://tunnelsats.com/faq#how-do-automatic-nwc-renewals-work"
-                                        target="_blank" rel="noopener noreferrer"
-                                        class="text-xs text-tsgreen hover:underline flex items-center gap-1 mt-2">
-                                        <span>How does it work?</span>
-                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
-                                            </path>
-                                        </svg>
-                                    </a>
+                                    <div class="flex flex-wrap items-center gap-3 pt-1">
+                                        <button id="btn-open-nwc-modal" type="button"
+                                            class="bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-4 py-2 rounded-xl transition shadow">
+                                            Configure NWC Auto-Renew
+                                        </button>
+                                        <a href="https://tunnelsats.com/faq#how-do-automatic-nwc-renewals-work"
+                                            target="_blank" rel="noopener noreferrer"
+                                            class="text-xs text-tsgreen hover:underline flex items-center gap-1">
+                                            <span>How does it work?</span>
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
+                                                </path>
+                                            </svg>
+                                        </a>
+                                    </div>
                                 </div>
 
                                 <div
@@ -420,7 +641,7 @@
                             <label class="block text-sm font-semibold text-gray-300 mb-2">Duration to Add</label>
                             <div class="relative">
                                 <button type="button" id="renew-duration-btn"
-                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
+                                    class="w-full flex justify-between items-center bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-2.5 mb-3 hover:border-tsgreen focus:outline-none focus:ring-2 focus:ring-tsgreen/50 transition-all cursor-pointer shadow-inner">
                                     <span id="renew-duration-label">1 Month</span>
                                     <svg class="w-4 h-4 text-gray-400 transition-transform duration-200"
                                         id="renew-duration-caret" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -428,9 +649,9 @@
                                             d="M19 9l-7 7-7-7"></path>
                                     </svg>
                                 </button>
-                                <div id="renew-duration-list"
-                                    class="hidden absolute z-50 w-full mt-2 bg-gray-800 border border-t-[3px] border-t-tsgreen border-gray-700 rounded-xl shadow-[0_10px_35px_rgba(0,0,0,0.8)] overflow-hidden origin-top transition-all duration-200 scale-95 opacity-0">
-                                    <!-- Options injected via JS -->
+                                <div id="renew-duration-list" role="radiogroup" aria-label="Select Renewal Duration"
+                                    class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                    <!-- 4-column duration pills injected via JS -->
                                 </div>
                                 <input type="hidden" id="renew-duration-select" value="1">
                             </div>
@@ -453,7 +674,7 @@
                     <!-- Payment Box -->
                     <div id="invoice-box-renew"
                         class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
-                        <div class="flex flex-col items-center">
+                        <div id="invoice-controls-renew" class="flex flex-col items-center">
                             <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
                             <a id="pay-link-renew" href="#"
                                 class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
@@ -475,8 +696,20 @@
                                     </svg>
                                 </button>
                             </div>
+                            <div class="flex flex-wrap items-center justify-center gap-2 w-full my-2">
+                                <button id="btn-pay-nwc-renew" type="button"
+                                    class="hidden bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-3.5 py-2 rounded-lg transition">
+                                    Pay with Connected NWC Wallet
+                                </button>
+                                <button id="btn-pay-webln-renew" type="button"
+                                    class="hidden bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3.5 py-2 rounded-lg transition">
+                                    Pay with Browser Wallet (WebLN)
+                                </button>
+                            </div>
+                            <p id="invoice-expiry-renew" class="text-xs font-mono text-gray-400 mb-1"></p>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for renewal confirmation...</p>
                         </div>
+                        <div id="invoice-success-msg-renew" class="hidden"></div>
                     </div>
                 </div>
             </section>
@@ -563,7 +796,7 @@
                                     Your WireGuard configuration contains your unique cryptographic private keys, internal VPN address, and server routing details.
                                 </p>
                                 <ul class="list-disc pl-5 space-y-2 text-xs text-gray-300 leading-relaxed">
-                                    <li><strong class="text-white">Secure Mode Sandbox Protection:</strong> In Secure Mode, app uninstalls from the Umbrel App Store will delete container files if data wipe is confirmed. Saving a backup ensures you never lose your subscription.</li>
+                                    <li><strong class="text-white">Uninstall &amp; Data Wipe Protection:</strong> Uninstalling TunnelSats from the Umbrel App Store can permanently erase your app data folder and WireGuard private key (<code class="text-tsgreen font-mono">tunnelsats.conf</code>). Because TunnelSats never stores client private keys on its servers, a lost config cannot be recreated - saving a backup ensures you never lose your subscription.</li>
                                     <li><strong class="text-white">Reinstall &amp; Recovery:</strong> If you migrate your node or reinstall TunnelSats, you can instantly upload this file on the <strong class="text-tsyellow">Subscribe / Import</strong> tab to restore active status without re-purchasing.</li>
                                     <li><strong class="text-white">Off-Grid Redundancy:</strong> Store your <code class="text-tsgreen font-mono">tunnelsats.conf</code> in a password manager or encrypted backup drive.</li>
                                 </ul>
@@ -605,15 +838,18 @@
                                 <li>Open your node config file, delete or comment out the specified lines, and save.</li>
                                 <li>Restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard to apply the defaults.</li>
                             </ol>
-                            <div class="mt-4 pt-3 border-t border-red-500/30">
-                                <p class="text-xs text-red-300 font-bold mb-2 flex items-center gap-1">🚨 Mandatory Step BEFORE Uninstalling:</p>
-                                <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-2.5 rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer text-xs no-underline">
-                                    <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-                                    </svg>
-                                    <span>Backup WireGuard Profile (tunnelsats.conf)</span>
-                                </a>
-                            </div>
+                        </div>
+
+                        <!-- Unconditional Backup Warning Before Uninstalling -->
+                        <div id="uninstall-backup-warning-box" class="bg-red-950/40 border border-red-500/50 rounded-xl p-4 mb-6 text-xs text-red-200 leading-relaxed shadow-md space-y-2">
+                            <p class="text-sm text-white font-bold flex items-center gap-1.5">🚨 Mandatory Step BEFORE Uninstalling: Backup Your Subscription Key</p>
+                            <p>Uninstalling the TunnelSats app via the Umbrel App Store can permanently erase your local app data and WireGuard private key (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>). Because TunnelSats never stores client private keys on its servers, <strong>we cannot recreate your config if it is deleted</strong>.</p>
+                            <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="mt-2 w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-2.5 rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer text-xs no-underline">
+                                <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                <span>Backup WireGuard Profile (tunnelsats.conf)</span>
+                            </a>
                         </div>
                         <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
@@ -866,30 +1102,15 @@
                                     </ol>
                                 </div>
 
-                                <div data-secure-mode="exclude"
-                                    class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
-                                    <strong class="text-gray-300 not-italic mb-1 flex items-center gap-1.5"><svg
-                                            class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
-                                            viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
-                                            </path>
-                                        </svg> Will I lose my subscription?</strong>
-                                    No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel
-                                    safely preserves your TunnelSats app data folder (including your active WireGuard
-                                    subscription profile). If you reinstall the app in the future, your subscription
-                                    will still be there.
-                                </div>
-
-                                <div data-secure-mode="only" class="bg-red-950/40 border border-red-500/50 p-4 rounded-xl text-red-200 mt-4 space-y-2 not-italic shadow-md">
+                                <div id="faq-5-backup-warning" class="bg-red-950/40 border border-red-500/50 p-4 rounded-xl text-red-200 mt-4 space-y-2 not-italic shadow-md">
                                     <strong class="text-white font-bold flex items-center gap-2 text-sm">
-                                        <span class="text-red-400 text-base">🚨</span> HIGH URGENCY: Backup WireGuard Profile BEFORE Uninstalling!
+                                        <span class="text-red-400 text-base">🚨</span> Will I lose my subscription? Backup WireGuard Profile BEFORE Uninstalling!
                                     </strong>
                                     <p class="text-xs text-red-200 leading-relaxed">
-                                        Because TunnelSats runs in Secure Mode inside an isolated container sandbox, <strong>uninstalling the TunnelSats app via the Umbrel App Store will permanently erase your purchased WireGuard profile (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>) if app data is wiped</strong>.
+                                        <strong>Yes, if you do not back up your configuration first.</strong> Uninstalling the TunnelSats app via the Umbrel App Store will permanently erase your app data folder and purchased WireGuard profile (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>). Because your WireGuard private key is generated locally and never stored on TunnelSats servers, <strong>we cannot recreate a lost <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file</strong>.
                                     </p>
                                     <p class="text-xs text-red-200 leading-relaxed font-semibold">
-                                        BEFORE clicking Uninstall in the Umbrel App Store, click the button below to download your <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file to your browser. You can re-import this profile anytime if you reinstall.
+                                        BEFORE clicking Uninstall in the Umbrel App Store, click the button below (or use the <strong>Backup</strong> tab) to download your <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file. You can re-import this profile anytime if you reinstall.
                                     </p>
                                     <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="mt-2 bg-tsgreen hover:bg-green-400 text-gray-900 font-bold px-4 py-2.5 rounded-lg text-xs transition shadow-lg inline-flex items-center gap-2 cursor-pointer no-underline">
                                         <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1206,6 +1427,118 @@
                 </button>
             </div>
         </aside>
+    </div>
+
+    <!-- NWC Auto-Renew Modal (v3.5.0) -->
+    <div id="nwc-modal" role="dialog" aria-modal="true" aria-labelledby="nwc-modal-title"
+        class="fixed inset-0 z-[150] hidden flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative">
+            <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+                <div>
+                    <h3 id="nwc-modal-title" class="text-lg font-bold text-white">NWC Auto-Renewal Setup</h3>
+                    <p class="text-xs text-gray-400 mt-0.5">Connect a Nostr Wallet Connect URI for automatic renewals within 7 days before expiry.</p>
+                </div>
+                <button id="btn-close-nwc-modal" type="button" aria-label="Close NWC Modal"
+                    class="text-gray-400 hover:text-white p-1.5 rounded-lg hover:bg-gray-800 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="space-y-4">
+                <div>
+                    <label for="nwc-uri-input" class="block text-xs font-semibold text-gray-300 mb-1.5">NWC Connection URI</label>
+                    <div class="flex items-center gap-2">
+                        <input id="nwc-uri-input" type="password" autocomplete="off"
+                            placeholder="nostr+walletconnect://..."
+                            class="flex-1 bg-gray-950 border border-gray-700 text-tsgreen font-mono text-xs rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-tsgreen/50 focus:border-tsgreen" />
+                        <button id="btn-toggle-nwc-uri" type="button"
+                            class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-semibold px-3 py-2.5 rounded-xl transition shrink-0">
+                            Show
+                        </button>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-gray-300 mb-2">Renewal Duration</label>
+                    <div id="nwc-duration-pills" role="radiogroup" aria-label="NWC Renewal Duration"
+                        class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button type="button" role="radio" aria-checked="true" data-nwc-duration="match"
+                            class="nwc-duration-pill col-span-1 sm:col-span-2 text-left px-3.5 py-2.5 rounded-xl border border-tsgreen bg-tsgreen/10 text-white text-xs font-bold flex items-center justify-between transition">
+                            <span>Match Current Plan</span>
+                            <span class="text-[10px] font-mono text-tsgreen uppercase">Default</span>
+                        </button>
+                        <button type="button" role="radio" aria-checked="false" data-nwc-duration="1m"
+                            class="nwc-duration-pill text-left px-3.5 py-2.5 rounded-xl border border-gray-700 bg-gray-950 text-gray-300 text-xs font-semibold flex items-center justify-between hover:border-gray-600 transition">
+                            <span>1 Month</span>
+                            <span class="font-mono text-gray-400">$2.89</span>
+                        </button>
+                        <button type="button" role="radio" aria-checked="false" data-nwc-duration="3m"
+                            class="nwc-duration-pill text-left px-3.5 py-2.5 rounded-xl border border-gray-700 bg-gray-950 text-gray-300 text-xs font-semibold flex items-center justify-between hover:border-gray-600 transition">
+                            <span>3 Months</span>
+                            <span class="font-mono text-tsgreen">$8.24 (-5%)</span>
+                        </button>
+                        <button type="button" role="radio" aria-checked="false" data-nwc-duration="6m"
+                            class="nwc-duration-pill text-left px-3.5 py-2.5 rounded-xl border border-gray-700 bg-gray-950 text-gray-300 text-xs font-semibold flex items-center justify-between hover:border-gray-600 transition">
+                            <span>6 Months</span>
+                            <span class="font-mono text-tsgreen">$15.61 (-10%)</span>
+                        </button>
+                        <button type="button" role="radio" aria-checked="false" data-nwc-duration="12m"
+                            class="nwc-duration-pill text-left px-3.5 py-2.5 rounded-xl border border-gray-700 bg-gray-950 text-gray-300 text-xs font-semibold flex items-center justify-between hover:border-gray-600 transition">
+                            <span>12 Months</span>
+                            <span class="font-mono text-tsyellow">$27.74 (-20%)</span>
+                        </button>
+                    </div>
+                    <input type="hidden" id="nwc-duration-select" value="match">
+                </div>
+
+                <div id="nwc-recommended-budget"
+                    class="bg-gray-950/90 border border-gray-800 rounded-xl p-3 text-xs text-gray-300 font-mono">
+                    Recommended wallet budget: $3.47 (+20% buffer)
+                </div>
+
+                <label class="flex items-center space-x-2.5 cursor-pointer select-none">
+                    <input id="nwc-route-tor" type="checkbox"
+                        class="w-4 h-4 rounded border-gray-700 bg-gray-950 text-tsgreen focus:ring-tsgreen/50" />
+                    <span class="text-xs text-gray-300">Route NWC relay traffic via Tor</span>
+                </label>
+
+                <p id="nwc-modal-feedback" class="text-xs font-semibold hidden" aria-live="polite"></p>
+            </div>
+
+            <div class="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-gray-800">
+                <button id="btn-nwc-disconnect" type="button"
+                    class="hidden bg-red-950/50 hover:bg-red-900/60 border border-red-700/60 text-red-200 font-bold text-xs px-4 py-2.5 rounded-xl transition mr-auto">
+                    Disconnect Wallet
+                </button>
+                <button id="btn-nwc-connect" type="button"
+                    class="bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-lg">
+                    Connect &amp; Enable Auto-Renew
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Early Bandwidth Reset Confirmation Modal (v3.5.0) -->
+    <div id="reset-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="reset-confirm-title"
+        class="fixed inset-0 z-[150] hidden flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <h3 id="reset-confirm-title" class="text-base font-bold text-white">Reset Monthly Bandwidth Early?</h3>
+            <p id="reset-confirm-text" class="text-xs text-gray-300 leading-relaxed">
+                Your monthly bandwidth usage is currently below 70%. Paid resets cost $1 and reset your current cycle counter to 0 GB immediately.
+            </p>
+            <div class="flex items-center justify-end gap-2 pt-2 border-t border-gray-800">
+                <button id="btn-cancel-bandwidth-reset" type="button"
+                    class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 font-semibold text-xs px-4 py-2 rounded-xl transition">
+                    Cancel
+                </button>
+                <button id="btn-confirm-bandwidth-reset" type="button"
+                    class="bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-4 py-2 rounded-xl transition shadow">
+                    Proceed ($1)
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- Logic (Local) -->

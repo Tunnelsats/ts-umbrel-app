@@ -64,9 +64,11 @@ def snapshot_files(root):
     }
 
 
-@pytest.mark.parametrize(
-    "version",
-    (
+def test_invalid_version_is_rejected_without_writes(
+    bump_module, version_workspace
+):
+    before = snapshot_files(version_workspace)
+    invalid_versions = (
         "",
         "v",
         "3.3",
@@ -75,42 +77,40 @@ def snapshot_files(root):
         "3.3.4+build",
         "not-a-version",
         f"1.0.{('1' * 125)}",
-    ),
-)
-def test_invalid_version_is_rejected_without_writes(
-    bump_module, version_workspace, version
-):
-    before = snapshot_files(version_workspace)
+    )
 
-    with pytest.raises(ValueError, match="Invalid version"):
-        bump_module.bump_version(version, "Release notes")
+    for version in invalid_versions:
+        with pytest.raises(ValueError, match="Invalid version"):
+            bump_module.bump_version(version, "Release notes")
 
     assert snapshot_files(version_workspace) == before
 
 
-@pytest.mark.parametrize("notes", (None, "", " ", "\n\t"))
 def test_missing_or_blank_release_notes_are_rejected_without_writes(
-    bump_module, version_workspace, notes
+    bump_module, version_workspace
 ):
     before = snapshot_files(version_workspace)
 
-    with pytest.raises(ValueError, match="Release notes are required"):
-        bump_module.bump_version("4.0.0", notes)
+    for notes in (None, "", " ", "\n\t"):
+        with pytest.raises(ValueError, match="Release notes are required"):
+            bump_module.bump_version("4.0.0", notes)
 
     assert snapshot_files(version_workspace) == before
 
 
-@pytest.mark.parametrize(
-    "notes",
-    ("First line\nSecond line", "First line\r\nSecond line", "First line\rSecond line"),
-)
 def test_multiline_release_notes_are_rejected_without_writes(
-    bump_module, version_workspace, notes
+    bump_module, version_workspace
 ):
     before = snapshot_files(version_workspace)
+    multiline_cases = (
+        "First line\nSecond line",
+        "First line\r\nSecond line",
+        "First line\rSecond line",
+    )
 
-    with pytest.raises(ValueError, match="single-line summary"):
-        bump_module.bump_version("4.0.0", notes)
+    for notes in multiline_cases:
+        with pytest.raises(ValueError, match="single-line summary"):
+            bump_module.bump_version("4.0.0", notes)
 
     assert snapshot_files(version_workspace) == before
 

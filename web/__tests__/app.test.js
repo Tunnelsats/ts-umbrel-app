@@ -15,7 +15,7 @@ describe('Favicon Optimization Contracts', () => {
 });
 
 describe('Tailwind CSS v4 Build Contracts', () => {
-    test('root package.json pairs tailwindcss with @tailwindcss/cli and defines build:css', () => {
+    test('package.json, input.css, and compiled dist/tailwind.css satisfy Tailwind v4 contract', () => {
         const pkgPath = path.resolve(__dirname, '../../package.json');
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
         expect(pkg.scripts['build:css']).toBe(
@@ -23,9 +23,7 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         );
         expect(pkg.devDependencies['tailwindcss']).toBeDefined();
         expect(pkg.devDependencies['@tailwindcss/cli']).toBe(pkg.devDependencies['tailwindcss']);
-    });
 
-    test('input.css uses Tailwind v4 directives and preserves custom pulse animations', () => {
         const inputCssPath = path.resolve(__dirname, '../css/input.css');
         const inputCss = fs.readFileSync(inputCssPath, 'utf8');
         expect(inputCss).toContain('@import "tailwindcss";');
@@ -35,9 +33,7 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         expect(inputCss).toContain('.pulse-yellow');
         expect(inputCss).toContain('@keyframes pulse-green');
         expect(inputCss).toContain('@keyframes pulse-yellow');
-    });
 
-    test('compiled dist/tailwind.css includes custom theme tokens and diagnostic error classes', () => {
         const distCssPath = path.resolve(__dirname, '../dist/tailwind.css');
         const distCss = fs.readFileSync(distCssPath, 'utf8');
         expect(distCss).toContain('tailwindcss v4.');
@@ -157,7 +153,7 @@ describe('Management request browser security', () => {
         jest.restoreAllMocks();
     });
 
-    test('unsafe management requests bootstrap and send a CSRF token', async () => {
+    test('unsafe management requests bootstrap and send a CSRF token while safe requests do not', async () => {
         global.fetch = csrfFetchMock((url) => {
             if (url === '/api/local/session') {
                 return Promise.resolve({
@@ -170,6 +166,13 @@ describe('Management request browser security', () => {
         evalScript();
         global.fetch.mockClear();
 
+        await window.managementFetch('/api/local/status');
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch).toHaveBeenCalledWith('/api/local/status', {
+            credentials: 'same-origin'
+        });
+
+        global.fetch.mockClear();
         await window.managementFetch('/api/local/restart', { method: 'POST' });
 
         expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/local/session', {
@@ -186,29 +189,6 @@ describe('Management request browser security', () => {
                 })
             })
         );
-    });
-
-    test('management session state is encapsulated behind a session manager', () => {
-        expect(script).toContain('class ManagementSession');
-        expect(script).toContain('const managementSession = new ManagementSession()');
-        expect(script).not.toContain('let managementCsrfToken');
-        expect(script).not.toContain('let managementCsrfPromise');
-    });
-
-    test('safe management requests do not bootstrap a CSRF token', async () => {
-        global.fetch = csrfFetchMock(() => Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve({ success: true })
-        }));
-        evalScript();
-        global.fetch.mockClear();
-
-        await window.managementFetch('/api/local/status');
-
-        expect(global.fetch).toHaveBeenCalledTimes(1);
-        expect(global.fetch).toHaveBeenCalledWith('/api/local/status', {
-            credentials: 'same-origin'
-        });
     });
 
     test('stale CSRF rejection refreshes the token and retries once', async () => {
@@ -251,7 +231,12 @@ describe('Management request browser security', () => {
         expect(sentTokens).toEqual(['old-csrf-token', 'new-csrf-token']);
     });
 
-    test('all unsafe management endpoints use the common request wrapper', () => {
+    test('management session state is encapsulated and all unsafe endpoints use managementFetch', () => {
+        expect(script).toContain('class ManagementSession');
+        expect(script).toContain('const managementSession = new ManagementSession()');
+        expect(script).not.toContain('let managementCsrfToken');
+        expect(script).not.toContain('let managementCsrfPromise');
+
         const requiredCalls = [
             "managementFetch('/api/subscription/claim'",
             "managementFetch('/api/local/configure-node'",
@@ -307,7 +292,7 @@ describe('UI Routing and Initialization', () => {
         jest.restoreAllMocks();
     });
 
-    test('switchTab changes tab visibility correctly', () => {
+    test('switchTab and footer FAQ link update view visibility and active state', () => {
         window.switchTab('buy');
         expect(document.getElementById('view-buy').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
@@ -317,9 +302,7 @@ describe('UI Routing and Initialization', () => {
         window.switchTab('backup');
         expect(document.getElementById('view-backup').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('nav-backup').classList.contains('nav-active')).toBe(true);
-    });
 
-    test('footer FAQ link switches to FAQ view without requiring a nav button', () => {
         const faqView = document.getElementById('view-faq');
         const footerFaq = document.getElementById('btn-footer-faq');
 
@@ -328,7 +311,7 @@ describe('UI Routing and Initialization', () => {
         footerFaq.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
         expect(faqView.classList.contains('hidden')).toBe(false);
-        expect(document.getElementById('view-dashboard').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('view-backup').classList.contains('hidden')).toBe(true);
         expect(footerFaq.classList.contains('text-blue-400')).toBe(true);
 
         window.switchTab('buy');
@@ -336,8 +319,10 @@ describe('UI Routing and Initialization', () => {
         expect(footerFaq.classList.contains('text-gray-500')).toBe(true);
     });
 
-    test('delegated data-scroll-to click prevents default and smooth-scrolls when target exists', () => {
+    test('delegated data-scroll-to click handles existing, missing, and hidden-tab targets', () => {
         jest.useFakeTimers();
+        const faqView = document.getElementById('view-faq');
+        faqView.classList.remove('hidden');
         const faq3 = document.getElementById('faq-3');
         const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
         faq3.scrollIntoView = jest.fn();
@@ -349,38 +334,28 @@ describe('UI Routing and Initialization', () => {
         jest.runAllTimers();
         expect(faq3.scrollIntoView).toHaveBeenCalledTimes(1);
         expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
-        jest.useRealTimers();
-    });
 
-    test('delegated data-scroll-to click does not prevent default when target does not exist', () => {
         const missingTargetLink = document.createElement('a');
         missingTargetLink.setAttribute('href', '#missing-faq-item');
         missingTargetLink.setAttribute('data-scroll-to', 'missing-faq-item');
         document.body.appendChild(missingTargetLink);
 
         try {
-            const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
-            expect(() => missingTargetLink.dispatchEvent(clickEvent)).not.toThrow();
-            expect(clickEvent.defaultPrevented).toBe(false);
+            const missingClickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+            expect(() => missingTargetLink.dispatchEvent(missingClickEvent)).not.toThrow();
+            expect(missingClickEvent.defaultPrevented).toBe(false);
         } finally {
             missingTargetLink.remove();
         }
-    });
 
-    test('delegated data-scroll-to click switches tab when target is inside a hidden section', () => {
-        jest.useFakeTimers();
-        const faq3 = document.getElementById('faq-3');
-        const tocLink = document.querySelector('[data-scroll-to="faq-3"]');
-        faq3.scrollIntoView = jest.fn();
-
-        const faqView = document.getElementById('view-faq');
+        faq3.scrollIntoView.mockClear();
         faqView.classList.add('hidden');
         window.switchTab = jest.fn();
 
-        const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
-        tocLink.dispatchEvent(clickEvent);
+        const hiddenClickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+        tocLink.dispatchEvent(hiddenClickEvent);
 
-        expect(clickEvent.defaultPrevented).toBe(true);
+        expect(hiddenClickEvent.defaultPrevented).toBe(true);
         expect(window.switchTab).toHaveBeenCalledWith('faq');
         jest.runAllTimers();
         expect(faq3.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' });
@@ -408,7 +383,7 @@ describe('UI Routing and Initialization', () => {
         jest.useRealTimers();
     });
 
-    test('all target=_blank links include noopener and noreferrer', () => {
+    test('static DOM contracts for external links, FAQ ordering, and Install/Uninstall typography', () => {
         const links = Array.from(document.querySelectorAll('a[target="_blank"]'));
         expect(links.length).toBeGreaterThan(0);
 
@@ -417,6 +392,31 @@ describe('UI Routing and Initialization', () => {
             expect(rel).toContain('noopener');
             expect(rel).toContain('noreferrer');
         });
+
+        const anchors = Array.from(document.querySelectorAll('#view-faq a[data-scroll-to]'));
+        const index5 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-5');
+        const index6 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-6');
+        const index7 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-7');
+
+        expect(index5).toBeLessThan(index6);
+        expect(index6).toBeLessThan(index7);
+
+        const faq5 = document.getElementById('faq-5');
+        const faq6 = document.getElementById('faq-6');
+        const faq7 = document.getElementById('faq-7');
+
+        expect(faq5.compareDocumentPosition(faq6)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+        expect(faq6.compareDocumentPosition(faq7)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+        const installDesc = document.getElementById('install-desc');
+        const uninstallDesc = document.getElementById('uninstall-desc');
+        const warningBox = document.getElementById('secure-mode-warning-box');
+        const uninstallWarningBox = document.getElementById('secure-mode-uninstall-warning-box');
+
+        expect(installDesc.className).toContain('text-base');
+        expect(uninstallDesc.className).toContain('text-base');
+        expect(warningBox.className).toContain('text-sm');
+        expect(uninstallWarningBox.className).toContain('text-sm');
     });
 
     test('fetchStatus updates DOM elements', async () => {
@@ -433,7 +433,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('box-expiration').textContent).toBe('2027-03-10');
     });
 
-    test('fetchStatus does not show Protected when no node is detected', async () => {
+    test('fetchStatus withholds Protected when no node is detected or dataplane rules are unsynced', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -459,9 +459,7 @@ describe('UI Routing and Initialization', () => {
 
         expect(document.getElementById('statusBadge').textContent).toBe('Connected');
         expect(document.getElementById('txt-routing-status').textContent).toBe('No Nodes Detected');
-    });
 
-    test('fetchStatus reports a fail-closed dataplane error instead of Protected', async () => {
         const error = 'k3s: Pod co-location required; TunnelSats node=worker-a, LND pod=lightning/lnd-0 node=worker-b';
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
@@ -489,9 +487,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-routing-error').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('dashboard-banner-title').textContent).toBe('Hybrid Lightning Connectivity');
         expect(document.getElementById('btn-dash-disable-routing').classList.contains('hidden')).toBe(true);
-    });
 
-    test('fetchStatus never reports Protected when rules are unsynced without a detailed error', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -516,7 +512,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-routing-error').textContent).toBe('Dataplane protection is not fully synced.');
     });
 
-    test('fetchStatus adjusts UI for secure_mode: true', async () => {
+    test('fetchStatus adjusts UI between secure_mode true and false', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -544,23 +540,21 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('install-desc').textContent).toContain('Since TunnelSats is running in Secure Mode, the configuration cannot be applied automatically');
         expect(document.getElementById('uninstall-desc').textContent).toContain('Since TunnelSats is running in Secure Mode, the configuration cannot be modified automatically');
         expect(document.getElementById('faq-uninstall-steps').innerHTML).toContain('Follow the modal instructions to manually comment out or delete');
-        
+
         const warningBox = document.getElementById('secure-mode-warning-box');
         const uninstallWarningBox = document.getElementById('secure-mode-uninstall-warning-box');
         expect(warningBox.classList.contains('hidden')).toBe(false);
         expect(warningBox.textContent).toContain('Files app');
         expect(uninstallWarningBox.classList.contains('hidden')).toBe(false);
         expect(uninstallWarningBox.textContent).toContain('manually revert configuration changes');
-        
+
         expect(document.getElementById('faq-6')).toBeTruthy();
         expect(document.getElementById('faq-6').textContent).toContain('In Secure Mode, why must I edit my config manually');
-        
+
         // Issue #170: the conflict troubleshooting guide is visible in Secure Mode too.
         expect(document.getElementById('faq-8').classList.contains('hidden')).toBe(false);
         expect(window.secureModeActive).toBe(true);
-    });
 
-    test('fetchStatus adjusts UI for secure_mode: false', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -588,14 +582,18 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('install-desc').textContent).toContain('Choose your node implementation and inject the TunnelSats forwarding host');
         expect(document.getElementById('uninstall-desc').textContent).toContain('Revert TunnelSats node configuration changes before uninstalling');
         expect(document.getElementById('faq-uninstall-steps').innerHTML).toContain('Wait for the UI to confirm that your node configuration has been restored');
-        
+
         expect(document.getElementById('secure-mode-warning-box').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('secure-mode-uninstall-warning-box').classList.contains('hidden')).toBe(true);
-        
+        expect(document.getElementById('uninstall-backup-warning-box').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('faq-5-backup-warning').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('faq-5').textContent).not.toContain('Umbrel safely preserves');
+        expect(document.getElementById('faq-5-backup-warning').textContent).toContain('we cannot recreate a lost');
+
         expect(window.secureModeActive).toBe(false);
     });
 
-    test('fetchStatus shows Config Verified badge and subtitle when verification source is config_file', async () => {
+    test('fetchStatus updates Config Verified badge, CLN tooltip, and unverified state', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -623,24 +621,15 @@ describe('UI Routing and Initialization', () => {
 
         await window.fetchStatus();
 
-        // Header badge: reassuring green Protected
         expect(document.getElementById('statusBadge').textContent).toBe('Protected');
         expect(document.getElementById('statusBadge').className).toContain('text-tsgreen');
-
-        // Routing badge: green Config Verified badge with tooltip
         expect(document.getElementById('badge-routing').textContent).toBe('\u24d8 Config Verified');
         expect(document.getElementById('badge-routing').className).toContain('border-tsgreen');
         expect(document.getElementById('badge-routing').title).toBe('Gossip announcement verified via node lnd.conf');
-
-        // Reassuring status text
         expect(document.getElementById('txt-routing-status').textContent).toBe('Node Routing Secured');
-
-        // Subtle subtitle is visible
         expect(document.getElementById('txt-routing-subtitle').textContent).toBe('Verified via node configuration');
         expect(document.getElementById('txt-routing-subtitle').classList.contains('hidden')).toBe(false);
-    });
 
-    test('fetchStatus formats tooltip for CLN when target_impl is cln', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -667,11 +656,8 @@ describe('UI Routing and Initialization', () => {
         );
 
         await window.fetchStatus();
-
         expect(document.getElementById('badge-routing').title).toBe('Gossip announcement verified via node config.cln');
-    });
 
-    test('fetchStatus removes tooltip when announcement_verified is false', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -698,11 +684,10 @@ describe('UI Routing and Initialization', () => {
         );
 
         await window.fetchStatus();
-
         expect(document.getElementById('badge-routing').hasAttribute('title')).toBe(false);
     });
 
-    test('fetchStatus evaluates routingActive based on target_impl rather than either-node OR', async () => {
+    test('fetchStatus evaluates routingActive per target_impl and blocks Protected during pending target switch', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -728,11 +713,8 @@ describe('UI Routing and Initialization', () => {
         );
 
         await window.fetchStatus();
-
         expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
-    });
 
-    test('fetchStatus never reports Protected while a target switch is pending', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -761,7 +743,7 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-routing-error').textContent).toContain('pending dataplane reconciliation');
     });
 
-    test('fetchStatus shows green Active badge and hides subtitle when verification source is live_gossip', async () => {
+    test('fetchStatus shows green Active badge and hides subtitle when verification source is live_gossip or absent', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -788,22 +770,13 @@ describe('UI Routing and Initialization', () => {
 
         await window.fetchStatus();
 
-        // Header badge: green Protected
         expect(document.getElementById('statusBadge').textContent).toBe('Protected');
         expect(document.getElementById('statusBadge').className).toContain('text-tsgreen');
-
-        // Routing badge: green Active
         expect(document.getElementById('badge-routing').textContent).toBe('Active');
         expect(document.getElementById('badge-routing').className).toContain('border-tsgreen');
-
-        // Standard status text
         expect(document.getElementById('txt-routing-status').textContent).toBe('Node Routing Secured');
-
-        // Subtitle is hidden
         expect(document.getElementById('txt-routing-subtitle').classList.contains('hidden')).toBe(true);
-    });
 
-    test('fetchStatus shows green badge when verification source is absent', async () => {
         global.fetch = csrfFetchMock(() =>
             Promise.resolve({
                 json: () => Promise.resolve({
@@ -829,7 +802,6 @@ describe('UI Routing and Initialization', () => {
 
         await window.fetchStatus();
 
-        // Behaves identically to live_gossip
         expect(document.getElementById('statusBadge').textContent).toBe('Protected');
         expect(document.getElementById('statusBadge').className).toContain('text-tsgreen');
         expect(document.getElementById('badge-routing').textContent).toBe('Active');
@@ -837,86 +809,51 @@ describe('UI Routing and Initialization', () => {
         expect(document.getElementById('txt-routing-subtitle').classList.contains('hidden')).toBe(true);
     });
 
-    test('configureNode bypasses confirmRestartModal in secure mode', async () => {
+    test('configureNode and restoreNode bypass confirmRestartModal in secure mode', async () => {
         window.secureModeActive = true;
         window.confirmRestartModal = jest.fn().mockResolvedValue(true);
-        global.fetch = csrfFetchMock(() =>
-            Promise.resolve({
-                json: () => Promise.resolve({
-                    success: true,
-                    manual_mode: true,
-                    node_type: 'lnd',
-                    config_path: '/path/to/lnd.conf',
-                    config_lines: ['line1', 'line2']
-                }),
-                ok: true
-            })
-        );
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/configure-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        node_type: 'lnd',
+                        config_path: '/path/to/lnd.conf',
+                        config_lines: ['line1', 'line2']
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        restore: true,
+                        targets: [
+                            {
+                                node_type: 'lnd',
+                                config_path: '/path/to/lnd.conf',
+                                config_lines: ['remove1']
+                            }
+                        ]
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
 
         await window.configureNode();
-
         expect(window.confirmRestartModal).not.toHaveBeenCalled();
         expect(document.getElementById('manual-config-modal')).toBeTruthy();
-        
         document.getElementById('manual-config-modal').remove();
-    });
-
-    test('restoreNode bypasses confirmRestartModal in secure mode', async () => {
-        window.secureModeActive = true;
-        window.confirmRestartModal = jest.fn().mockResolvedValue(true);
-        global.fetch = csrfFetchMock(() =>
-            Promise.resolve({
-                json: () => Promise.resolve({
-                    success: true,
-                    manual_mode: true,
-                    restore: true,
-                    targets: [
-                        {
-                            node_type: 'lnd',
-                            config_path: '/path/to/lnd.conf',
-                            config_lines: ['remove1']
-                        }
-                    ]
-                }),
-                ok: true
-            })
-        );
 
         await window.restoreNode();
-
         expect(window.confirmRestartModal).not.toHaveBeenCalled();
         expect(document.getElementById('manual-restore-modal')).toBeTruthy();
-
         document.getElementById('manual-restore-modal').remove();
-    });
-
-    test('FAQ layout ordering matches Q5 -> Q6 (Secure Mode) -> Q7 (Troubleshooting)', () => {
-        const anchors = Array.from(document.querySelectorAll('#view-faq a[data-scroll-to]'));
-        const index5 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-5');
-        const index6 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-6');
-        const index7 = anchors.findIndex(a => a.getAttribute('data-scroll-to') === 'faq-7');
-        
-        expect(index5).toBeLessThan(index6);
-        expect(index6).toBeLessThan(index7);
-
-        const faq5 = document.getElementById('faq-5');
-        const faq6 = document.getElementById('faq-6');
-        const faq7 = document.getElementById('faq-7');
-
-        expect(faq5.compareDocumentPosition(faq6)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-        expect(faq6.compareDocumentPosition(faq7)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    });
-
-    test('Install/Uninstall tab descriptions and warning boxes have increased font sizes', () => {
-        const installDesc = document.getElementById('install-desc');
-        const uninstallDesc = document.getElementById('uninstall-desc');
-        const warningBox = document.getElementById('secure-mode-warning-box');
-        const uninstallWarningBox = document.getElementById('secure-mode-uninstall-warning-box');
-
-        expect(installDesc.className).toContain('text-base');
-        expect(uninstallDesc.className).toContain('text-base');
-        expect(warningBox.className).toContain('text-sm');
-        expect(uninstallWarningBox.className).toContain('text-sm');
     });
 
     test('Manual configuration and restore modals have increased font sizes and correct typography styling', async () => {
@@ -966,69 +903,64 @@ describe('UI Routing and Initialization', () => {
         await new Promise(resolve => setTimeout(resolve, 350));
     });
 
-    test('manual configuration modal closes on clicking the overlay outside the panel but not inside', async () => {
+    test('manual configuration and restore modals close on clicking the overlay outside the panel but not inside', async () => {
         window.secureModeActive = true;
-        global.fetch = csrfFetchMock(() =>
-            Promise.resolve({
-                json: () => Promise.resolve({
-                    success: true,
-                    manual_mode: true,
-                    node_type: 'lnd',
-                    config_path: '/path/to/lnd.conf',
-                    config_lines: ['line1']
-                }),
-                ok: true
-            })
-        );
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/configure-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        node_type: 'lnd',
+                        config_path: '/path/to/lnd.conf',
+                        config_lines: ['line1']
+                    }),
+                    ok: true
+                });
+            }
+            if (url === '/api/local/restore-node') {
+                return Promise.resolve({
+                    json: () => Promise.resolve({
+                        success: true,
+                        manual_mode: true,
+                        restore: true,
+                        targets: [{
+                            node_type: 'lnd',
+                            config_path: '/path/to/lnd.conf',
+                            config_lines: ['remove1']
+                        }]
+                    }),
+                    ok: true
+                });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
 
         await window.configureNode();
 
-        const overlay = document.getElementById('manual-config-modal');
-        expect(overlay).toBeTruthy();
+        const configOverlay = document.getElementById('manual-config-modal');
+        expect(configOverlay).toBeTruthy();
 
-        // Click inside panel
-        const panel = overlay.querySelector('div');
-        panel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const configPanel = configOverlay.querySelector('div');
+        configPanel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 50));
         expect(document.getElementById('manual-config-modal')).toBeTruthy();
 
-        // Click outside panel (on overlay itself)
-        overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        configOverlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-config-modal')).toBeNull();
-    });
-
-    test('manual restore modal closes on clicking the overlay outside the panel but not inside', async () => {
-        window.secureModeActive = true;
-        global.fetch = csrfFetchMock(() =>
-            Promise.resolve({
-                json: () => Promise.resolve({
-                    success: true,
-                    manual_mode: true,
-                    restore: true,
-                    targets: [{
-                        node_type: 'lnd',
-                        config_path: '/path/to/lnd.conf',
-                        config_lines: ['remove1']
-                    }]
-                }),
-                ok: true
-            })
-        );
 
         await window.restoreNode();
 
-        const overlay = document.getElementById('manual-restore-modal');
-        expect(overlay).toBeTruthy();
+        const restoreOverlay = document.getElementById('manual-restore-modal');
+        expect(restoreOverlay).toBeTruthy();
 
-        // Click inside panel
-        const panel = overlay.querySelector('div');
-        panel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const restorePanel = restoreOverlay.querySelector('div');
+        restorePanel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 50));
         expect(document.getElementById('manual-restore-modal')).toBeTruthy();
 
-        // Click outside panel (on overlay itself)
-        overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        restoreOverlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 350));
         expect(document.getElementById('manual-restore-modal')).toBeNull();
     });
@@ -1089,7 +1021,7 @@ describe('Phase 1: fetchServers', () => {
 
     afterEach(() => { jest.restoreAllMocks(); });
 
-    test('renders server buttons with flag, country, and city (no wireguardPort)', async () => {
+    test('renders server buttons with flag, country, and city and auto-selects first server', async () => {
         await window.fetchServers();
         const list = document.getElementById('buy-server-list');
         const buttons = list.querySelectorAll('button');
@@ -1101,10 +1033,7 @@ describe('Phase 1: fetchServers', () => {
         expect(buttons[0].textContent).toContain('🇩🇪');
         expect(buttons[0].textContent).not.toContain('Port');
         expect(buttons[0].textContent).not.toContain('undefined');
-    });
 
-    test('first server is auto-selected', async () => {
-        await window.fetchServers();
         const selectEl = document.getElementById('buy-server-select');
         expect(selectEl.value).toBe('eu-de');
 
@@ -1591,27 +1520,22 @@ describe('Phase 3a: Import Config', () => {
 
     afterEach(() => { jest.restoreAllMocks(); });
 
-    test('pre-validation rejects empty import payload', async () => {
+    test('pre-validation rejects empty import payload or config missing [Peer] block', async () => {
         document.getElementById('config-text').value = '   ';
         document.getElementById('txt-configs').textContent = 'None Detected';
         global.fetch.mockClear();
 
         await window.importConfig();
 
-        const msg = document.getElementById('import-msg').textContent;
-        expect(msg).toContain('Please paste a WireGuard config');
+        expect(document.getElementById('import-msg').textContent).toContain('Please paste a WireGuard config');
         expect(global.fetch).not.toHaveBeenCalled();
-    });
 
-    test('pre-validation rejects config missing [Peer] block', async () => {
         document.getElementById('config-text').value = '[Interface]\nPrivateKey = abc\n';
-        document.getElementById('txt-configs').textContent = 'None Detected';
         global.fetch.mockClear();
 
         await window.importConfig();
 
-        const msg = document.getElementById('import-msg').textContent;
-        expect(msg).toContain('Missing [Interface] or [Peer] block');
+        expect(document.getElementById('import-msg').textContent).toContain('Missing [Interface] or [Peer] block');
         expect(global.fetch).not.toHaveBeenCalled();
     });
 
@@ -1776,14 +1700,29 @@ describe('Phase 3b: Install Config', () => {
 
     afterEach(() => { jest.restoreAllMocks(); });
 
-    test('setNodeType updates selected node type state', () => {
+    test('setNodeType updates selected node type state and configureNode posts cln payload', async () => {
         window.setNodeType('cln');
         expect(document.getElementById('node-type-selected').value).toBe('cln');
         expect(document.getElementById('node-type-cln').className).toContain('bg-tsyellow');
         expect(document.getElementById('node-type-lnd').className).not.toContain('bg-tsyellow');
+
+        await window.configureNode();
+
+        expect(window.confirmRestartModal).toHaveBeenCalledWith('cln');
+        expect(global.fetch).toHaveBeenCalledWith(
+            '/api/local/configure-node',
+            expect.objectContaining({
+                method: 'POST',
+                headers: expect.objectContaining({
+                    'Content-Type': 'application/json',
+                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
+                }),
+                body: JSON.stringify({ nodeType: 'cln' })
+            })
+        );
     });
 
-    test('configureNode posts selected nodeType and renders success', async () => {
+    test('configureNode posts selected lnd nodeType and renders success', async () => {
         window.setNodeType('lnd');
         await window.configureNode();
 
@@ -1800,24 +1739,6 @@ describe('Phase 3b: Install Config', () => {
             })
         );
         expect(document.getElementById('configure-node-msg').textContent).toContain('de2.tunnelsats.com:35825');
-    });
-
-    test('configureNode supports cln nodeType payload', async () => {
-        window.setNodeType('cln');
-        await window.configureNode();
-
-        expect(window.confirmRestartModal).toHaveBeenCalledWith('cln');
-        expect(global.fetch).toHaveBeenCalledWith(
-            '/api/local/configure-node',
-            expect.objectContaining({
-                method: 'POST',
-                headers: expect.objectContaining({
-                    'Content-Type': 'application/json',
-                    'X-TunnelSats-CSRF-Token': 'test-csrf-token'
-                }),
-                body: JSON.stringify({ nodeType: 'cln' })
-            })
-        );
     });
 
     test('configureNode requires explicit confirmation before disabling conflicting announcements', async () => {

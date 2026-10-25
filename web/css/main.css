@@ -20,16 +20,21 @@ body {
 }
 
 #globe-container {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
+    position: relative;
+    width: 9rem;
+    height: 9rem;
     z-index: 0;
     pointer-events: none;
-    opacity: 0.6;
-    mask-image: radial-gradient(circle at center, black 30%, transparent 80%);
-    -webkit-mask-image: radial-gradient(circle at center, black 30%, transparent 80%);
+    opacity: 0.9;
+    mask-image: radial-gradient(circle at center, black 55%, transparent 95%);
+    -webkit-mask-image: radial-gradient(circle at center, black 55%, transparent 95%);
+}
+
+@media (min-width: 768px) {
+    #globe-container {
+        width: 10rem;
+        height: 10rem;
+    }
 }
 
 .globe-canvas {

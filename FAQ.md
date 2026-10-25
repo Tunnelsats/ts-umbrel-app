@@ -83,8 +83,8 @@ Once TunnelSats has decommissioned its fail-closed guards and disconnected from 
 2. Navigate to your installed apps and locate TunnelSats.
 3. Click **Uninstall**.
 
-> **Will I lose my subscription?**
-> No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel safely preserves your TunnelSats app data folder (including your active WireGuard subscription profile). If you reinstall the app in the future, your subscription will still be there.
+> **Will I lose my subscription? (IMPORTANT: Back up `tunnelsats.conf` before uninstalling!)**
+> **Yes, if you do not back up your configuration first.** Uninstalling the TunnelSats app via the Umbrel App Store deletes the app data directory and permanently erases your local WireGuard configuration (`tunnelsats.conf`). Because your WireGuard private key is generated locally and is never stored on TunnelSats servers, **we cannot recreate a lost `tunnelsats.conf` file**. Always download a backup copy from the **Backup** tab (or the **Uninstall** tab) before uninstalling so you can re-import it on the **Subscribe / Import** tab if you reinstall in the future.
 
 ---
 

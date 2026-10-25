@@ -316,26 +316,25 @@ def test_gateway_proxy_reaches_web_role_daemon_transport(
     )
 
 
-@pytest.mark.parametrize("forwarded_client", ["8.8.8.8", "203.0.113.20", "not-an-ip"])
 def test_gateway_proxy_rejects_disallowed_forwarded_clients(
-    client, management_browser_security, forwarded_client
+    client, management_browser_security
 ):
     with patch.object(
         app_module.MANAGEMENT_SECURITY,
         "default_gateway_ip",
         return_value="172.30.0.1",
     ):
-        response = client.get(
-            "/api/local/session",
-            environ_base={"REMOTE_ADDR": "172.30.0.1"},
-            headers={
-                "Host": "umbrel.local:9739",
-                "X-Forwarded-For": forwarded_client,
-            },
-        )
-
-    assert response.status_code == 403
-    assert response.get_json() == {"success": False, "error": "Forbidden"}
+        for forwarded_client in ("8.8.8.8", "203.0.113.20", "not-an-ip"):
+            response = client.get(
+                "/api/local/session",
+                environ_base={"REMOTE_ADDR": "172.30.0.1"},
+                headers={
+                    "Host": "umbrel.local:9739",
+                    "X-Forwarded-For": forwarded_client,
+                },
+            )
+            assert response.status_code == 403
+            assert response.get_json() == {"success": False, "error": "Forbidden"}
 
 
 def test_unrelated_bridge_peer_cannot_inject_forwarded_client(
@@ -567,78 +566,65 @@ def test_direct_peer_extraction_supports_proxyfix_versions(proxyfix_orig, expect
         assert app_module._get_direct_remote_addr() == expected
 
 
-@pytest.mark.parametrize(
-    "forwarded_host",
-    [
+def test_management_security_accepts_known_forwarded_umbrel_hosts(
+    client, management_browser_security
+):
+    for forwarded_host in (
         "umbrel.local:9739",
         "examplehiddenservice.onion:9739",
         "tunnelsats.example:9739",
-    ],
-)
-def test_management_security_accepts_known_forwarded_umbrel_hosts(
-    client, management_browser_security, forwarded_host
-):
-    response = client.get(
-        "/api/local/session",
-        headers={
-            "X-Forwarded-For": "192.168.1.20",
-            "X-Forwarded-Host": forwarded_host,
-            "X-Forwarded-Proto": "http",
-        },
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
-    )
-
-    assert response.status_code == 200
+    ):
+        response = client.get(
+            "/api/local/session",
+            headers={
+                "X-Forwarded-For": "192.168.1.20",
+                "X-Forwarded-Host": forwarded_host,
+                "X-Forwarded-Proto": "http",
+            },
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        assert response.status_code == 200
 
 
-@pytest.mark.parametrize(
-    "forwarded_host",
-    ["umbrel.lan:9739", "node.tailnet.ts.net:9739", "custom.home:9739"],
-)
 def test_management_security_accepts_any_valid_host_from_loopback_proxy(
-    client, management_browser_security, forwarded_host
+    client, management_browser_security
 ):
-    response = client.get(
-        "/api/local/session",
-        headers={"X-Forwarded-Host": forwarded_host},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
-    )
+    for forwarded_host in ("umbrel.lan:9739", "node.tailnet.ts.net:9739", "custom.home:9739"):
+        response = client.get(
+            "/api/local/session",
+            headers={"X-Forwarded-Host": forwarded_host},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        assert response.status_code == 200
 
-    assert response.status_code == 200
 
-
-@pytest.mark.parametrize("forwarded_host", ["bad host", "bad.example/path", "[broken"])
 def test_management_security_rejects_malformed_host_from_loopback_proxy(
-    client, management_browser_security, forwarded_host
+    client, management_browser_security
 ):
-    response = client.get(
-        "/api/local/session",
-        headers={"X-Forwarded-Host": forwarded_host},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
-    )
+    for forwarded_host in ("bad host", "bad.example/path", "[broken"):
+        response = client.get(
+            "/api/local/session",
+            headers={"X-Forwarded-Host": forwarded_host},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        assert response.status_code == 403
+        assert response.get_json() == {"success": False, "error": "Forbidden"}
 
-    assert response.status_code == 403
-    assert response.get_json() == {"success": False, "error": "Forbidden"}
 
-
-@pytest.mark.parametrize(
-    "forwarded_host",
-    [
+def test_management_security_accepts_ip_hosts_from_loopback_proxy(
+    client, management_browser_security
+):
+    for forwarded_host in (
         "192.168.1.10:9739",
         "100.100.10.20:9739",
         "[fd00::10]:9739",
-    ],
-)
-def test_management_security_accepts_ip_hosts_from_loopback_proxy(
-    client, management_browser_security, forwarded_host
-):
-    response = client.get(
-        "/api/local/session",
-        headers={"X-Forwarded-Host": forwarded_host},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
-    )
-
-    assert response.status_code == 200
+    ):
+        response = client.get(
+            "/api/local/session",
+            headers={"X-Forwarded-Host": forwarded_host},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        assert response.status_code == 200
 
 
 def test_management_security_accepts_exact_forwarded_origin(
@@ -903,12 +889,27 @@ def test_security_headers_present(client):
     res = client.get('/')
     assert res.status_code == 200
     
-    # Verify Content-Security-Policy
-    csp = res.headers.get('Content-Security-Policy')
-    assert csp is not None
-    assert "default-src 'self'" in csp
-    assert "tunnelsats.com" in csp
+    # Verify Content-Security-Policy (and single-header contract)
+    csp_headers = res.headers.getlist('Content-Security-Policy')
+    assert len(csp_headers) == 1
+    csp = csp_headers[0]
     assert "fonts.googleapis.com" not in csp
+
+    directives = {}
+    for part in csp.split(";"):
+        tokens = part.strip().split()
+        if tokens:
+            directives[tokens[0]] = set(tokens[1:])
+
+    assert directives.get("default-src") == {"'self'"}
+    assert {"'self'", "'unsafe-eval'", "blob:"} <= directives.get("script-src", set())
+    assert {"'self'", "blob:"} <= directives.get("script-src-elem", set())
+    assert {"'self'", "blob:"} <= directives.get("worker-src", set())
+    assert {"'self'", "data:", "blob:", "https://*.tunnelsats.com"} <= directives.get("img-src", set())
+    assert {"'self'", "https://*.tunnelsats.com"} <= directives.get("connect-src", set())
+    assert {"'self'", "'unsafe-inline'"} <= directives.get("style-src", set())
+    assert directives.get("frame-ancestors") == {"'self'"}
+    assert directives.get("object-src") == {"'none'"}
     
     # Verify Defense-in-Depth headers
     assert res.headers.get('X-Frame-Options') == 'SAMEORIGIN'
@@ -1317,8 +1318,8 @@ class TestServersProxy:
         assert de['flag'] == '🇩🇪'
 
         us = next(s for s in data['servers'] if s['id'] == 'us-east')
-        assert us['lat'] == 40.7128  # NY default for 'us'
-        assert us['label'] == 'NEW YORK, US'
+        assert us['lat'] == 39.0438  # Ashburn for 'us-east'
+        assert us['label'] == 'ASHBURN, US'
         assert us['flag'] == '🇺🇸'
 
 class TestServerEnrichment:
@@ -1347,40 +1348,27 @@ class TestServerEnrichment:
 # --- Phase 1: Meta Endpoint Test ---
 
 class TestMetaEndpoint:
-    """Test that /api/local/meta returns stored metadata."""
+    """Test that /api/local/meta returns stored metadata and drops secrets."""
 
-    def test_meta_returns_empty_when_no_metadata(self, client, data_dir):
+    def test_meta_returns_empty_stored_and_sanitized_metadata(self, client, data_dir):
         res = client.get('/api/local/meta')
         assert res.status_code == 200
-        data = json.loads(res.data)
-        assert data == {}
+        assert json.loads(res.data) == {}
 
-    def test_meta_returns_stored_metadata(self, client, data_dir):
-        meta = {"serverId": "eu-de", "vpnPort": 35825}
         meta_path = os.path.join(data_dir, app_module.META_FILE)
         with open(meta_path, 'w') as f:
-            json.dump(meta, f)
+            json.dump({
+                "serverId": "eu-de",
+                "vpnPort": 35825,
+                "presharedKey": "SuperSecretXYZ",
+                "paymentHash": "hash12345",
+            }, f)
 
         res = client.get('/api/local/meta')
         assert res.status_code == 200
         data = json.loads(res.data)
         assert data['serverId'] == 'eu-de'
         assert data['vpnPort'] == 35825
-
-    def test_meta_drops_sensitive_secrets(self, client, data_dir):
-        meta = {
-            "serverId": "eu-de",
-            "presharedKey": "SuperSecretXYZ",
-            "paymentHash": "hash12345"
-        }
-        meta_path = os.path.join(data_dir, app_module.META_FILE)
-        with open(meta_path, 'w') as f:
-            json.dump(meta, f)
-
-        res = client.get('/api/local/meta')
-        assert res.status_code == 200
-        data = json.loads(res.data)
-        assert data['serverId'] == 'eu-de'
         assert 'presharedKey' not in data
         assert 'paymentHash' not in data
 
@@ -2095,58 +2083,44 @@ class TestDataplaneAndRegressionFixes:
         mock_post.assert_called_once_with("/containers/middleware_id/restart")
         mock_id.assert_called_once_with(app_module.LND_MIDDLEWARE_PATTERN)
 
-    @pytest.mark.parametrize(
-        "name",
-        [
+    def test_lnd_container_pattern_matching(self):
+        for name in (
             "lnd",
             "lnd_1",
             "lnd-1",
             "lightning_lnd",
             "lightning-lnd-1",
             "umbrel_lightning_lnd_1",
-        ],
-    )
-    def test_lnd_container_pattern_matches_daemon_names(self, name):
-        assert app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+        ):
+            assert app_module.re.search(app_module.LND_CONTAINER_PATTERN, name), name
 
-    @pytest.mark.parametrize(
-        "name",
-        [
+        for name in (
             "lnd_app_1",
             "lnd-proxy-1",
             "lnd-rest-1",
             "foo-lnd-backup-1",
             "lightning_app_1",
-        ],
-    )
-    def test_lnd_container_pattern_rejects_helper_names(self, name):
-        assert not app_module.re.search(app_module.LND_CONTAINER_PATTERN, name)
+        ):
+            assert not app_module.re.search(app_module.LND_CONTAINER_PATTERN, name), name
 
-    @pytest.mark.parametrize(
-        "name",
-        [
+    def test_lnd_middleware_pattern_matching(self):
+        for name in (
             "lightning_app_1",
             "lightning-app-1",
             "umbrel_lightning_app_1",
             "lnd_app_1",
             "lightning_ui_1",
-        ],
-    )
-    def test_lnd_middleware_pattern_matches_middleware_names(self, name):
-        assert app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
+        ):
+            assert app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name), name
 
-    @pytest.mark.parametrize(
-        "name",
-        [
+        for name in (
             "lightning_app_proxy_1",
             "umbrel-lightning-app-proxy-1",
             "lnd_app_proxy_1",
             "lightning_ui_proxy_1",
             "lightning_app_backup_1",
-        ],
-    )
-    def test_lnd_middleware_pattern_rejects_helper_names(self, name):
-        assert not app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name)
+        ):
+            assert not app_module.re.search(app_module.LND_MIDDLEWARE_PATTERN, name), name
 
     @patch('app.container_ids_by_match', return_value=['mock'])
     def test_configure_node_lnd_creates_application_options_section_when_missing(self, mock_ids, client):
@@ -2919,7 +2893,7 @@ class TestAnnouncementPrivacy:
             assert verified['rules_synced'] is True
             assert verified['announcement_verified'] is True
 
-            # In secure_mode the lnd dir is mounted :ro — readable but no lncli access.
+            # In secure_mode the lnd dir is mounted :ro - readable but no lncli access.
             # Trust the config file: conflict-free audit means announcement_verified = True.
             with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
                     patch('app.SECURE_MODE', True), patch('app.lnd_exists', return_value=True), \
