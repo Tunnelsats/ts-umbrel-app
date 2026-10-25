@@ -929,7 +929,6 @@ function switchTab(tabId) {
 
         if (activePaymentHash && !activeInvoiceExpired && tabId === mode && purchaseMode === mode) {
             // Restore active invoice UI and resume polling
-            ensureInvoiceBoxControls(mode);
             if (box) box.classList.remove('hidden');
             if (btnCreate) {
                 btnCreate.textContent = "Invoice Active...";

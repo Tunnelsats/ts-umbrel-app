@@ -808,5 +808,31 @@ describe('TunnelSats v3.5.0 Frontend UI Suite', () => {
         renewBox.replaceChildren();
         await window.createSub('renew');
         expect(document.getElementById('invoice-bolt11-renew').value).toBe('lnbc_second_renew_invoice');
+
+        // Verify returning to Buy tab after a paid purchase preserves the Payment Received confirmation
+        if (window.pollInterval) clearInterval(window.pollInterval);
+        window.activePaymentHash = 'buy_paid_hash';
+        window.purchaseMode = 'buy';
+        window.ensureInvoiceBoxControls('buy');
+        global.fetch.mockImplementation((url) => {
+            if (url === '/api/subscription/buy_paid_hash') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ status: 'paid' })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        });
+        await window.pollPayment();
+        expect(document.getElementById('invoice-box-buy').textContent).toContain('Payment Received!');
+        expect(document.getElementById('invoice-controls-buy').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('invoice-success-msg-buy').classList.contains('hidden')).toBe(false);
+
+        window.switchTab('import');
+        window.switchTab('buy');
+        expect(document.getElementById('invoice-box-buy').textContent).toContain('Payment Received!');
+        expect(document.getElementById('invoice-controls-buy').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('invoice-success-msg-buy').classList.contains('hidden')).toBe(false);
     });
 });
