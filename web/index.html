@@ -796,7 +796,7 @@
                                     Your WireGuard configuration contains your unique cryptographic private keys, internal VPN address, and server routing details.
                                 </p>
                                 <ul class="list-disc pl-5 space-y-2 text-xs text-gray-300 leading-relaxed">
-                                    <li><strong class="text-white">Secure Mode Sandbox Protection:</strong> In Secure Mode, app uninstalls from the Umbrel App Store will delete container files if data wipe is confirmed. Saving a backup ensures you never lose your subscription.</li>
+                                    <li><strong class="text-white">Uninstall &amp; Data Wipe Protection:</strong> Uninstalling TunnelSats from the Umbrel App Store can permanently erase your app data folder and WireGuard private key (<code class="text-tsgreen font-mono">tunnelsats.conf</code>). Because TunnelSats never stores client private keys on its servers, a lost config cannot be recreated - saving a backup ensures you never lose your subscription.</li>
                                     <li><strong class="text-white">Reinstall &amp; Recovery:</strong> If you migrate your node or reinstall TunnelSats, you can instantly upload this file on the <strong class="text-tsyellow">Subscribe / Import</strong> tab to restore active status without re-purchasing.</li>
                                     <li><strong class="text-white">Off-Grid Redundancy:</strong> Store your <code class="text-tsgreen font-mono">tunnelsats.conf</code> in a password manager or encrypted backup drive.</li>
                                 </ul>
@@ -838,15 +838,18 @@
                                 <li>Open your node config file, delete or comment out the specified lines, and save.</li>
                                 <li>Restart your <strong>Lightning Node or Core Lightning</strong> app from the Umbrel dashboard to apply the defaults.</li>
                             </ol>
-                            <div class="mt-4 pt-3 border-t border-red-500/30">
-                                <p class="text-xs text-red-300 font-bold mb-2 flex items-center gap-1">🚨 Mandatory Step BEFORE Uninstalling:</p>
-                                <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-2.5 rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer text-xs no-underline">
-                                    <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-                                    </svg>
-                                    <span>Backup WireGuard Profile (tunnelsats.conf)</span>
-                                </a>
-                            </div>
+                        </div>
+
+                        <!-- Unconditional Backup Warning Before Uninstalling -->
+                        <div id="uninstall-backup-warning-box" class="bg-red-950/40 border border-red-500/50 rounded-xl p-4 mb-6 text-xs text-red-200 leading-relaxed shadow-md space-y-2">
+                            <p class="text-sm text-white font-bold flex items-center gap-1.5">🚨 Mandatory Step BEFORE Uninstalling: Backup Your Subscription Key</p>
+                            <p>Uninstalling the TunnelSats app via the Umbrel App Store can permanently erase your local app data and WireGuard private key (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>). Because TunnelSats never stores client private keys on its servers, <strong>we cannot recreate your config if it is deleted</strong>.</p>
+                            <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="mt-2 w-full bg-tsgreen hover:bg-green-400 text-gray-900 font-bold py-2.5 rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer text-xs no-underline">
+                                <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                <span>Backup WireGuard Profile (tunnelsats.conf)</span>
+                            </a>
                         </div>
                         <button id="btn-restore-node" type="button"
                             class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition shadow-lg">
@@ -1099,30 +1102,15 @@
                                     </ol>
                                 </div>
 
-                                <div data-secure-mode="exclude"
-                                    class="bg-gray-900/40 border border-gray-800 border-l-2 border-l-tsyellow p-3 rounded text-gray-400 mt-4 italic shadow-sm">
-                                    <strong class="text-gray-300 not-italic mb-1 flex items-center gap-1.5"><svg
-                                            class="w-4 h-4 text-tsyellow" fill="none" stroke="currentColor"
-                                            viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
-                                            </path>
-                                        </svg> Will I lose my subscription?</strong>
-                                    No. Uninstalling the app via the Umbrel App Store destroys the container, but Umbrel
-                                    safely preserves your TunnelSats app data folder (including your active WireGuard
-                                    subscription profile). If you reinstall the app in the future, your subscription
-                                    will still be there.
-                                </div>
-
-                                <div data-secure-mode="only" class="bg-red-950/40 border border-red-500/50 p-4 rounded-xl text-red-200 mt-4 space-y-2 not-italic shadow-md">
+                                <div id="faq-5-backup-warning" class="bg-red-950/40 border border-red-500/50 p-4 rounded-xl text-red-200 mt-4 space-y-2 not-italic shadow-md">
                                     <strong class="text-white font-bold flex items-center gap-2 text-sm">
-                                        <span class="text-red-400 text-base">🚨</span> HIGH URGENCY: Backup WireGuard Profile BEFORE Uninstalling!
+                                        <span class="text-red-400 text-base">🚨</span> Will I lose my subscription? Backup WireGuard Profile BEFORE Uninstalling!
                                     </strong>
                                     <p class="text-xs text-red-200 leading-relaxed">
-                                        Because TunnelSats runs in Secure Mode inside an isolated container sandbox, <strong>uninstalling the TunnelSats app via the Umbrel App Store will permanently erase your purchased WireGuard profile (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>) if app data is wiped</strong>.
+                                        <strong>Yes, if you do not back up your configuration first.</strong> Uninstalling the TunnelSats app via the Umbrel App Store will permanently erase your app data folder and purchased WireGuard profile (<code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code>). Because your WireGuard private key is generated locally and never stored on TunnelSats servers, <strong>we cannot recreate a lost <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file</strong>.
                                     </p>
                                     <p class="text-xs text-red-200 leading-relaxed font-semibold">
-                                        BEFORE clicking Uninstall in the Umbrel App Store, click the button below to download your <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file to your browser. You can re-import this profile anytime if you reinstall.
+                                        BEFORE clicking Uninstall in the Umbrel App Store, click the button below (or use the <strong>Backup</strong> tab) to download your <code class="bg-black/50 px-1 py-0.5 rounded text-tsgreen font-mono">tunnelsats.conf</code> file. You can re-import this profile anytime if you reinstall.
                                     </p>
                                     <a href="/api/local/export-config" download="tunnelsats.conf" target="_blank" rel="noopener noreferrer" class="mt-2 bg-tsgreen hover:bg-green-400 text-gray-900 font-bold px-4 py-2.5 rounded-lg text-xs transition shadow-lg inline-flex items-center gap-2 cursor-pointer no-underline">
                                         <svg class="w-4 h-4 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -585,6 +585,10 @@ describe('UI Routing and Initialization', () => {
 
         expect(document.getElementById('secure-mode-warning-box').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('secure-mode-uninstall-warning-box').classList.contains('hidden')).toBe(true);
+        expect(document.getElementById('uninstall-backup-warning-box').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('faq-5-backup-warning').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('faq-5').textContent).not.toContain('Umbrel safely preserves');
+        expect(document.getElementById('faq-5-backup-warning').textContent).toContain('we cannot recreate a lost');
 
         expect(window.secureModeActive).toBe(false);
     });
