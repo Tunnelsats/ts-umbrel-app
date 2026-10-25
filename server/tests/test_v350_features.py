@@ -1208,19 +1208,28 @@ def test_umbrel_user_agent_header_sent_on_all_outbound_public_api_requests(clien
         app_module._create_renewal_invoice_upstream("pubKey123", "de2", 3)
         assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
 
-        client.get("/api/subscription/hash123")
+        mock_get.reset_mock()
+        r_check = client.get("/api/subscription/hash123")
+        assert r_check.status_code == 200
+        mock_get.assert_called_once()
         assert mock_get.call_args.kwargs["headers"]["User-Agent"] == expected_ua
 
+        mock_post.reset_mock()
         client.post(
             "/api/subscription/claim",
             json={"paymentHash": "hash123", "wgPublicKey": "pubKey123"},
         )
+        mock_post.assert_called_once()
         assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
 
-        client.post(
-            "/api/local/test-reachability",
+        mock_post.reset_mock()
+        response = client.post(
+            "/api/reachability",
             json={"socket": f"{'02' + 'a' * 64}@de2.tunnelsats.com:31234"},
         )
+        assert response.status_code == 200
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == f"{app_module.TUNNELSATS_API_URL}/ping/test"
         assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
 
 
