@@ -1783,15 +1783,22 @@ def compute_bandwidth_telemetry(
         or "unknown"
     )
 
+    days_until_reset = max(0, int(math.ceil((next_month_dt - now).total_seconds() / 86400.0)))
+
     return {
         "bandwidth_used_gb": round(used_gb, 2),
         "bandwidth_limit_gb": round(limit_gb, 2),
+        "used_gb": round(used_gb, 2),
+        "limit_gb": round(limit_gb, 2),
+        "quota_gb": round(limit_gb, 2),
         "used_pct": used_pct,
         "bandwidth_resets_this_month": resets_this_month,
         "max_resets_per_month": max_resets,
         "resets_remaining_this_month": resets_remaining,
         "next_free_reset_utc": next_free_reset_utc,
         "next_free_reset_iso": next_free_reset_iso,
+        "next_reset_at": next_free_reset_iso,
+        "days_until_reset": days_until_reset,
         "pace_pct": pace_pct,
         "projected_gb": projected_gb,
         "over_pace": over_pace,
@@ -1849,6 +1856,8 @@ def evaluate_subscription_notices(
                     "kind": "expiry",
                     "severity": "red",
                     "phase": "expired",
+                    "title": "Subscription Expired",
+                    "action_type": "renew",
                     "message": "Subscription has expired. Renew to restore VPN port forwarding.",
                 }
             )
@@ -1864,6 +1873,8 @@ def evaluate_subscription_notices(
                         "kind": "expiry",
                         "severity": "red",
                         "phase": "renew_now",
+                        "title": "Subscription Expiring Within 3 Days",
+                        "action_type": "renew",
                         "message": "Subscription expires in less than 3 days. Renew now to avoid interruption.",
                     }
                 )
@@ -1879,6 +1890,8 @@ def evaluate_subscription_notices(
                         "kind": "expiry",
                         "severity": "amber",
                         "phase": "renew_soon",
+                        "title": "Subscription Expiring Soon",
+                        "action_type": "renew",
                         "message": "Subscription expires within 7 days.",
                     }
                 )
@@ -1901,6 +1914,8 @@ def evaluate_subscription_notices(
                 "kind": "bandwidth",
                 "severity": "red",
                 "threshold_pct": 100,
+                "title": "Monthly Bandwidth Exhausted (100%)",
+                "action_type": "bandwidth_reset",
                 "message": "Monthly bandwidth allowance is exhausted (100%). Reset bandwidth to restore full speed.",
             }
         )
@@ -1911,6 +1926,8 @@ def evaluate_subscription_notices(
                 "kind": "bandwidth",
                 "severity": "red",
                 "threshold_pct": 90,
+                "title": "Critical Monthly Bandwidth Usage (>= 90%)",
+                "action_type": "bandwidth_reset",
                 "message": f"Bandwidth usage is at {used_pct}% of your {telemetry['bandwidth_limit_gb']} GB monthly limit.",
             }
         )
@@ -1921,6 +1938,8 @@ def evaluate_subscription_notices(
                 "kind": "bandwidth",
                 "severity": "amber",
                 "threshold_pct": 70,
+                "title": "High Monthly Bandwidth Usage (>= 70%)",
+                "action_type": "bandwidth_reset",
                 "message": f"Bandwidth usage has reached {used_pct}% of your {telemetry['bandwidth_limit_gb']} GB monthly limit.",
             }
         )
@@ -1932,6 +1951,8 @@ def evaluate_subscription_notices(
                 "id": "nwc_restore_reconnect",
                 "kind": "nwc",
                 "severity": "amber",
+                "title": "NWC Wallet Reconnect Required",
+                "action_type": "nwc",
                 "message": "NWC wallet credentials need to be reconnected after backup restore.",
             }
         )
@@ -1941,6 +1962,8 @@ def evaluate_subscription_notices(
                 "id": "nwc_budget_warning",
                 "kind": "nwc",
                 "severity": "amber",
+                "title": "NWC Auto-Renewal Budget Warning",
+                "action_type": "nwc",
                 "message": str(
                     nwc_state.get("lastError")
                     or "NWC wallet budget or balance is insufficient for auto-renewal."
@@ -1953,6 +1976,8 @@ def evaluate_subscription_notices(
                 "id": "nwc_fallback_manual",
                 "kind": "nwc",
                 "severity": "red",
+                "title": "NWC Auto-Renewal Failed",
+                "action_type": "nwc",
                 "message": "NWC auto-renewal failed after 3 attempts. Please renew manually.",
             }
         )

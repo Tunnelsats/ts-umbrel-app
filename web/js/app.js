@@ -1669,6 +1669,12 @@ async function fetchStatus() {
         if (boxPubkeyEl) {
             boxPubkeyEl.replaceChildren(document.createTextNode(pk));
         }
+        const nwcDashLink = document.getElementById('nwc-dashboard-link');
+        if (nwcDashLink) {
+            nwcDashLink.href = data.wg_pubkey
+                ? `https://tunnelsats.com/dashboard?wgPublicKey=${encodeURIComponent(data.wg_pubkey)}&section=link`
+                : 'https://tunnelsats.com/dashboard?section=link';
+        }
 
         const boxNodeEl = document.getElementById('box-node');
         if (boxNodeEl) {
@@ -2368,6 +2374,18 @@ async function claimSubscription(mode) {
         } catch (e) {
             console.warn("Failed to parse JSON response from claim");
             data = { error: "Server returned an invalid response." };
+        }
+
+        if (res.status === 202 || (data && data.status === "processing")) {
+            const p = document.createElement('p');
+            p.className = 'text-sm text-tsyellow text-center animate-pulse';
+            p.textContent = (data && data.message) || 'Provisioning peer on VPN server...';
+            invoiceBox.append(p);
+            if (btnInstall) {
+                btnInstall.disabled = false;
+                btnInstall.textContent = "Retry Installation";
+            }
+            return;
         }
 
         if (res.ok && data.success !== false && data.status !== "error") {
@@ -3565,10 +3583,11 @@ function extractNwcState(data) {
         : (status.subscription_telemetry && status.subscription_telemetry.nwc && typeof status.subscription_telemetry.nwc === 'object'
             ? status.subscription_telemetry.nwc
             : {});
+    const stateObj = (nwc.state && typeof nwc.state === 'object') ? nwc.state : {};
     const connected = nwc.connected === true || nwc.enabled === true || status.nwc_connected === true;
-    const lastError = nwc.last_error || nwc.lastRenewalError || status.nwc_last_error || null;
-    const healthy = connected && nwc.healthy !== false && !lastError;
-    const renewalDuration = nwc.renewal_duration || nwc.renewalDuration || nwc.duration || 'match';
+    const lastError = nwc.last_error || nwc.lastRenewalError || stateObj.lastError || status.nwc_last_error || null;
+    const healthy = connected && nwc.healthy !== false && !lastError && !stateObj.fallbackTaskRaised && !stateObj.budgetWarning && !stateObj.restoreReconnectNeeded;
+    const renewalDuration = nwc.renewal_duration || nwc.renewalDuration || nwc.auto_renew_duration || nwc.autoRenewDuration || nwc.duration || 'match';
     const routeViaTor = nwc.route_via_tor === true || nwc.routeViaTor === true;
     return { connected, healthy, lastError, renewalDuration, routeViaTor };
 }
@@ -3699,7 +3718,7 @@ function extractBandwidthData(data) {
         : (status.bandwidth && typeof status.bandwidth === 'object' ? status.bandwidth : telemetry);
 
     const usedGbRaw = bw.used_gb ?? bw.usedGb ?? bw.bandwidth_used_gb ?? 0;
-    const quotaGbRaw = bw.quota_gb ?? bw.quotaGb ?? bw.limit_gb ?? 90;
+    const quotaGbRaw = bw.quota_gb ?? bw.quotaGb ?? bw.limit_gb ?? bw.bandwidth_limit_gb ?? 90;
     const usedGb = Number.isFinite(Number(usedGbRaw)) ? Math.max(0, Number(usedGbRaw)) : 0;
     const quotaGb = Number.isFinite(Number(quotaGbRaw)) && Number(quotaGbRaw) > 0 ? Number(quotaGbRaw) : 90;
     const usedPctRaw = bw.used_pct ?? bw.usedPct ?? ((usedGb / quotaGb) * 100);
@@ -3709,7 +3728,7 @@ function extractBandwidthData(data) {
         ? Math.max(0, Math.min(100, Number(cycleElapsedPctRaw)))
         : null;
     const daysUntilReset = bw.days_until_reset ?? bw.daysUntilReset ?? null;
-    const nextResetAt = bw.next_reset_at ?? bw.nextResetAt ?? bw.resets_at ?? null;
+    const nextResetAt = bw.next_reset_at ?? bw.nextResetAt ?? bw.resets_at ?? bw.next_free_reset_iso ?? bw.next_free_reset_utc ?? null;
     return { usedGb, quotaGb, usedPct, cycleElapsedPct, daysUntilReset, nextResetAt };
 }
 window.extractBandwidthData = extractBandwidthData;
@@ -3875,15 +3894,19 @@ function renderNotices(data) {
             if (!b || typeof b !== 'object') return;
             const id = String(b.id || b.code || b.type || '');
             // Suppress manual 7d and 3d expiry notices when NWC auto-renewal is active and healthy
-            if (nwcHealthy && (id === 'expiring_7d' || id === 'expiring_3d' || id === 'renew_soon' || id === 'renew_now')) {
+            if (nwcHealthy && (id === 'expiring_7d' || id === 'expiring_3d' || id === 'expiry_7d' || id === 'expiry_3d' || id === 'renew_soon' || id === 'renew_now')) {
                 return;
             }
+            const rawSev = String(b.severity || 'warning').toLowerCase();
+            const normalizedSeverity = (rawSev === 'red' || rawSev === 'critical' || rawSev === 'error')
+                ? 'critical'
+                : (rawSev === 'info' ? 'info' : 'warning');
             banners.push({
                 id: id || 'notice',
-                severity: b.severity || 'warning',
+                severity: normalizedSeverity,
                 title: b.title || 'Subscription Notice',
                 message: b.message || b.text || '',
-                actionType: b.action_type || b.actionType || null
+                actionType: b.action_type || b.actionType || (b.kind === 'nwc' ? 'nwc' : (b.kind === 'bandwidth' ? 'bandwidth_reset' : null))
             });
         });
     } else {
@@ -4425,8 +4448,9 @@ async function testReachability() {
             resultEl.className = 'text-xs font-semibold text-tsyellow mt-0.5';
             resultEl.textContent = `Skipped: ${data.reason || data.message || 'VPN tunnel is not active.'}`;
         } else if (res.ok && data && (data.reachable === true || data.status === 'reachable')) {
-            const endpoint = data.endpoint || (data.host && data.port ? `${data.host}:${data.port}` : 'forwarded port');
-            const rtt = data.rtt_ms !== undefined && data.rtt_ms !== null ? ` (${data.rtt_ms} ms)` : '';
+            const endpoint = data.endpoint || data.socket || (data.host && data.port ? `${data.host}:${data.port}` : 'forwarded port');
+            const rttVal = data.rtt_ms !== undefined && data.rtt_ms !== null ? data.rtt_ms : data.latency_ms;
+            const rtt = rttVal !== undefined && rttVal !== null ? ` (${rttVal} ms)` : '';
             resultEl.className = 'text-xs font-semibold text-tsgreen mt-0.5';
             resultEl.textContent = `Reachable: ${endpoint}${rtt}`;
         } else if (data && (data.reachable === false || data.status === 'unreachable' || data.status === 'timeout')) {

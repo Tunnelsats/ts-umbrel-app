@@ -4239,9 +4239,13 @@ def nwc_connect():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         payload = {}
-    uri = str(payload.get("uri") or "").strip()
+    uri = str(payload.get("uri") or payload.get("nwcUri") or payload.get("nwc_uri") or "").strip()
     auto_renew_duration = payload.get(
-        "autoRenewDuration", payload.get("auto_renew_duration", "match")
+        "autoRenewDuration",
+        payload.get(
+            "auto_renew_duration",
+            payload.get("renewalDuration", payload.get("renewal_duration", "match")),
+        ),
     )
     route_via_tor = bool(payload.get("routeViaTor", payload.get("route_via_tor", False)))
 
@@ -4458,12 +4462,17 @@ def reachability_test():
                 )
             )
             latency_ms = data.get("latency_ms", data.get("latencyMs", data.get("latency")))
+            endpoint_part = (
+                target_socket.rsplit("@", 1)[-1] if "@" in target_socket else target_socket
+            )
             return jsonify(
                 {
                     "success": True,
                     "reachable": reachable,
                     "latency_ms": latency_ms,
+                    "rtt_ms": latency_ms,
                     "socket": target_socket,
+                    "endpoint": endpoint_part,
                     "details": data,
                 }
             )
@@ -4808,18 +4817,35 @@ def local_status():
     notices = evaluate_subscription_notices(DATA_DIR, meta_data)
     wallet_on_disk = load_nwc_wallet(DATA_DIR)
     nwc_connected = bool(meta_data.get("nwcConnected") and wallet_on_disk)
+    nwc_state_dict = (
+        meta_data.get("nwcAutoRenewState")
+        if isinstance(meta_data.get("nwcAutoRenewState"), dict)
+        else {}
+    )
+    nwc_auto_dur = (
+        (wallet_on_disk.get("autoRenewDuration") if wallet_on_disk else None)
+        or meta_data.get("nwcAutoRenewDuration")
+        or "match"
+    )
+    nwc_last_error = nwc_state_dict.get("lastError")
+    nwc_healthy = bool(
+        nwc_connected
+        and not nwc_state_dict.get("budgetWarning")
+        and not nwc_state_dict.get("fallbackTaskRaised")
+        and not nwc_state_dict.get("restoreReconnectNeeded")
+        and not nwc_last_error
+    )
     nwc_info = {
         "connected": nwc_connected,
+        "healthy": nwc_healthy,
+        "last_error": nwc_last_error,
         "relay_host": str(
             (wallet_on_disk.get("relayHost") if wallet_on_disk else None)
             or meta_data.get("nwcRelayHost")
             or ""
         ),
-        "auto_renew_duration": (
-            (wallet_on_disk.get("autoRenewDuration") if wallet_on_disk else None)
-            or meta_data.get("nwcAutoRenewDuration")
-            or "match"
-        ),
+        "auto_renew_duration": nwc_auto_dur,
+        "renewal_duration": nwc_auto_dur,
         "route_via_tor": bool(
             (wallet_on_disk.get("routeViaTor") if wallet_on_disk else None)
             or meta_data.get("nwcRouteViaTor")
@@ -4827,11 +4853,7 @@ def local_status():
         ),
         "last_duration": meta_data.get("lastDuration"),
         "last_amount_sats": meta_data.get("lastAmountSats"),
-        "state": (
-            meta_data.get("nwcAutoRenewState")
-            if isinstance(meta_data.get("nwcAutoRenewState"), dict)
-            else {}
-        ),
+        "state": nwc_state_dict,
     }
 
     return jsonify(
