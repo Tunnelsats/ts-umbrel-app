@@ -903,6 +903,11 @@ function switchTab(tabId) {
 
     if (tabId === 'dashboard') {
         fetchStatus();
+        if (activePaymentHash && purchaseMode === 'reset') {
+            const resetBox = document.getElementById('bandwidth-reset-invoice-box');
+            if (resetBox) resetBox.classList.remove('hidden');
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
+        }
     }
     ['buy', 'renew'].forEach(mode => {
         const box = document.getElementById(`invoice-box-${mode}`);
@@ -2027,62 +2032,84 @@ var qrReset = null;
 function createPureDomQrSvg(text, size = 192) {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('viewBox', '0 0 29 29');
     svg.setAttribute('width', String(size));
     svg.setAttribute('height', String(size));
     svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', 'Lightning Invoice QR Code');
 
-    const bg = document.createElementNS(svgNS, 'rect');
-    bg.setAttribute('width', '29');
-    bg.setAttribute('height', '29');
-    bg.setAttribute('fill', '#ffffff');
-    svg.appendChild(bg);
+    if (typeof QRCode === 'function') {
+        try {
+            const tempDiv = document.createElement('div');
+            const qrInstance = new QRCode(tempDiv, {
+                text: String(text || ''),
+                width: size,
+                height: size,
+                correctLevel: (QRCode.CorrectLevel && QRCode.CorrectLevel.M !== undefined) ? QRCode.CorrectLevel.M : 0
+            });
+            const qrModel = qrInstance && qrInstance._oQRCode;
+            if (qrModel && typeof qrModel.getModuleCount === 'function' && typeof qrModel.isDark === 'function') {
+                const count = qrModel.getModuleCount();
+                const margin = 2;
+                const total = count + margin * 2;
+                svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
+                svg.setAttribute('aria-label', 'Lightning Invoice QR Code');
+                svg.setAttribute('data-qr-mode', 'matrix');
 
-    const drawFinder = (ox, oy) => {
-        const outer = document.createElementNS(svgNS, 'rect');
-        outer.setAttribute('x', String(ox));
-        outer.setAttribute('y', String(oy));
-        outer.setAttribute('width', '7');
-        outer.setAttribute('height', '7');
-        outer.setAttribute('fill', '#000000');
-        const innerBg = document.createElementNS(svgNS, 'rect');
-        innerBg.setAttribute('x', String(ox + 1));
-        innerBg.setAttribute('y', String(oy + 1));
-        innerBg.setAttribute('width', '5');
-        innerBg.setAttribute('height', '5');
-        innerBg.setAttribute('fill', '#ffffff');
-        const center = document.createElementNS(svgNS, 'rect');
-        center.setAttribute('x', String(ox + 2));
-        center.setAttribute('y', String(oy + 2));
-        center.setAttribute('width', '3');
-        center.setAttribute('height', '3');
-        center.setAttribute('fill', '#000000');
-        svg.append(outer, innerBg, center);
-    };
+                const bg = document.createElementNS(svgNS, 'rect');
+                bg.setAttribute('width', String(total));
+                bg.setAttribute('height', String(total));
+                bg.setAttribute('fill', '#ffffff');
+                svg.appendChild(bg);
 
-    drawFinder(1, 1);
-    drawFinder(21, 1);
-    drawFinder(1, 21);
-
-    const str = String(text || '');
-    for (let y = 1; y < 28; y++) {
-        for (let x = 1; x < 28; x++) {
-            const inFinder = (x <= 8 && y <= 8) || (x >= 20 && y <= 8) || (x <= 8 && y >= 20);
-            if (inFinder) continue;
-            const idx = (y * 29 + x) % Math.max(1, str.length);
-            const code = str.charCodeAt(idx) || 0;
-            if (((code + x * 7 + y * 13) & 1) === 1) {
-                const cell = document.createElementNS(svgNS, 'rect');
-                cell.setAttribute('x', String(x));
-                cell.setAttribute('y', String(y));
-                cell.setAttribute('width', '1');
-                cell.setAttribute('height', '1');
-                cell.setAttribute('fill', '#000000');
-                svg.appendChild(cell);
+                for (let r = 0; r < count; r++) {
+                    for (let c = 0; c < count; c++) {
+                        if (qrModel.isDark(r, c)) {
+                            const cell = document.createElementNS(svgNS, 'rect');
+                            cell.setAttribute('x', String(c + margin));
+                            cell.setAttribute('y', String(r + margin));
+                            cell.setAttribute('width', '1');
+                            cell.setAttribute('height', '1');
+                            cell.setAttribute('fill', '#000000');
+                            svg.appendChild(cell);
+                        }
+                    }
+                }
+                return svg;
             }
+        } catch (err) {
+            // Fall through to unavailable notice if encoding fails
         }
     }
+
+    // Honest fallback notice when QR encoder library is unavailable (never draw a fake un-scannable matrix)
+    svg.setAttribute('viewBox', '0 0 160 160');
+    svg.setAttribute('aria-label', 'QR code unavailable - copy invoice or use wallet button');
+    svg.setAttribute('data-qr-fallback', 'unavailable');
+
+    const bg = document.createElementNS(svgNS, 'rect');
+    bg.setAttribute('width', '160');
+    bg.setAttribute('height', '160');
+    bg.setAttribute('rx', '8');
+    bg.setAttribute('fill', '#111827');
+    svg.appendChild(bg);
+
+    const line1 = document.createElementNS(svgNS, 'text');
+    line1.setAttribute('x', '80');
+    line1.setAttribute('y', '74');
+    line1.setAttribute('text-anchor', 'middle');
+    line1.setAttribute('fill', '#facc15');
+    line1.setAttribute('font-size', '12');
+    line1.setAttribute('font-weight', 'bold');
+    line1.textContent = 'QR Code Unavailable';
+
+    const line2 = document.createElementNS(svgNS, 'text');
+    line2.setAttribute('x', '80');
+    line2.setAttribute('y', '94');
+    line2.setAttribute('text-anchor', 'middle');
+    line2.setAttribute('fill', '#9ca3af');
+    line2.setAttribute('font-size', '10');
+    line2.textContent = 'Use Copy or Wallet button';
+
+    svg.append(line1, line2);
     return svg;
 }
 window.createPureDomQrSvg = createPureDomQrSvg;
@@ -2270,7 +2297,9 @@ async function pollPayment() {
                 ? 'bandwidth-reset-invoice-box'
                 : `invoice-box-${purchaseMode}`;
             const invoiceBox = document.getElementById(invoiceBoxId);
-            if (invoiceBox) invoiceBox.replaceChildren(); // Clear content
+            if (invoiceBox && purchaseMode !== 'reset') {
+                invoiceBox.replaceChildren(); // Clear content for buy/renew
+            }
 
             if (purchaseMode === 'buy') {
                 // Celebration SVG (safely parsed to avoid innerHTML AST warnings)
@@ -2311,6 +2340,16 @@ async function pollPayment() {
                 if (invoiceBox) invoiceBox.append(celebrationSvg, h3, p, button);
             } else if (purchaseMode === 'reset') {
                 activePaymentHash = null;
+                const controlsEl = document.getElementById('bandwidth-reset-invoice-controls');
+                if (controlsEl) controlsEl.classList.add('hidden');
+
+                let successEl = document.getElementById('bandwidth-reset-success-msg');
+                if (!successEl && invoiceBox) {
+                    successEl = document.createElement('div');
+                    successEl.id = 'bandwidth-reset-success-msg';
+                    successEl.className = 'py-2';
+                    invoiceBox.appendChild(successEl);
+                }
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center text-sm mb-1';
                 h3.textContent = 'Bandwidth Quota Reset!';
@@ -2319,7 +2358,12 @@ async function pollPayment() {
                 p.className = 'text-xs text-gray-300 text-center';
                 p.textContent = 'Your monthly bandwidth counter has been reset to 0 GB.';
 
-                if (invoiceBox) invoiceBox.append(h3, p);
+                if (successEl) {
+                    successEl.replaceChildren(h3, p);
+                    successEl.classList.remove('hidden');
+                } else if (invoiceBox) {
+                    invoiceBox.append(h3, p);
+                }
                 fetchStatus();
             } else {
                 // Renewals don't need claim/provisioning, so clear active hash after payment confirmation.
@@ -4074,8 +4118,18 @@ window.renderNotices = renderNotices;
 
 // --- NWC Auto-Renew Modal & Payment Helpers ---
 
+function normalizeNwcDurationCode(durationCode) {
+    const raw = String(durationCode !== undefined && durationCode !== null ? durationCode : 'match').trim().toLowerCase();
+    if (raw === '1' || raw === '1m') return '1m';
+    if (raw === '3' || raw === '3m') return '3m';
+    if (raw === '6' || raw === '6m') return '6m';
+    if (raw === '12' || raw === '12m') return '12m';
+    return 'match';
+}
+window.normalizeNwcDurationCode = normalizeNwcDurationCode;
+
 function updateNwcRecommendedBudget(durationCode = 'match') {
-    const code = String(durationCode || 'match').toLowerCase();
+    const code = normalizeNwcDurationCode(durationCode);
     const baseUsd = NWC_DURATION_USD[code] !== undefined ? NWC_DURATION_USD[code] : 2.89;
     const bufferedUsd = Number((baseUsd * 1.20).toFixed(2));
     const el = document.getElementById('nwc-recommended-budget');
@@ -4090,7 +4144,7 @@ function updateNwcRecommendedBudget(durationCode = 'match') {
 window.updateNwcRecommendedBudget = updateNwcRecommendedBudget;
 
 function selectNwcDuration(durationCode) {
-    const code = String(durationCode || 'match');
+    const code = normalizeNwcDurationCode(durationCode);
     const selectEl = document.getElementById('nwc-duration-select');
     if (selectEl) selectEl.value = code;
 
@@ -4397,6 +4451,13 @@ async function requestBandwidthReset() {
         if (res.ok && paymentHash && invoice) {
             activePaymentHash = paymentHash;
             purchaseMode = 'reset';
+            const controlsEl = document.getElementById('bandwidth-reset-invoice-controls');
+            if (controlsEl) controlsEl.classList.remove('hidden');
+            const successEl = document.getElementById('bandwidth-reset-success-msg');
+            if (successEl) {
+                successEl.classList.add('hidden');
+                successEl.replaceChildren();
+            }
             const input = document.getElementById('invoice-bolt11-reset');
             const link = document.getElementById('pay-link-reset');
             const box = document.getElementById('bandwidth-reset-invoice-box');
@@ -4426,6 +4487,13 @@ window.requestBandwidthReset = requestBandwidthReset;
 async function testReachability() {
     const btn = document.getElementById('btn-test-reachability');
     const resultEl = document.getElementById('reachability-result');
+    const pubkeyWrap = document.getElementById('reachability-pubkey-wrap');
+    const pubkeyInput = document.getElementById('reachability-pubkey-input');
+    const customInputVal = pubkeyInput && typeof pubkeyInput.value === 'string' ? pubkeyInput.value.trim() : '';
+    const requestPayload = customInputVal
+        ? (customInputVal.includes('@') ? { socket: customInputVal } : { pubkey: customInputVal })
+        : {};
+
     if (btn) {
         btn.disabled = true;
         btn.textContent = 'Testing...';
@@ -4439,10 +4507,17 @@ async function testReachability() {
         const res = await managementFetch('/api/reachability', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
+            body: JSON.stringify(requestPayload)
         });
         const data = await safeFetchJson(res);
         if (!resultEl) return;
+
+        if (data && data.needsPubkey && pubkeyWrap) {
+            pubkeyWrap.classList.remove('hidden');
+            if (pubkeyInput && typeof pubkeyInput.focus === 'function') {
+                pubkeyInput.focus();
+            }
+        }
 
         if (data && (data.status === 'skipped' || data.skipped === true)) {
             resultEl.className = 'text-xs font-semibold text-tsyellow mt-0.5';

@@ -464,13 +464,32 @@ describe('TunnelSats v3.5.0 Frontend UI Suite', () => {
         expect(resultEl.textContent).toContain('Skipped: Tunnel is down');
     });
 
-    test('14. Pure-DOM SVG QR fallback renders valid <svg> when QRCode library is unavailable', () => {
+    test('14. Pure-DOM SVG QR renders real matrix when QRCode model is present and honest unavailable notice when absent', () => {
+        // 1. With QRCode model providing getModuleCount/isDark -> renders real matrix SVG
+        global.QRCode = function () {
+            this._oQRCode = {
+                getModuleCount: () => 21,
+                isDark: (r, c) => (r + c) % 2 === 0
+            };
+        };
+        const matrixSvg = window.createPureDomQrSvg('lnbc100n1p_real_matrix', 192);
+        expect(matrixSvg.getAttribute('data-qr-mode')).toBe('matrix');
+        expect(matrixSvg.getAttribute('viewBox')).toBe('0 0 25 25');
+
+        // 2. Without QRCode library -> renders honest unavailable notice instead of fake QR
         delete global.QRCode;
         window.renderQR('buy', 'lnbc100n1p_fallback_test');
         const box = document.getElementById('qr-placeholder-buy');
         const svg = box.querySelector('svg');
         expect(svg).not.toBeNull();
-        expect(svg.getAttribute('viewBox')).toBe('0 0 29 29');
+        expect(svg.getAttribute('data-qr-fallback')).toBe('unavailable');
+        expect(svg.textContent).toContain('QR Code Unavailable');
+
+        // 3. Numeric saved NWC duration normalizes to pill format (e.g. 12 -> 12m)
+        window.selectNwcDuration(12);
+        const pill12m = document.querySelector('#nwc-duration-pills button[data-nwc-duration="12m"]');
+        expect(pill12m.getAttribute('aria-checked')).toBe('true');
+        expect(document.getElementById('nwc-recommended-budget').textContent).toContain('$33.29');
     });
 
     test('15. disconnectNwcWallet sends POST /api/nwc/disconnect and updates NWC promo card', async () => {

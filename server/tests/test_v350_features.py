@@ -502,7 +502,21 @@ def test_evaluate_subscription_notices_phases_and_nwc_suppression(data_dir):
     assert "expiry_3d" in banner_ids
     assert "nwc_budget_warning" in banner_ids
 
-    # 4. Expired + 92% bandwidth -> expired red + bandwidth_90 red
+    # 4. <24 hours left WITH healthy NWC -> NOT suppressed, shows expiry_24h red warning
+    n_24h = evaluate_subscription_notices(
+        str(data_dir),
+        {
+            "expiresAt": (now + timedelta(hours=12)).isoformat(),
+            "nwcConnected": True,
+            "nwcAutoRenewState": {"budgetWarning": False, "fallbackTaskRaised": False},
+        },
+        now_dt=now,
+    )
+    assert n_24h["phase"] == "renew_now"
+    assert n_24h["suppressed_by_nwc"] is False
+    assert any(b["id"] == "expiry_24h" and b["severity"] == "red" for b in n_24h["banners"])
+
+    # 5. Expired + 92% bandwidth -> expired red + bandwidth_90 red
     n_exp = evaluate_subscription_notices(
         str(data_dir),
         {
@@ -659,7 +673,27 @@ def test_check_subscription_handles_202_processing_and_bandwidth_reset_paid(
     assert "pendingReset" not in updated_meta
     assert updated_meta["subscriptionTelemetry"]["bandwidthUsedGb"] == 0.0
     assert updated_meta["subscriptionTelemetry"]["resetsThisMonth"] == 1
+    assert "resetHash222" in updated_meta.get("appliedResetHashes", [])
     mock_trigger_sync.assert_called_once_with("pubKeyReset123")
+
+    # 3. Re-checking the same paid reset hash does NOT zero newer usage or increment resetsThisMonth again
+    updated_meta["subscriptionTelemetry"]["bandwidthUsedGb"] = 14.5
+    with open(meta_path, "w", encoding="utf-8") as fp:
+        json.dump(updated_meta, fp)
+
+    resp_paid_no_rem = MagicMock()
+    resp_paid_no_rem.status_code = 200
+    resp_paid_no_rem.headers = {"Content-Type": "application/json"}
+    resp_paid_no_rem.json.return_value = {"status": "paid", "type": "bandwidth_reset"}
+    resp_paid_no_rem.content = json.dumps(resp_paid_no_rem.json.return_value).encode("utf-8")
+    mock_get.return_value = resp_paid_no_rem
+
+    r_dup = client.get("/api/subscription/resetHash222")
+    assert r_dup.status_code == 200
+    with open(meta_path, "r", encoding="utf-8") as fp:
+        after_dup = json.load(fp)
+    assert after_dup["subscriptionTelemetry"]["bandwidthUsedGb"] == 14.5
+    assert after_dup["subscriptionTelemetry"]["resetsThisMonth"] == 1
 
 
 def test_apply_vpn_port_updates_meta_and_wireguard_conf(data_dir):
@@ -730,6 +764,8 @@ def test_create_and_claim_subscription_with_local_keygen_and_structured_response
     # Verify /api/local/meta and /api/local/status never leak wgPrivateKey
     meta_res = client.get("/api/local/meta").get_json()
     assert "wgPrivateKey" not in meta_res.get("pendingOrder", {})
+    # Unpaid create must not overwrite lastDuration before claim
+    assert "lastDuration" not in meta_res
     status_res = client.get("/api/local/status").get_json()
     assert "wgPrivateKey" not in (status_res.get("pending_order") or {})
 

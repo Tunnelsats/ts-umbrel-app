@@ -1495,8 +1495,10 @@ def maybe_nwc_auto_renew(
     if days_remaining > NWC_RENEW_WINDOW_DAYS:
         return {"attempted": False, "reason": "outside_renew_window", "days_remaining": days_remaining}
 
-    # Check if we already exhausted attempts for this expiry cycle
+    # Check if we already exhausted attempts or already renewed for this expiry cycle
     target_expiry_str = str(meta.get("expiresAt") or "")
+    if state.get("paidForExpiry") and state.get("paidForExpiry") == target_expiry_str:
+        return {"attempted": False, "reason": "already_renewed_for_cycle"}
     if state.get("targetExpiry") != target_expiry_str:
         state = {
             "targetExpiry": target_expiry_str,
@@ -1665,6 +1667,7 @@ def maybe_nwc_auto_renew(
     state["lastAttemptAt"] = now.isoformat()
     state["lastPaidAt"] = now.isoformat()
     state["lastPaymentHash"] = payment_hash
+    state["paidForExpiry"] = target_expiry_str
     state["lastError"] = None
     state["nextRetryAt"] = None
     state["budgetWarning"] = False
@@ -1861,6 +1864,20 @@ def evaluate_subscription_notices(
                     "message": "Subscription has expired. Renew to restore VPN port forwarding.",
                 }
             )
+        elif sec_rem <= 86400:
+            phase = "renew_now"
+            most_severe_due = "24h"
+            banners.append(
+                {
+                    "id": "expiry_24h",
+                    "kind": "expiry",
+                    "severity": "red",
+                    "phase": "renew_now",
+                    "title": "Subscription Expiring Within 24 Hours",
+                    "action_type": "renew",
+                    "message": "Less than 24 hours remaining on your subscription. Renew immediately to avoid interruption.",
+                }
+            )
         elif sec_rem <= 3 * 86400:
             phase = "renew_now"
             most_severe_due = "3d"
@@ -1999,7 +2016,7 @@ def evaluate_subscription_notices(
 
             if most_severe_due and not suppressed_by_nwc:
                 # Catch-up rule: mark earlier thresholds as superseded so only the most severe fires
-                order = ("7d", "3d", "lapsed")
+                order = ("7d", "3d", "24h", "lapsed")
                 idx = order.index(most_severe_due)
                 for earlier in order[: idx + 1]:
                     if earlier not in sent_list:
