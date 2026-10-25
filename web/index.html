@@ -153,17 +153,17 @@
                             </div>
 
                             <div class="flex flex-col sm:flex-row items-center gap-5 my-2">
-                                <div id="subscription-ring-wrap" class="w-[154px] h-[154px] relative flex items-center justify-center shrink-0">
+                                <div id="subscription-ring-wrap" class="w-40 h-40 relative flex items-center justify-center shrink-0">
                                     <svg viewBox="0 0 120 120" class="w-full h-full -rotate-90" aria-hidden="true">
-                                        <circle cx="60" cy="60" r="50" stroke-width="8" fill="none"
+                                        <circle cx="60" cy="60" r="50" stroke-width="6" fill="none"
                                             class="text-gray-800" stroke="currentColor"></circle>
-                                        <circle id="subscription-ring-progress" cx="60" cy="60" r="50" stroke-width="8" fill="none"
+                                        <circle id="subscription-ring-progress" cx="60" cy="60" r="50" stroke-width="6" fill="none"
                                             stroke-linecap="round" stroke-dasharray="314.16" stroke-dashoffset="314.16"
                                             class="text-tsgreen transition-all duration-500" stroke="currentColor"></circle>
                                     </svg>
-                                    <div class="absolute inset-0 flex flex-col items-center justify-center text-center px-3">
-                                        <span id="subscription-countdown" class="text-xl font-mono font-bold text-white tracking-tight">--</span>
-                                        <span id="subscription-expiry-sub" class="text-[11px] font-mono text-gray-400 mt-1">Not setup</span>
+                                    <div class="absolute inset-6 flex flex-col items-center justify-center text-center pointer-events-none">
+                                        <span id="subscription-countdown" class="text-base font-mono font-bold text-white tracking-tight leading-tight whitespace-nowrap">--</span>
+                                        <span id="subscription-expiry-sub" class="text-[10px] font-mono text-gray-400 mt-1 leading-tight whitespace-nowrap">Not setup</span>
                                     </div>
                                 </div>
                                 <progress id="subscription-progress-sr" class="sr-only" max="100" value="0">0%</progress>

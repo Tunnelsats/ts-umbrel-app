@@ -1224,4 +1224,42 @@ def test_umbrel_user_agent_header_sent_on_all_outbound_public_api_requests(clien
         assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
 
 
+@patch("app.proxy_request")
+def test_get_servers_enriches_all_public_api_offered_servers_with_distinct_geodata(mock_proxy, client):
+    upstream_servers = [
+        {"id": "us-east", "country": "USA", "city": "Ashburn", "flag": "🇺🇸", "status": "online"},
+        {"id": "us-west", "country": "USA", "city": "Hillsboro", "flag": "🇺🇸", "status": "online"},
+        {"id": "eu-de", "country": "Germany", "city": "Nuremberg", "flag": "🇩🇪", "status": "online"},
+        {"id": "eu-ch", "country": "Switzerland", "city": "Geneva", "flag": "🇨🇭", "status": "online"},
+        {"id": "asia-sg", "country": "Singapore", "city": "Singapore", "flag": "🇸🇬", "status": "online"},
+        {"id": "sa-br", "country": "Brazil", "city": "Sao Paulo", "flag": "🇧🇷", "status": "online"},
+        {"id": "oc-au", "country": "Australia", "city": "Sydney", "flag": "🇦🇺", "status": "online"},
+    ]
+    mock_proxy.return_value = (
+        json.dumps({"servers": upstream_servers}).encode("utf-8"),
+        200,
+        [("Content-Type", "application/json")],
+    )
+
+    res = client.get("/api/servers")
+    assert res.status_code == 200
+    servers = {s["id"]: s for s in res.get_json()["servers"]}
+
+    assert servers["us-east"]["label"] == "ASHBURN, US"
+    assert servers["us-east"]["lat"] == 39.0438
+    assert servers["us-west"]["label"] == "HILLSBORO, US"
+    assert servers["us-west"]["lat"] == 45.5231
+    assert servers["eu-de"]["label"] == "NUREMBERG, DE"
+    assert servers["eu-de"]["lat"] == 49.4521
+    assert servers["eu-ch"]["label"] == "GENEVA, CH"
+    assert servers["eu-ch"]["lat"] == 46.2044
+    assert servers["asia-sg"]["label"] == "SINGAPORE, SG"
+    assert servers["asia-sg"]["lat"] == 1.3521
+    assert servers["sa-br"]["label"] == "SAO PAULO, BR"
+    assert servers["sa-br"]["lat"] == -23.5505
+    assert servers["oc-au"]["label"] == "SYDNEY, AU"
+    assert servers["oc-au"]["lat"] == -33.8688
+
+
+
 

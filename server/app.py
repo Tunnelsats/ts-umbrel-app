@@ -378,23 +378,70 @@ ALLOWED_NETWORKS = (
 
 
 NUREMBERG_DE = {'lat': 49.4521, 'lng': 11.0767, 'label': 'NUREMBERG, DE', 'flag': '🇩🇪'}
+FRANKFURT_DE = {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'}
 NEW_YORK_US = {'lat': 40.7128, 'lng': -74.0060, 'label': 'NEW YORK, US', 'flag': '🇺🇸'}
+HILLSBORO_US = {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'}
+ASHBURN_US = {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'}
+SYDNEY_AU = {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'}
+SAO_PAULO_BR = {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'}
+GENEVA_CH = {'lat': 46.2044, 'lng': 6.1432, 'label': 'GENEVA, CH', 'flag': '🇨🇭'}
+HELSINKI_FI = {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'}
+SINGAPORE_SG = {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'}
+JOHANNESBURG_ZA = {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'}
+MONTREAL_CA = {'lat': 45.5017, 'lng': -73.5673, 'label': 'MONTREAL, CA', 'flag': '🇨🇦'}
+TOKYO_JP = {'lat': 35.6762, 'lng': 139.6503, 'label': 'TOKYO, JP', 'flag': '🇯🇵'}
+AMSTERDAM_NL = {'lat': 52.3676, 'lng': 4.9041, 'label': 'AMSTERDAM, NL', 'flag': '🇳🇱'}
+LONDON_UK = {'lat': 51.5074, 'lng': -0.1278, 'label': 'LONDON, UK', 'flag': '🇬🇧'}
+PARIS_FR = {'lat': 48.8566, 'lng': 2.3522, 'label': 'PARIS, FR', 'flag': '🇫🇷'}
 
 TUNNELSATS_SERVER_METADATA = {
-    'au1': {'lat': -33.8688, 'lng': 151.2093, 'label': 'SYDNEY, AU', 'flag': '🇦🇺'},
-    'br1': {'lat': -23.5505, 'lng': -46.6333, 'label': 'SAO PAULO, BR', 'flag': '🇧🇷'},
-    'de1': {'lat': 50.1109, 'lng': 8.6821, 'label': 'FRANKFURT, DE', 'flag': '🇩🇪'},
+    'au1': SYDNEY_AU,
+    'oc-au': SYDNEY_AU,
+    'br1': SAO_PAULO_BR,
+    'sa-br': SAO_PAULO_BR,
+    'ch1': GENEVA_CH,
+    'eu-ch': GENEVA_CH,
+    'de1': FRANKFURT_DE,
     'de2': NUREMBERG_DE,
     'de3': NUREMBERG_DE,
-    'fi1': {'lat': 60.1695, 'lng': 24.9354, 'label': 'HELSINKI, FI', 'flag': '🇫🇮'},
-    'sg1': {'lat': 1.3521, 'lng': 103.8198, 'label': 'SINGAPORE, SG', 'flag': '🇸🇬'},
+    'eu-de': NUREMBERG_DE,
+    'fi1': HELSINKI_FI,
+    'eu-fi': HELSINKI_FI,
+    'sg1': SINGAPORE_SG,
+    'asia-sg': SINGAPORE_SG,
     'us1': NEW_YORK_US,
-    'us2': {'lat': 45.5231, 'lng': -122.9898, 'label': 'HILLSBORO, US', 'flag': '🇺🇸'},
-    'us3': {'lat': 39.0438, 'lng': -77.4875, 'label': 'ASHBURN, US', 'flag': '🇺🇸'},
-    'za1': {'lat': -26.2041, 'lng': 28.0473, 'label': 'JOHANNESBURG, ZA', 'flag': '🇿🇦'},
+    'us2': HILLSBORO_US,
+    'us-west': HILLSBORO_US,
+    'us3': ASHBURN_US,
+    'us-east': ASHBURN_US,
+    'za1': JOHANNESBURG_ZA,
+    'af-za': JOHANNESBURG_ZA,
+    'ca1': MONTREAL_CA,
+    'na-ca': MONTREAL_CA,
+    'jp1': TOKYO_JP,
+    'asia-jp': TOKYO_JP,
+    'nl1': AMSTERDAM_NL,
+    'eu-nl': AMSTERDAM_NL,
+    'uk1': LONDON_UK,
+    'gb1': LONDON_UK,
+    'eu-uk': LONDON_UK,
+    'fr1': PARIS_FR,
+    'eu-fr': PARIS_FR,
     # Regional Defaults
+    'au': SYDNEY_AU,
+    'br': SAO_PAULO_BR,
+    'ch': GENEVA_CH,
     'de': NUREMBERG_DE,
+    'fi': HELSINKI_FI,
+    'sg': SINGAPORE_SG,
     'us': NEW_YORK_US,
+    'za': JOHANNESBURG_ZA,
+    'ca': MONTREAL_CA,
+    'jp': TOKYO_JP,
+    'nl': AMSTERDAM_NL,
+    'uk': LONDON_UK,
+    'gb': LONDON_UK,
+    'fr': PARIS_FR,
 }
 
 

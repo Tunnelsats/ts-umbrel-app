@@ -835,4 +835,100 @@ describe('TunnelSats v3.5.0 Frontend UI Suite', () => {
         expect(document.getElementById('invoice-controls-buy').classList.contains('hidden')).toBe(true);
         expect(document.getElementById('invoice-success-msg-buy').classList.contains('hidden')).toBe(false);
     });
+
+    test('26. Issue #188 QA fixes: every server location updates globe pointOfView, status polling preserves selected Buy server, Home/End keys navigate radiogroups, and Subscription Timeline circle text stays compact', async () => {
+        const offeredServers = [
+            { id: 'eu-de', country: 'Germany', city: 'Nuremberg', flag: '🇩🇪', status: 'online' },
+            { id: 'eu-ch', country: 'Switzerland', city: 'Geneva', flag: '🇨🇭', status: 'online' },
+            { id: 'us-east', country: 'USA', city: 'Ashburn', flag: '🇺🇸', status: 'online' },
+            { id: 'us-west', country: 'USA', city: 'Hillsboro', flag: '🇺🇸', status: 'online' },
+            { id: 'sa-br', country: 'Brazil', city: 'Sao Paulo', flag: '🇧🇷', status: 'online' },
+            { id: 'asia-sg', country: 'Singapore', city: 'Singapore', flag: '🇸🇬', status: 'online' },
+            { id: 'oc-au', country: 'Australia', city: 'Sydney', flag: '🇦🇺', status: 'online' }
+        ];
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ servers: offeredServers })
+        });
+
+        await window.fetchServers();
+
+        const serverButtons = Array.from(document.querySelectorAll('#buy-server-list button[role="radio"]'));
+        expect(serverButtons.length).toBe(7);
+
+        const expectedCoords = {
+            'eu-de': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE' },
+            'eu-ch': { lat: 46.2044, lng: 6.1432, label: 'GENEVA, CH' },
+            'us-east': { lat: 39.0438, lng: -77.4874, label: 'ASHBURN, US' },
+            'us-west': { lat: 45.5229, lng: -122.9898, label: 'HILLSBORO, US' },
+            'sa-br': { lat: -23.5505, lng: -46.6333, label: 'SAO PAULO, BR' },
+            'asia-sg': { lat: 1.3521, lng: 103.8198, label: 'SINGAPORE, SG' },
+            'oc-au': { lat: -33.8688, lng: 151.2093, label: 'SYDNEY, AU' }
+        };
+
+        for (const btn of serverButtons) {
+            mockGlobeInstance.pointOfView.mockClear();
+            btn.click();
+            const srvId = btn.dataset.serverId;
+            expect(document.getElementById('buy-server-select').value).toBe(srvId);
+            expect(mockGlobeInstance.pointOfView).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    lat: expectedCoords[srvId].lat,
+                    lng: expectedCoords[srvId].lng,
+                    altitude: 2.2
+                }),
+                2000
+            );
+            expect(document.getElementById('globe-selected-caption').textContent).toBe(expectedCoords[srvId].label);
+        }
+
+        // Background fetchStatus must NOT overwrite the user's selected Buy server on the globe
+        mockGlobeInstance.pointOfView.mockClear();
+        global.fetch.mockImplementation((url) => {
+            if (url === '/api/local/status') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({
+                        vpn_active: true,
+                        server_domain: 'de3.tunnelsats.com',
+                        lat: 49.4521,
+                        lng: 11.0767,
+                        label: 'NUREMBERG, DE',
+                        rules_synced: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        });
+        await window.fetchStatus();
+        expect(mockGlobeInstance.pointOfView).not.toHaveBeenCalled();
+        expect(document.getElementById('globe-selected-caption').textContent).toBe('SYDNEY, AU');
+
+        // Home and End keyboard navigation on radiogroup
+        const durationList = document.getElementById('buy-duration-list');
+        const durationPills = durationList.querySelectorAll('button[role="radio"]');
+        durationPills[0].focus();
+        durationList.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+        expect(document.getElementById('buy-duration-select').value).toBe('12');
+        durationList.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+        expect(document.getElementById('buy-duration-select').value).toBe('1');
+
+        // Subscription Timeline inner nested text stays compact (YYYY-MM-DD only) inside inset-6
+        const ringWrap = document.getElementById('subscription-ring-wrap');
+        expect(ringWrap.className).toContain('w-40');
+        expect(ringWrap.className).toContain('h-40');
+        const subEl = document.getElementById('subscription-expiry-sub');
+        const countdownEl = document.getElementById('subscription-countdown');
+        expect(countdownEl.className).toContain('text-base');
+        expect(countdownEl.className).toContain('whitespace-nowrap');
+        expect(subEl.className).toContain('text-[10px]');
+        expect(subEl.className).toContain('whitespace-nowrap');
+
+        window.renderSubscriptionTimeline({ expires_at: '2027-05-10T12:00:00Z', subscription_telemetry: { plan_days: 365 } });
+        expect(subEl.textContent).toBe('2027-05-10');
+        expect(document.getElementById('subscription-timeline-desc').textContent).toContain('2027-05-10');
+    });
 });

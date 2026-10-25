@@ -51,6 +51,110 @@ const REGION_PREFIX_MAP = {
 let currentSatsPerDollar = null;
 const POLL_INTERVAL_MS = 3000;
 let tsServers = [];
+var selectedBuyServerCoords = null;
+var lastGlobeCoords = null;
+
+const CLIENT_SERVER_GEODATA = {
+    'us-east': { lat: 39.0438, lng: -77.4874, label: 'ASHBURN, US', city: 'Ashburn', country: 'USA' },
+    'us-west': { lat: 45.5229, lng: -122.9898, label: 'HILLSBORO, US', city: 'Hillsboro', country: 'USA' },
+    'eu-de': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'eu-ch': { lat: 46.2044, lng: 6.1432, label: 'GENEVA, CH', city: 'Geneva', country: 'Switzerland' },
+    'asia-sg': { lat: 1.3521, lng: 103.8198, label: 'SINGAPORE, SG', city: 'Singapore', country: 'Singapore' },
+    'sa-br': { lat: -23.5505, lng: -46.6333, label: 'SAO PAULO, BR', city: 'Sao Paulo', country: 'Brazil' },
+    'oc-au': { lat: -33.8688, lng: 151.2093, label: 'SYDNEY, AU', city: 'Sydney', country: 'Australia' },
+    'eu-fi': { lat: 60.1699, lng: 24.9384, label: 'HELSINKI, FI', city: 'Helsinki', country: 'Finland' },
+    'af-za': { lat: -26.2041, lng: 28.0473, label: 'JOHANNESBURG, ZA', city: 'Johannesburg', country: 'South Africa' },
+    'na-ca': { lat: 45.5017, lng: -73.5673, label: 'MONTREAL, CA', city: 'Montreal', country: 'Canada' },
+    'asia-jp': { lat: 35.6762, lng: 139.6503, label: 'TOKYO, JP', city: 'Tokyo', country: 'Japan' },
+    'eu-nl': { lat: 52.3676, lng: 4.9041, label: 'AMSTERDAM, NL', city: 'Amsterdam', country: 'Netherlands' },
+    'eu-uk': { lat: 51.5074, lng: -0.1278, label: 'LONDON, UK', city: 'London', country: 'UK' },
+    'eu-fr': { lat: 48.8566, lng: 2.3522, label: 'PARIS, FR', city: 'Paris', country: 'France' },
+    'au1': { lat: -33.8688, lng: 151.2093, label: 'SYDNEY, AU', city: 'Sydney', country: 'Australia' },
+    'au': { lat: -33.8688, lng: 151.2093, label: 'SYDNEY, AU', city: 'Sydney', country: 'Australia' },
+    'br1': { lat: -23.5505, lng: -46.6333, label: 'SAO PAULO, BR', city: 'Sao Paulo', country: 'Brazil' },
+    'br': { lat: -23.5505, lng: -46.6333, label: 'SAO PAULO, BR', city: 'Sao Paulo', country: 'Brazil' },
+    'ch1': { lat: 46.2044, lng: 6.1432, label: 'GENEVA, CH', city: 'Geneva', country: 'Switzerland' },
+    'ch': { lat: 46.2044, lng: 6.1432, label: 'GENEVA, CH', city: 'Geneva', country: 'Switzerland' },
+    'de1': { lat: 50.1109, lng: 8.6821, label: 'FRANKFURT, DE', city: 'Frankfurt', country: 'Germany' },
+    'de2': { lat: 50.1109, lng: 8.6821, label: 'FRANKFURT, DE', city: 'Frankfurt', country: 'Germany' },
+    'de3': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'de4': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'de5': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'de6': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'de7': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'de': { lat: 49.4521, lng: 11.0767, label: 'NUREMBERG, DE', city: 'Nuremberg', country: 'Germany' },
+    'fi1': { lat: 60.1699, lng: 24.9384, label: 'HELSINKI, FI', city: 'Helsinki', country: 'Finland' },
+    'fi2': { lat: 60.1699, lng: 24.9384, label: 'HELSINKI, FI', city: 'Helsinki', country: 'Finland' },
+    'fi': { lat: 60.1699, lng: 24.9384, label: 'HELSINKI, FI', city: 'Helsinki', country: 'Finland' },
+    'sg1': { lat: 1.3521, lng: 103.8198, label: 'SINGAPORE, SG', city: 'Singapore', country: 'Singapore' },
+    'sg': { lat: 1.3521, lng: 103.8198, label: 'SINGAPORE, SG', city: 'Singapore', country: 'Singapore' },
+    'us1': { lat: 40.7128, lng: -74.0060, label: 'NEW YORK, US', city: 'New York', country: 'USA' },
+    'us2': { lat: 39.0438, lng: -77.4874, label: 'ASHBURN, US', city: 'Ashburn', country: 'USA' },
+    'us3': { lat: 39.0438, lng: -77.4874, label: 'ASHBURN, US', city: 'Ashburn', country: 'USA' },
+    'us4': { lat: 45.5229, lng: -122.9898, label: 'HILLSBORO, US', city: 'Hillsboro', country: 'USA' },
+    'us5': { lat: 45.5229, lng: -122.9898, label: 'HILLSBORO, US', city: 'Hillsboro', country: 'USA' },
+    'us': { lat: 40.7128, lng: -74.0060, label: 'NEW YORK, US', city: 'New York', country: 'USA' },
+    'za1': { lat: -26.2041, lng: 28.0473, label: 'JOHANNESBURG, ZA', city: 'Johannesburg', country: 'South Africa' },
+    'za': { lat: -26.2041, lng: 28.0473, label: 'JOHANNESBURG, ZA', city: 'Johannesburg', country: 'South Africa' },
+    'ca1': { lat: 45.5017, lng: -73.5673, label: 'MONTREAL, CA', city: 'Montreal', country: 'Canada' },
+    'ca': { lat: 45.5017, lng: -73.5673, label: 'MONTREAL, CA', city: 'Montreal', country: 'Canada' },
+    'jp1': { lat: 35.6762, lng: 139.6503, label: 'TOKYO, JP', city: 'Tokyo', country: 'Japan' },
+    'jp': { lat: 35.6762, lng: 139.6503, label: 'TOKYO, JP', city: 'Tokyo', country: 'Japan' },
+    'nl1': { lat: 52.3676, lng: 4.9041, label: 'AMSTERDAM, NL', city: 'Amsterdam', country: 'Netherlands' },
+    'nl': { lat: 52.3676, lng: 4.9041, label: 'AMSTERDAM, NL', city: 'Amsterdam', country: 'Netherlands' },
+    'uk1': { lat: 51.5074, lng: -0.1278, label: 'LONDON, UK', city: 'London', country: 'UK' },
+    'uk': { lat: 51.5074, lng: -0.1278, label: 'LONDON, UK', city: 'London', country: 'UK' },
+    'gb1': { lat: 51.5074, lng: -0.1278, label: 'LONDON, UK', city: 'London', country: 'UK' },
+    'gb': { lat: 51.5074, lng: -0.1278, label: 'LONDON, UK', city: 'London', country: 'UK' },
+    'fr1': { lat: 48.8566, lng: 2.3522, label: 'PARIS, FR', city: 'Paris', country: 'France' },
+    'fr': { lat: 48.8566, lng: 2.3522, label: 'PARIS, FR', city: 'Paris', country: 'France' }
+};
+
+const CLIENT_CITY_GEODATA = {
+    'ashburn': CLIENT_SERVER_GEODATA['us-east'],
+    'hillsboro': CLIENT_SERVER_GEODATA['us-west'],
+    'new york': CLIENT_SERVER_GEODATA['us1'],
+    'nuremberg': CLIENT_SERVER_GEODATA['eu-de'],
+    'frankfurt': CLIENT_SERVER_GEODATA['de1'],
+    'geneva': CLIENT_SERVER_GEODATA['eu-ch'],
+    'zurich': { lat: 47.3769, lng: 8.5417, label: 'ZURICH, CH', city: 'Zurich', country: 'Switzerland' },
+    'singapore': CLIENT_SERVER_GEODATA['asia-sg'],
+    'sao paulo': CLIENT_SERVER_GEODATA['sa-br'],
+    'são paulo': CLIENT_SERVER_GEODATA['sa-br'],
+    'sydney': CLIENT_SERVER_GEODATA['oc-au'],
+    'helsinki': CLIENT_SERVER_GEODATA['eu-fi'],
+    'johannesburg': CLIENT_SERVER_GEODATA['af-za'],
+    'montreal': CLIENT_SERVER_GEODATA['na-ca'],
+    'tokyo': CLIENT_SERVER_GEODATA['asia-jp'],
+    'amsterdam': CLIENT_SERVER_GEODATA['eu-nl'],
+    'london': CLIENT_SERVER_GEODATA['eu-uk'],
+    'paris': CLIENT_SERVER_GEODATA['eu-fr']
+};
+
+function resolveServerCoords(coords) {
+    if (!coords || typeof coords !== 'object') return null;
+    if (coords.lat != null && coords.lng != null) return coords;
+
+    const rawId = String(coords.id || coords.server_domain || '').trim().toLowerCase().split('.')[0];
+    const cityKey = String(coords.city || '').trim().toLowerCase();
+    const cleanPrefix = rawId.replace(/[0-9]+.*$/, '');
+    const dashSuffix = rawId.includes('-') ? rawId.split('-').pop() : '';
+
+    const fallback = CLIENT_SERVER_GEODATA[rawId]
+        || CLIENT_CITY_GEODATA[cityKey]
+        || CLIENT_SERVER_GEODATA[cleanPrefix]
+        || (dashSuffix ? CLIENT_SERVER_GEODATA[dashSuffix] : null);
+
+    if (!fallback) return coords;
+    return {
+        ...fallback,
+        ...coords,
+        lat: fallback.lat,
+        lng: fallback.lng,
+        label: coords.label || fallback.label
+    };
+}
+window.resolveServerCoords = resolveServerCoords;
 const MANAGEMENT_CSRF_HEADER = 'X-TunnelSats-CSRF-Token';
 const MANAGEMENT_CSRF_REFRESH_HEADER = 'X-TunnelSats-CSRF-Refresh';
 class ManagementSession {
@@ -368,6 +472,9 @@ function initGlobe() {
 
         myGlobe = globe;
         resizeGlobe();
+        if (lastGlobeCoords) {
+            updateGlobeMarker(lastGlobeCoords);
+        }
         globeInitAttempts = 0;
         if (globeInitRetryTimer) {
             clearTimeout(globeInitRetryTimer);
@@ -407,7 +514,8 @@ function initGlobe() {
 }
 
 function updateGlobeMarker(forcedCoords = null) {
-    const coords = forcedCoords;
+    const coords = resolveServerCoords(forcedCoords);
+    lastGlobeCoords = coords;
     const captionEl = document.getElementById('globe-selected-caption');
     if (captionEl) {
         if (coords && (coords.label || coords.city || coords.country)) {
@@ -633,14 +741,21 @@ function attachRadiogroupKeyboardNav(container) {
     if (!container || container.dataset.kbNavAttached === '1') return;
     container.dataset.kbNavAttached = '1';
     container.addEventListener('keydown', (e) => {
-        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) return;
+        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
         const buttons = Array.from(container.querySelectorAll('button[role="radio"]:not(:disabled)'));
         if (buttons.length === 0) return;
         const currentIndex = buttons.indexOf(document.activeElement);
         if (currentIndex === -1) return;
         e.preventDefault();
-        const delta = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
-        const nextIndex = (currentIndex + delta + buttons.length) % buttons.length;
+        let nextIndex;
+        if (e.key === 'Home') {
+            nextIndex = 0;
+        } else if (e.key === 'End') {
+            nextIndex = buttons.length - 1;
+        } else {
+            const delta = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
+            nextIndex = (currentIndex + delta + buttons.length) % buttons.length;
+        }
         const nextBtn = buttons[nextIndex];
         if (nextBtn) {
             nextBtn.focus();
@@ -952,6 +1067,9 @@ function switchTab(tabId) {
     if (tabId === 'buy') {
         if (!myGlobe) initGlobe();
         resizeGlobe();
+        if (selectedBuyServerCoords) {
+            updateGlobeMarker(selectedBuyServerCoords);
+        }
         if (typeof requestAnimationFrame === 'function') {
             requestAnimationFrame(resizeGlobe);
         }
@@ -1734,15 +1852,18 @@ async function fetchStatus() {
             boxExpirationEl.replaceChildren(document.createTextNode(expText));
         }
 
-        // Update Globe Marker for currently active VPN server
-        if (data.server_domain) {
-            updateGlobeMarker({
-                lat: data.lat,
-                lng: data.lng,
-                label: data.label
-            });
-        } else {
-            updateGlobeMarker(null);
+        // Update Globe Marker for currently active VPN server only when no Buy server is selected
+        if (!selectedBuyServerCoords) {
+            if (data.server_domain) {
+                updateGlobeMarker({
+                    id: data.server_domain,
+                    lat: data.lat,
+                    lng: data.lng,
+                    label: data.label
+                });
+            } else {
+                updateGlobeMarker(null);
+            }
         }
 
         // Update Renew IP Suffix
@@ -2023,6 +2144,7 @@ async function fetchServers() {
                             ? 'server-pill w-full text-left px-3.5 py-2.5 rounded-xl border border-tsgreen bg-tsgreen/10 text-white transition-all flex items-center justify-between gap-2 cursor-pointer shadow-sm'
                             : 'server-pill w-full text-left px-3.5 py-2.5 rounded-xl border border-gray-700 bg-gray-900/80 text-white hover:border-tsgreen/60 transition-all flex items-center justify-between gap-2 cursor-pointer';
                         btn.addEventListener('click', () => {
+                            selectedBuyServerCoords = s;
                             selectOption('buy-server', s.id, label);
                             updateGlobeMarker(s);
                             const btnCreateBuy = document.getElementById('btn-create-buy');
@@ -2056,6 +2178,7 @@ async function fetchServers() {
         }
 
         if (firstOnline) {
+            selectedBuyServerCoords = firstOnline;
             const firstLabel = `${firstOnline.flag || ''} ${firstOnline.country || ''} - ${firstOnline.city || ''}`.trim();
             selectOption('buy-server', firstOnline.id, firstLabel);
             updateGlobeMarker(firstOnline);
@@ -2064,6 +2187,7 @@ async function fetchServers() {
                 btnCreateBuy.disabled = false;
             }
         } else if (hasServerListPayload) {
+            selectedBuyServerCoords = null;
             const buyServerSelect = document.getElementById('buy-server-select');
             if (buyServerSelect) buyServerSelect.value = '';
             const buyServerLabel = document.getElementById('buy-server-label');
@@ -3932,6 +4056,14 @@ function selectOption(dropdownId, value, label) {
         labelEl.classList.replace('text-gray-400', 'text-white');
     }
 
+    if (dropdownId === 'buy-server' && Array.isArray(tsServers)) {
+        const matchedServer = tsServers.find((srv) => String(srv.id) === String(value));
+        if (matchedServer && selectedBuyServerCoords !== matchedServer) {
+            selectedBuyServerCoords = matchedServer;
+            updateGlobeMarker(matchedServer);
+        }
+    }
+
     const listEl = document.getElementById(`${dropdownId}-list`);
     if (listEl && listEl.getAttribute('role') === 'radiogroup') {
         listEl.querySelectorAll('button[role="radio"]').forEach((btn) => {
@@ -4052,7 +4184,7 @@ function renderSubscriptionTimeline(data) {
             countdownEl.textContent = formatSubscriptionCountdown(remainingMs);
         }
         if (subEl) {
-            subEl.textContent = remainingMs <= 0 ? `Expired ${dateStr}` : `Expires ${dateStr}`;
+            subEl.textContent = dateStr;
         }
         if (srEl) {
             srEl.value = Math.round(pct);

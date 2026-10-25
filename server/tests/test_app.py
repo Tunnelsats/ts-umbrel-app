@@ -1318,8 +1318,8 @@ class TestServersProxy:
         assert de['flag'] == '🇩🇪'
 
         us = next(s for s in data['servers'] if s['id'] == 'us-east')
-        assert us['lat'] == 40.7128  # NY default for 'us'
-        assert us['label'] == 'NEW YORK, US'
+        assert us['lat'] == 39.0438  # Ashburn for 'us-east'
+        assert us['label'] == 'ASHBURN, US'
         assert us['flag'] == '🇺🇸'
 
 class TestServerEnrichment:
