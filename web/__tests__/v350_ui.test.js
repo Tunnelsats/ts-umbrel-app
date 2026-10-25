@@ -745,4 +745,68 @@ describe('TunnelSats v3.5.0 Frontend UI Suite', () => {
         expect(svg.getAttribute('data-qr-mode')).toBe('matrix');
         expect(svg.getAttribute('width')).toBe('192');
     });
+
+    test('25. Paid renewal during startup recovery preserves invoice controls for subsequent renewals in the same session', async () => {
+        const futureIso = new Date(Date.now() + 600000).toISOString();
+        global.fetch.mockImplementation((url) => {
+            if (url === '/api/local/session') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ authenticated: true, csrf_token: 'csrf-v350' })
+                });
+            }
+            if (url === '/api/subscription/renew_paid_startup') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ status: 'paid' })
+                });
+            }
+            if (url === '/api/subscription/renew') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({
+                        paymentHash: 'renew_hash_second',
+                        invoice: 'lnbc_second_renew_invoice',
+                        expiresAt: futureIso
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        });
+
+        window.activePaymentHash = null;
+        await window.restorePendingPaymentFlow({
+            pending_renewal: {
+                paymentHash: 'renew_paid_startup',
+                invoice: 'lnbc_first_renew_invoice',
+                expiresAt: futureIso
+            }
+        });
+
+        const renewBox = document.getElementById('invoice-box-renew');
+        expect(renewBox.textContent).toContain('Renewal Successful!');
+        expect(window.activePaymentHash).toBeNull();
+        expect(document.getElementById('btn-create-renew').disabled).toBe(false);
+        expect(document.getElementById('invoice-bolt11-renew')).not.toBeNull();
+
+        // User opens Renew tab and generates a second renewal invoice without reloading
+        document.getElementById('renew-pubkey').value = 'wg_pub_key_valid_123=';
+        document.getElementById('renew-server').value = 'de1';
+        await window.createSub('renew');
+
+        expect(window.activePaymentHash).toBe('renew_hash_second');
+        expect(document.getElementById('invoice-bolt11-renew').value).toBe('lnbc_second_renew_invoice');
+        expect(document.getElementById('invoice-controls-renew').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('invoice-success-msg-renew').classList.contains('hidden')).toBe(true);
+
+        // Also verify ensureInvoiceBoxControls rebuilds controls if invoiceBox children were ever stripped
+        if (window.pollInterval) clearInterval(window.pollInterval);
+        window.activePaymentHash = null;
+        renewBox.replaceChildren();
+        await window.createSub('renew');
+        expect(document.getElementById('invoice-bolt11-renew').value).toBe('lnbc_second_renew_invoice');
+    });
 });

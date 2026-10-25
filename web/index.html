@@ -479,7 +479,7 @@
                     <!-- Payment Box -->
                     <div id="invoice-box-buy"
                         class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
-                        <div class="flex flex-col items-center">
+                        <div id="invoice-controls-buy" class="flex flex-col items-center">
                             <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
                             <a id="pay-link-buy" href="#"
                                 class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
@@ -514,6 +514,7 @@
                             <p id="invoice-expiry-buy" class="text-xs font-mono text-gray-400 mb-1"></p>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for payment confirmation...</p>
                         </div>
+                        <div id="invoice-success-msg-buy" class="hidden"></div>
                     </div>
                 </div>
 
@@ -673,7 +674,7 @@
                     <!-- Payment Box -->
                     <div id="invoice-box-renew"
                         class="hidden mt-8 p-6 bg-gray-800 rounded-lg border border-gray-700 shadow-inner">
-                        <div class="flex flex-col items-center">
+                        <div id="invoice-controls-renew" class="flex flex-col items-center">
                             <h3 class="text-lg font-bold text-white mb-4">Pay with Lightning</h3>
                             <a id="pay-link-renew" href="#"
                                 class="block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition">
@@ -708,6 +709,7 @@
                             <p id="invoice-expiry-renew" class="text-xs font-mono text-gray-400 mb-1"></p>
                             <p class="text-sm text-tsgreen animate-pulse">Waiting for renewal confirmation...</p>
                         </div>
+                        <div id="invoice-success-msg-renew" class="hidden"></div>
                     </div>
                 </div>
             </section>

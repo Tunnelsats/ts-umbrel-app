@@ -929,6 +929,7 @@ function switchTab(tabId) {
 
         if (activePaymentHash && !activeInvoiceExpired && tabId === mode && purchaseMode === mode) {
             // Restore active invoice UI and resume polling
+            ensureInvoiceBoxControls(mode);
             if (box) box.classList.remove('hidden');
             if (btnCreate) {
                 btnCreate.textContent = "Invoice Active...";
@@ -2207,6 +2208,117 @@ function renderQR(mode, text) {
 }
 
 // 3. Purchase Flow
+function ensureInvoiceBoxControls(mode) {
+    if (mode !== 'buy' && mode !== 'renew') return;
+    const invoiceBox = document.getElementById(`invoice-box-${mode}`);
+    if (!invoiceBox) return;
+
+    let controlsEl = document.getElementById(`invoice-controls-${mode}`);
+    let successEl = document.getElementById(`invoice-success-msg-${mode}`);
+    const bolt11El = document.getElementById(`invoice-bolt11-${mode}`);
+
+    if (!bolt11El || !controlsEl) {
+        if (mode === 'buy') qrBuy = null;
+        if (mode === 'renew') qrRenew = null;
+
+        controlsEl = document.createElement('div');
+        controlsEl.id = `invoice-controls-${mode}`;
+        controlsEl.className = 'flex flex-col items-center';
+
+        const h3 = document.createElement('h3');
+        h3.className = 'text-lg font-bold text-white mb-4';
+        h3.textContent = 'Pay with Lightning';
+
+        const payLink = document.createElement('a');
+        payLink.id = `pay-link-${mode}`;
+        payLink.href = '#';
+        payLink.className = 'block bg-white p-2 rounded-lg mb-4 hover:opacity-80 transition';
+
+        const qrPlaceholder = document.createElement('div');
+        qrPlaceholder.id = `qr-placeholder-${mode}`;
+        qrPlaceholder.className = 'w-48 h-48 bg-gray-200 flex items-center justify-center text-gray-500 font-bold';
+        qrPlaceholder.textContent = 'QR Loading...';
+        payLink.appendChild(qrPlaceholder);
+
+        const inputRow = document.createElement('div');
+        inputRow.className = 'flex items-center gap-2 w-full mb-2';
+
+        const inputEl = document.createElement('input');
+        inputEl.id = `invoice-bolt11-${mode}`;
+        inputEl.type = 'text';
+        inputEl.readOnly = true;
+        inputEl.className = 'flex-1 min-w-0 bg-gray-900 border border-gray-700 text-gray-400 text-xs p-3 rounded text-center overflow-hidden text-ellipsis invoice-input';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.id = `btn-copy-invoice-${mode}`;
+        copyBtn.type = 'button';
+        copyBtn.title = 'Copy Invoice';
+        copyBtn.className = 'flex-shrink-0 p-2 bg-gray-700 hover:bg-tsgreen/20 border border-gray-600 rounded-lg transition-colors group';
+        copyBtn.addEventListener('click', () => copyInvoice(mode));
+
+        const svgNs = 'http://www.w3.org/2000/svg';
+        const copyIcon = document.createElementNS(svgNs, 'svg');
+        copyIcon.id = `copy-icon-${mode}`;
+        copyIcon.setAttribute('class', 'w-5 h-5 text-gray-400 group-hover:text-tsgreen transition-colors');
+        copyIcon.setAttribute('fill', 'none');
+        copyIcon.setAttribute('stroke', 'currentColor');
+        copyIcon.setAttribute('viewBox', '0 0 24 24');
+        const copyPath = document.createElementNS(svgNs, 'path');
+        copyPath.setAttribute('stroke-linecap', 'round');
+        copyPath.setAttribute('stroke-linejoin', 'round');
+        copyPath.setAttribute('stroke-width', '2');
+        copyPath.setAttribute('d', 'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z');
+        copyIcon.appendChild(copyPath);
+        copyBtn.appendChild(copyIcon);
+
+        inputRow.append(inputEl, copyBtn);
+
+        const walletRow = document.createElement('div');
+        walletRow.className = 'flex flex-wrap items-center justify-center gap-2 w-full my-2';
+
+        const nwcBtn = document.createElement('button');
+        nwcBtn.id = `btn-pay-nwc-${mode}`;
+        nwcBtn.type = 'button';
+        nwcBtn.className = 'hidden bg-tsgreen hover:bg-green-400 text-gray-900 font-bold text-xs px-3.5 py-2 rounded-lg transition';
+        nwcBtn.textContent = 'Pay with Connected NWC Wallet';
+        nwcBtn.addEventListener('click', () => payWithNwc(mode));
+
+        const weblnBtn = document.createElement('button');
+        weblnBtn.id = `btn-pay-webln-${mode}`;
+        weblnBtn.type = 'button';
+        weblnBtn.className = 'hidden bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3.5 py-2 rounded-lg transition';
+        weblnBtn.textContent = 'Pay with Browser Wallet (WebLN)';
+        weblnBtn.addEventListener('click', () => payWithWebln(mode));
+
+        walletRow.append(nwcBtn, weblnBtn);
+
+        const expiryP = document.createElement('p');
+        expiryP.id = `invoice-expiry-${mode}`;
+        expiryP.className = 'text-xs font-mono text-gray-400 mb-1';
+
+        const waitingP = document.createElement('p');
+        waitingP.className = 'text-sm text-tsgreen animate-pulse';
+        waitingP.textContent = mode === 'renew'
+            ? 'Waiting for renewal confirmation...'
+            : 'Waiting for payment confirmation...';
+
+        controlsEl.append(h3, payLink, inputRow, walletRow, expiryP, waitingP);
+
+        successEl = document.createElement('div');
+        successEl.id = `invoice-success-msg-${mode}`;
+        successEl.className = 'hidden';
+
+        invoiceBox.replaceChildren(controlsEl, successEl);
+    } else {
+        controlsEl.classList.remove('hidden');
+        if (successEl) {
+            successEl.classList.add('hidden');
+            successEl.replaceChildren();
+        }
+    }
+}
+window.ensureInvoiceBoxControls = ensureInvoiceBoxControls;
+
 async function createSub(mode) {
     const duration = parseInt(document.getElementById(`${mode}-duration-select`).value);
     let serverId = null;
@@ -2288,6 +2400,7 @@ async function createSub(mode) {
             activeInvoiceExpired = false;
             purchaseMode = mode;
             invoiceCreatedInThisCall = true;
+            ensureInvoiceBoxControls(mode);
             document.getElementById(`invoice-bolt11-${mode}`).value = data.invoice;
             document.getElementById(`pay-link-${mode}`).href = `lightning:${data.invoice}`;
 
@@ -2407,6 +2520,7 @@ function restorePendingPaymentFlow(data) {
         activePaymentHash = renewHash;
         activeInvoiceExpired = false;
 
+        ensureInvoiceBoxControls('renew');
         const input = document.getElementById('invoice-bolt11-renew');
         const link = document.getElementById('pay-link-renew');
         if (invoice) {
@@ -2447,6 +2561,7 @@ function restorePendingPaymentFlow(data) {
         activePaymentHash = orderHash;
         activeInvoiceExpired = false;
 
+        ensureInvoiceBoxControls('buy');
         const input = document.getElementById('invoice-bolt11-buy');
         const link = document.getElementById('pay-link-buy');
         if (invoice) {
@@ -2509,9 +2624,22 @@ async function pollPayment() {
             if (invoiceBox) {
                 invoiceBox.classList.remove('hidden');
             }
-            if (invoiceBox && purchaseMode !== 'reset') {
-                invoiceBox.replaceChildren(); // Clear content for buy/renew
-            }
+            const renderPaidConfirmation = (mode, ...nodes) => {
+                const controlsEl = document.getElementById(`invoice-controls-${mode}`);
+                if (controlsEl && invoiceBox) {
+                    controlsEl.classList.add('hidden');
+                    let successEl = document.getElementById(`invoice-success-msg-${mode}`);
+                    if (!successEl) {
+                        successEl = document.createElement('div');
+                        successEl.id = `invoice-success-msg-${mode}`;
+                        invoiceBox.appendChild(successEl);
+                    }
+                    successEl.replaceChildren(...nodes);
+                    successEl.classList.remove('hidden');
+                } else if (invoiceBox) {
+                    invoiceBox.replaceChildren(...nodes);
+                }
+            };
 
             if (purchaseMode === 'buy') {
                 // Celebration SVG (safely parsed to avoid innerHTML AST warnings)
@@ -2549,7 +2677,7 @@ async function pollPayment() {
                     switchTab('import');
                 });
 
-                if (invoiceBox) invoiceBox.append(celebrationSvg, h3, p, button);
+                renderPaidConfirmation('buy', celebrationSvg, h3, p, button);
             } else if (purchaseMode === 'reset') {
                 activePaymentHash = null;
                 const controlsEl = document.getElementById('bandwidth-reset-invoice-controls');
@@ -2580,6 +2708,11 @@ async function pollPayment() {
             } else {
                 // Renewals don't need claim/provisioning, so clear active hash after payment confirmation.
                 activePaymentHash = null;
+                const btnCreateRenew = document.getElementById('btn-create-renew');
+                if (btnCreateRenew) {
+                    btnCreateRenew.textContent = 'Generate Renewal Invoice';
+                    btnCreateRenew.disabled = false;
+                }
                 const h3 = document.createElement('h3');
                 h3.className = 'text-tsgreen font-bold text-center mb-2';
                 h3.textContent = 'Renewal Successful!';
@@ -2596,7 +2729,7 @@ async function pollPayment() {
                 button.textContent = 'Return to Dashboard';
                 button.addEventListener('click', () => switchTab('dashboard'));
 
-                if (invoiceBox) invoiceBox.append(h3, p, button);
+                renderPaidConfirmation('renew', h3, p, button);
             }
             return true;
         }
