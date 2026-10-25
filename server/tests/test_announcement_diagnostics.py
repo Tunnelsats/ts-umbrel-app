@@ -113,43 +113,32 @@ class TestEndpointParsing:
         assert app_module.split_announced_endpoint('[2001:db8::1]') == ('2001:db8::1', 9735, True)
         assert app_module.split_announced_endpoint('2001:db8::1') == ('2001:db8::1', 9735, True)
 
-    @pytest.mark.parametrize('value', [
-        '', '   ', 'host:port', '1.2.3.4:0', '1.2.3.4:70000', '1.2.3.4;rm -rf ~',
-        '$(id):9735', '[not-ipv6]:9735', '-bad.example.com:9735', 'a b:9735',
-        '[fe80::1%eth0]:9735', "[fe80::1%$(reboot)]:9735", 'fe80::1%eth0', '[2001:db8::1]:',
-        # str.isdigit() accepts these, int() does not (or they are not ASCII ports at all).
-        '203.0.113.5:\u00b2', '203.0.113.5:\u0669\u0667\u0663\u0665', '[2001:db8::1]:\u00b9', '203.0.113.5:0009735',
-    ])
-    def test_rejects_values_that_cannot_be_announced_safely(self, value):
-        assert app_module.split_announced_endpoint(value) is None
+    def test_rejects_values_that_cannot_be_announced_safely(self):
+        invalid_values = [
+            '', '   ', 'host:port', '1.2.3.4:0', '1.2.3.4:70000', '1.2.3.4;rm -rf ~',
+            '$(id):9735', '[not-ipv6]:9735', '-bad.example.com:9735', 'a b:9735',
+            '[fe80::1%eth0]:9735', "[fe80::1%$(reboot)]:9735", 'fe80::1%eth0', '[2001:db8::1]:',
+            # str.isdigit() accepts these, int() does not (or they are not ASCII ports at all).
+            '203.0.113.5:\u00b2', '203.0.113.5:\u0669\u0667\u0663\u0665', '[2001:db8::1]:\u00b9', '203.0.113.5:0009735',
+        ]
+        for value in invalid_values:
+            assert app_module.split_announced_endpoint(value) is None, value
 
 
 class TestAnnouncementClassification:
-    def test_non_tunnelsats_address_is_real_ip(self):
-        assert app_module.classify_announced_address(
-            '203.0.113.5:9735', SERVER, PORT, _server_matcher
-        ) == ('real-ip', '203.0.113.5:9735', False)
-
-    def test_tunnelsats_ip_without_port_is_wrong_port(self):
-        # The #170 customer case: the server IP announced on LND's default port.
-        assert app_module.classify_announced_address(
-            SERVER_IP, SERVER, PORT, _server_matcher
-        ) == ('wrong-port', f'{SERVER_IP}:9735', True)
-
-    def test_tunnelsats_hostname_on_another_port_is_wrong_port(self):
-        assert app_module.classify_announced_address(
-            f'{SERVER}:9735', SERVER, PORT, _server_matcher
-        ) == ('wrong-port', f'{SERVER}:9735', False)
-
-    def test_correct_server_and_port_flagged_by_policy_is_pinned_ip(self):
-        assert app_module.classify_announced_address(
-            f'{SERVER_IP}:{PORT}', SERVER, PORT, _server_matcher
-        ) == ('pinned-ip', f'{SERVER_IP}:{PORT}', False)
-
-    def test_other_tunnelsats_endpoint_is_stale_endpoint(self):
-        assert app_module.classify_announced_address(
-            'de2.tunnelsats.com:35825', SERVER, PORT, _server_matcher
-        ) == ('stale-endpoint', 'de2.tunnelsats.com:35825', False)
+    def test_classifications(self):
+        cases = [
+            ('203.0.113.5:9735', ('real-ip', '203.0.113.5:9735', False)),
+            # The #170 customer case: the server IP announced on LND's default port.
+            (SERVER_IP, ('wrong-port', f'{SERVER_IP}:9735', True)),
+            (f'{SERVER}:9735', ('wrong-port', f'{SERVER}:9735', False)),
+            (f'{SERVER_IP}:{PORT}', ('pinned-ip', f'{SERVER_IP}:{PORT}', False)),
+            ('de2.tunnelsats.com:35825', ('stale-endpoint', 'de2.tunnelsats.com:35825', False)),
+        ]
+        for raw_address, expected in cases:
+            assert app_module.classify_announced_address(
+                raw_address, SERVER, PORT, _server_matcher
+            ) == expected, raw_address
 
     def test_unparseable_value_is_real_ip_without_address(self):
         assert app_module.classify_announced_address(
@@ -662,27 +651,28 @@ class TestStatusDiagnostics:
         assert payload['last_error_code'] is None
         assert payload['announcement_diagnostics'] == []
 
-    @pytest.mark.parametrize('daemon_error,expected_code', [
-        ('No WireGuard config found in /data', 'no_wireguard_config'),
-        ('SecureMode: No Lightning node detected (probed 10.21.21.9 and 10.21.21.96)', 'no_lightning_node'),
-        ('Waiting for the protected node to start: LND (lightning_lnd_1)', 'protected_node_not_running'),
-        ('Failed to bring up WireGuard interface tunnelsatsv2', 'dataplane_error'),
-    ])
-    def test_daemon_errors_get_stable_codes(self, client, daemon_error, expected_code):
+    def test_daemon_errors_get_stable_codes(self, client):
+        cases = [
+            ('No WireGuard config found in /data', 'no_wireguard_config'),
+            ('SecureMode: No Lightning node detected (probed 10.21.21.9 and 10.21.21.96)', 'no_lightning_node'),
+            ('Waiting for the protected node to start: LND (lightning_lnd_1)', 'protected_node_not_running'),
+            ('Failed to bring up WireGuard interface tunnelsatsv2', 'dataplane_error'),
+        ]
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with patch('app.DATA_DIR', tmp_dir), \
-                    patch('app.LND_CONFIG_PATH', os.path.join(tmp_dir, 'missing-lnd.conf')), \
-                    patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
-                    patch('app._get_wireguard_state', return_value=('Disconnected', '')), \
-                    patch('app.list_containers', return_value=[]), \
-                    patch('app.read_dataplane_state', return_value=_dataplane(
-                        rules_synced=False, last_error=daemon_error)), \
-                    patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
-                payload = client.get('/api/local/status').get_json()
+            for daemon_error, expected_code in cases:
+                with patch('app.DATA_DIR', tmp_dir), \
+                        patch('app.LND_CONFIG_PATH', os.path.join(tmp_dir, 'missing-lnd.conf')), \
+                        patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False), \
+                        patch('app._get_wireguard_state', return_value=('Disconnected', '')), \
+                        patch('app.list_containers', return_value=[]), \
+                        patch('app.read_dataplane_state', return_value=_dataplane(
+                            rules_synced=False, last_error=daemon_error)), \
+                        patch('app.subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+                    payload = client.get('/api/local/status').get_json()
 
-        assert payload['last_error'] == daemon_error
-        assert payload['last_error_code'] == expected_code
-        assert payload['announcement_diagnostics'] == []
+                assert payload['last_error'] == daemon_error
+                assert payload['last_error_code'] == expected_code
+                assert payload['announcement_diagnostics'] == []
 
     def test_pending_target_switch_has_its_own_code(self, client):
         with tempfile.TemporaryDirectory() as tmp_dir:

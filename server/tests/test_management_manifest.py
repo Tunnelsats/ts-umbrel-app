@@ -28,48 +28,42 @@ def environment_map(service):
     return result
 
 
-def test_umbrel_proxy_targets_bridge_network_web_service():
+def test_split_runtime_compose_and_proxy_contract():
     compose = load_yaml(COMPOSE_PATH)
+    manifest = load_yaml(MANIFEST_PATH)
+    ci_compose = load_yaml(CI_COMPOSE_PATH)
+    workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
     proxy = compose["services"]["app_proxy"]
-    environment = environment_map(proxy)
-
+    proxy_env = environment_map(proxy)
     assert "network_mode" not in proxy
-    assert environment["APP_HOST"] == "tunnelsats-web"
-    assert int(environment["APP_PORT"]) == 9740
-    assert environment["PROXY_AUTH_ADD"] == "true"
-    assert "PROXY_AUTH_WHITELIST" not in environment
+    assert proxy_env["APP_HOST"] == "tunnelsats-web"
+    assert int(proxy_env["APP_PORT"]) == 9740
+    assert proxy_env["PROXY_AUTH_ADD"] == "true"
+    assert "PROXY_AUTH_WHITELIST" not in proxy_env
 
-    target = compose["services"][environment["APP_HOST"]]
-    assert target.get("network_mode") != "host"
+    web = compose["services"]["tunnelsats-web"]
+    web_env = environment_map(web)
+    assert web.get("network_mode") != "host"
+    assert "network_mode" not in web
+    assert str(web["user"]) != "0"
+    assert web["cap_drop"] == ["ALL"]
+    assert "cap_add" not in web
+    assert "no-new-privileges:true" in web["security_opt"]
+    assert web_env["TUNNELSATS_ROLE"] == "web"
+    assert web_env["DASHBOARD_BIND_HOST"] == "0.0.0.0"
+    assert int(web_env["DASHBOARD_BIND_PORT"]) == 9740
+    assert web_env["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "true"
+    assert web_env["MANAGEMENT_TRUSTED_PROXY_HOST"] == "app_proxy"
 
+    web_volumes = [str(volume) for volume in web.get("volumes", [])]
+    assert not any("/var/run/docker.sock" in volume for volume in web_volumes)
+    assert not any("/lightning-data/" in volume for volume in web_volumes)
 
-def test_umbrel_web_service_is_unprivileged_and_bridge_networked():
-    compose = load_yaml(COMPOSE_PATH)
-    service = compose["services"]["tunnelsats-web"]
-    environment = environment_map(service)
-
-    assert "network_mode" not in service
-    assert str(service["user"]) != "0"
-    assert service["cap_drop"] == ["ALL"]
-    assert "no-new-privileges:true" in service["security_opt"]
-    assert environment["TUNNELSATS_ROLE"] == "web"
-    assert environment["DASHBOARD_BIND_HOST"] == "0.0.0.0"
-    assert int(environment["DASHBOARD_BIND_PORT"]) == 9740
-    assert environment["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "true"
-    assert environment["MANAGEMENT_TRUSTED_PROXY_HOST"] == "app_proxy"
-
-    volumes = [str(volume) for volume in service.get("volumes", [])]
-    assert not any("/var/run/docker.sock" in volume for volume in volumes)
-    assert not any("/lightning-data/" in volume for volume in volumes)
-
-
-def test_umbrel_daemon_is_only_privileged_host_network_service():
-    compose = load_yaml(COMPOSE_PATH)
     daemon = compose["services"]["tunnelsats-daemon"]
-    environment = environment_map(daemon)
-
+    daemon_env = environment_map(daemon)
     assert daemon["network_mode"] == "host"
-    assert environment["TUNNELSATS_ROLE"] == "daemon"
+    assert daemon_env["TUNNELSATS_ROLE"] == "daemon"
     assert set(daemon["cap_add"]) == {"NET_ADMIN", "NET_RAW"}
     assert "ports" not in daemon
 
@@ -78,12 +72,38 @@ def test_umbrel_daemon_is_only_privileged_host_network_service():
     assert any("/lightning-data/lnd" in volume for volume in daemon_volumes)
     assert any("/lightning-data/cln" in volume for volume in daemon_volumes)
 
-    web = compose["services"]["tunnelsats-web"]
-    assert set(web["cap_drop"]) == {"ALL"}
-    assert "cap_add" not in web
+    assert daemon_env["SECURE_MODE"] == "${SECURE_MODE:-false}"
+    for name in (
+        "DASHBOARD_BIND_HOST",
+        "DASHBOARD_BIND_PORT",
+        "MANAGEMENT_BROWSER_SECURITY_ENABLED",
+    ):
+        assert "SECURE_MODE" not in str(web_env[name])
+
+    assert manifest["port"] == 9739
+    assert manifest["defaultUsername"] == ""
+    assert manifest["defaultPassword"] == ""
+
+    for service_name in ("tunnelsats-web", "tunnelsats-daemon"):
+        env = environment_map(compose["services"][service_name])
+        assert "APP_PASSWORD" not in env
+        assert "MANAGEMENT_PASSWORD" not in env
+        assert "MANAGEMENT_USERNAME" not in env
+
+    ci_proxy = ci_compose["services"]["app_proxy"]
+    ci_web = ci_compose["services"]["tunnelsats-web"]
+    ci_web_env = environment_map(ci_web)
+    assert ci_proxy["image"]
+    assert ci_proxy["profiles"] == ["umbrel-injected-app-proxy"]
+    assert ci_web_env["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "false"
+    assert ci_web["ports"] == ["9740:9740"]
+    assert "COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml" in workflow
+    assert "APP_DATA_DIR: ${{ github.workspace }}/data" in workflow
+    assert "head -1 | awk" in workflow
+    assert "COMPOSE_PROFILES" not in workflow
 
 
-def test_split_services_share_private_app_data_runtime_mount():
+def test_management_csrf_and_socket_contract():
     compose = load_yaml(COMPOSE_PATH)
     web_volumes = [str(volume) for volume in compose["services"]["tunnelsats-web"]["volumes"]]
     daemon_volumes = [str(volume) for volume in compose["services"]["tunnelsats-daemon"]["volumes"]]
@@ -93,68 +113,13 @@ def test_split_services_share_private_app_data_runtime_mount():
     assert socket_mount in daemon_volumes
     assert "volumes" not in compose
 
-
-def test_umbrel_http_security_path_is_independent_of_secure_mode():
-    compose = load_yaml(COMPOSE_PATH)
-    environment = environment_map(compose["services"]["tunnelsats-web"])
-    daemon_environment = environment_map(compose["services"]["tunnelsats-daemon"])
-
-    assert daemon_environment["SECURE_MODE"] == "${SECURE_MODE:-false}"
-    for name in (
-        "DASHBOARD_BIND_HOST",
-        "DASHBOARD_BIND_PORT",
-        "MANAGEMENT_BROWSER_SECURITY_ENABLED",
-    ):
-        assert "SECURE_MODE" not in str(environment[name])
-
-
-def test_umbrel_manifest_keeps_proxy_port_and_has_no_second_login():
-    manifest = load_yaml(MANIFEST_PATH)
-
-    assert manifest["port"] == 9739
-    assert manifest["defaultUsername"] == ""
-    assert manifest["defaultPassword"] == ""
-
-
-def test_umbrel_compose_does_not_pass_application_password_credentials():
-    compose = load_yaml(COMPOSE_PATH)
-    for service_name in ("tunnelsats-web", "tunnelsats-daemon"):
-        environment = environment_map(compose["services"][service_name])
-        assert "APP_PASSWORD" not in environment
-        assert "MANAGEMENT_PASSWORD" not in environment
-        assert "MANAGEMENT_USERNAME" not in environment
-
-
-def test_server_does_not_reintroduce_basic_auth_or_password_file():
-    source = APP_PATH.read_text(encoding="utf-8")
-
-    assert "WWW-Authenticate" not in source
-    assert "management-password" not in source
-    assert "MANAGEMENT_PASSWORD" not in source
-    assert "Basic realm=" not in source
-
-
-def test_management_security_rules_are_extracted_for_standalone_testing():
     assert SECURITY_PATH.exists()
     security_source = SECURITY_PATH.read_text(encoding="utf-8")
     app_source = APP_PATH.read_text(encoding="utf-8")
 
+    assert "WWW-Authenticate" not in app_source
+    assert "management-password" not in app_source
+    assert "MANAGEMENT_PASSWORD" not in app_source
+    assert "Basic realm=" not in app_source
     assert "class ManagementSecurity" in security_source
     assert "from security import ManagementSecurity" in app_source
-
-
-def test_ci_compose_supplies_dormant_proxy_and_private_web_smoke_port():
-    ci_compose = load_yaml(CI_COMPOSE_PATH)
-    proxy = ci_compose["services"]["app_proxy"]
-    web = ci_compose["services"]["tunnelsats-web"]
-    web_environment = environment_map(web)
-    workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert proxy["image"]
-    assert proxy["profiles"] == ["umbrel-injected-app-proxy"]
-    assert web_environment["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "false"
-    assert web["ports"] == ["9740:9740"]
-    assert "COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml" in workflow
-    assert "APP_DATA_DIR: ${{ github.workspace }}/data" in workflow
-    assert "head -1 | awk" in workflow
-    assert "COMPOSE_PROFILES" not in workflow

@@ -13,7 +13,7 @@ def load_deployment():
         return yaml.safe_load(manifest)
 
 
-def test_k3s_manifest_requires_lnd_colocation_by_default():
+def test_k3s_manifest_and_role_contract():
     deployment = load_deployment()
     pod_spec = deployment["spec"]["template"]["spec"]
     required_terms = pod_spec["affinity"]["podAffinity"][
@@ -29,10 +29,7 @@ def test_k3s_manifest_requires_lnd_colocation_by_default():
     assert "namespaces" not in term
     assert "namespaceSelector" not in term
 
-
-def test_k3s_manifest_exposes_tunnelsats_node_name_to_runtime():
-    deployment = load_deployment()
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container = pod_spec["containers"][0]
     env = {entry["name"]: entry for entry in container["env"]}
 
     assert env["TUNNELSATS_K8S_NODE_NAME"]["valueFrom"]["fieldRef"] == {
@@ -42,8 +39,6 @@ def test_k3s_manifest_exposes_tunnelsats_node_name_to_runtime():
     assert env["K3S_BYPASS_CIDRS"]["value"] == "10.42.0.0/16,10.43.0.0/16"
     assert env["K3S_IPV6_POD_CIDRS"]["value"] == ""
 
-
-def test_k3s_role_can_install_last_resort_network_policy():
     with ROLE_PATH.open(encoding="utf-8") as manifest:
         role = yaml.safe_load(manifest)
 

@@ -43,21 +43,19 @@ def test_default_gateway_uses_lowest_metric_usable_default_route(tmp_path):
     assert ManagementSecurity.default_gateway_ip(str(route_path)) == "172.30.0.1"
 
 
-@pytest.mark.parametrize(
-    "rows",
-    [
+def test_default_gateway_ignores_malformed_or_unusable_routes(tmp_path):
+    route_path = tmp_path / "route"
+    invalid_cases = [
         (),
         ("malformed",),
         ("eth0\t00000000\t00000000\t0003\t0\t0\t0\t00000000",),
         ("eth0\t00000000\tNOTHEX00\t0003\t0\t0\t0\t00000000",),
         ("eth0\t00000000\t010015AC\t0000\t0\t0\t0\t00000000",),
-    ],
-)
-def test_default_gateway_ignores_malformed_or_unusable_routes(tmp_path, rows):
-    route_path = tmp_path / "route"
-    route_path.write_text(route_table(*rows), encoding="utf-8")
-
-    assert ManagementSecurity.default_gateway_ip(str(route_path)) is None
+    ]
+    for rows in invalid_cases:
+        ManagementSecurity._cached_default_gateway_ip.cache_clear()
+        route_path.write_text(route_table(*rows), encoding="utf-8")
+        assert ManagementSecurity.default_gateway_ip(str(route_path)) is None
 
 
 def test_default_gateway_fails_closed_when_route_table_is_unavailable(tmp_path):
@@ -139,46 +137,42 @@ def test_peer_trust_fails_closed_when_proxy_dns_is_unavailable():
         assert security.peer_is_trusted("172.30.0.3", "app_proxy") is False
 
 
-@pytest.mark.parametrize("direct_peer", ["", "not-an-ip", None])
-def test_peer_trust_rejects_invalid_direct_peers_without_dns(direct_peer):
+def test_peer_trust_rejects_invalid_direct_peers_without_dns():
     security = ManagementSecurity()
     with patch(
         "security.socket.getaddrinfo", side_effect=AssertionError("DNS lookup")
     ):
-        assert security.peer_is_trusted(direct_peer, "app_proxy") is False
+        for direct_peer in ("", "not-an-ip", None):
+            assert security.peer_is_trusted(direct_peer, "app_proxy") is False
 
 
-@pytest.mark.parametrize(
-    ("metadata", "expected"),
-    [
+def test_direct_remote_addr_supports_proxyfix_metadata_variants():
+    cases = [
         ({"werkzeug.proxy_fix.orig": {"REMOTE_ADDR": "127.0.0.2"}}, "127.0.0.2"),
         ({"werkzeug.proxy_fix.orig": ("127.0.0.3", "http", "host", "9739")}, "127.0.0.3"),
         ({"REMOTE_ADDR": "127.0.0.4"}, "127.0.0.4"),
         ({"werkzeug.proxy_fix.orig": ()}, ""),
-    ],
-)
-def test_direct_remote_addr_supports_proxyfix_metadata_variants(metadata, expected):
-    assert ManagementSecurity.direct_remote_addr(metadata) == expected
+    ]
+    for metadata, expected in cases:
+        assert ManagementSecurity.direct_remote_addr(metadata) == expected
 
 
-@pytest.mark.parametrize(
-    "host",
-    [
+def test_valid_host_authorities_are_accepted():
+    valid_hosts = (
         "umbrel.local:9739",
         "umbrel.lan:9739",
         "node.tailnet.ts.net:9739",
         "example.onion:9739",
         "192.168.1.20:9739",
         "[fd00::10]:9739",
-    ],
-)
-def test_valid_host_authorities_are_accepted(host):
-    assert ManagementSecurity.host_is_allowed(host) is True
+    )
+    for host in valid_hosts:
+        assert ManagementSecurity.host_is_allowed(host) is True
 
 
-@pytest.mark.parametrize("host", ["", "bad host", "bad.example/path", "[broken"])
-def test_malformed_host_authorities_are_rejected(host):
-    assert ManagementSecurity.host_is_allowed(host) is False
+def test_malformed_host_authorities_are_rejected():
+    for host in ("", "bad host", "bad.example/path", "[broken"):
+        assert ManagementSecurity.host_is_allowed(host) is False
 
 
 def test_origin_comparison_includes_scheme_host_and_effective_port():
