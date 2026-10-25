@@ -588,4 +588,161 @@ describe('TunnelSats v3.5.0 Frontend UI Suite', () => {
         buyList.dispatchEvent(arrowEvent);
         expect(document.getElementById('buy-duration-select').value).toBe('3');
     });
+
+    test('19. updateNwcRecommendedBudget("match") resolves saved 12-month duration ($33.29) and modal text states within 7 days before expiry', () => {
+        expect(document.getElementById('nwc-modal').textContent).toContain('within 7 days before expiry');
+
+        window.latestStatusData = {
+            nwc: { lastDuration: 12 },
+            subscription: { lastDuration: '12m' }
+        };
+        window.updateNwcRecommendedBudget('match');
+        expect(document.getElementById('nwc-recommended-budget').textContent).toContain('$33.29 (+20% buffer)');
+
+        window.latestStatusData = null;
+        window.updateNwcRecommendedBudget('match');
+        expect(document.getElementById('nwc-recommended-budget').textContent).toContain('$3.47 (+20% buffer)');
+    });
+
+    test('20. restorePendingPaymentFlow restores pending_order and pending_reset on startup', async () => {
+        const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+        global.fetch.mockImplementation((url) => {
+            if (url === '/api/local/session') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ authenticated: true, csrf_token: 'csrf-restore' })
+                });
+            }
+            if (url === '/api/subscription/order_hash_restore') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ status: 'pending' })
+                });
+            }
+            if (url === '/api/subscription/reset_hash_restore') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: () => Promise.resolve({ status: 'paid' })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        });
+
+        window.activePaymentHash = null;
+        await window.restorePendingPaymentFlow({
+            pending_order: {
+                paymentHash: 'order_hash_restore',
+                invoice: 'lnbc_restored_order',
+                expiresAt: futureIso
+            }
+        });
+
+        expect(window.activePaymentHash).toBe('order_hash_restore');
+        expect(window.purchaseMode).toBe('buy');
+        expect(document.getElementById('invoice-bolt11-buy').value).toBe('lnbc_restored_order');
+        expect(document.getElementById('invoice-box-buy').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('btn-create-buy').disabled).toBe(true);
+
+        // Now test pending_reset settling immediately when paid while closed
+        window.activePaymentHash = null;
+        if (window.pollInterval) clearInterval(window.pollInterval);
+        await window.restorePendingPaymentFlow({
+            pending_reset: {
+                paymentHash: 'reset_hash_restore',
+                invoice: 'lnbc_restored_reset',
+                expiresAt: futureIso
+            }
+        });
+
+        expect(document.getElementById('bandwidth-reset-invoice-box').textContent).toContain('Bandwidth Quota Reset!');
+        expect(window.activePaymentHash).toBeNull();
+    });
+
+    test('21. Expired invoice clears activePaymentHash and does not re-lock btn-create-buy after switchTab', () => {
+        window.activePaymentHash = 'expired_hash_1';
+        window.purchaseMode = 'buy';
+        document.getElementById('btn-create-buy').disabled = true;
+
+        // Pass an already-expired timestamp
+        window.startInvoiceExpiryTimer('buy', Date.now() - 5000);
+
+        expect(window.activePaymentHash).toBeNull();
+        expect(window.activeInvoiceExpired).toBe(true);
+        expect(document.getElementById('btn-create-buy').disabled).toBe(false);
+        expect(document.getElementById('invoice-expiry-buy').textContent).toContain('Invoice expired');
+
+        // Switching away and back to buy must NOT re-lock the button or treat the invoice as active
+        window.switchTab('dashboard');
+        window.switchTab('buy');
+        expect(document.getElementById('btn-create-buy').disabled).toBe(false);
+        expect(document.getElementById('btn-create-buy').textContent).toBe('Generate Lightning Invoice');
+        expect(document.getElementById('invoice-box-buy').classList.contains('hidden')).toBe(true);
+    });
+
+    test('22. fetchServers when all servers are offline leaves buy-server-select empty, disables btn-create-buy, and blocks createSub', async () => {
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve([
+                { id: 'de1', country: 'Germany', city: 'Frankfurt', flag: '🇩🇪', status: 'full' },
+                { id: 'br1', country: 'Brazil', city: 'Sao Paulo', flag: '🇧🇷', status: 'maintenance' }
+            ])
+        });
+
+        await window.fetchServers();
+
+        expect(document.getElementById('buy-server-select').value).toBe('');
+        expect(document.getElementById('buy-server-label').textContent).toBe('No online servers available');
+        expect(document.getElementById('btn-create-buy').disabled).toBe(true);
+
+        // Even if an offline server ID is forced into the hidden input, createSub rejects it before calling API
+        document.getElementById('buy-server-select').value = 'de1';
+        global.fetch.mockClear();
+        await window.createSub('buy');
+
+        expect(global.fetch).not.toHaveBeenCalledWith('/api/subscription/create', expect.anything());
+        const errEl = document.getElementById('purchase-error-buy');
+        expect(errEl).not.toBeNull();
+        expect(errEl.textContent).toContain('Selected server is currently unavailable');
+    });
+
+    test('23. resizeGlobe ignores 0x0 resize when hidden and resizes when switching to buy tab', () => {
+        const container = document.getElementById('globe-container');
+        mockGlobeInstance.width.mockClear();
+        mockGlobeInstance.height.mockClear();
+
+        // While hidden (0x0), resize event must not set width/height to 0
+        Object.defineProperty(container, 'offsetWidth', { value: 0, configurable: true });
+        Object.defineProperty(container, 'offsetHeight', { value: 0, configurable: true });
+        window.dispatchEvent(new window.Event('resize'));
+        expect(mockGlobeInstance.width).not.toHaveBeenCalled();
+        expect(mockGlobeInstance.height).not.toHaveBeenCalled();
+
+        // When Buy tab becomes visible with non-zero dimensions, switchTab('buy') resizes the globe
+        Object.defineProperty(container, 'offsetWidth', { value: 160, configurable: true });
+        Object.defineProperty(container, 'offsetHeight', { value: 160, configurable: true });
+        window.switchTab('buy');
+        expect(mockGlobeInstance.width).toHaveBeenCalledWith(160);
+        expect(mockGlobeInstance.height).toHaveBeenCalledWith(160);
+    });
+
+    test('24. renderQR routes through createPureDomQrSvg when QRCode provides _oQRCode matrix', () => {
+        global.QRCode = function () {
+            this._oQRCode = {
+                getModuleCount: () => 21,
+                isDark: (r, c) => (r + c) % 2 === 0
+            };
+        };
+
+        window.renderQR('buy', 'lnbc2500n1p_svg_route_test');
+        const box = document.getElementById('qr-placeholder-buy');
+        const svg = box.querySelector('svg');
+        expect(svg).not.toBeNull();
+        expect(svg.getAttribute('data-qr-mode')).toBe('matrix');
+        expect(svg.getAttribute('width')).toBe('192');
+    });
 });

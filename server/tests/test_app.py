@@ -893,13 +893,23 @@ def test_security_headers_present(client):
     csp_headers = res.headers.getlist('Content-Security-Policy')
     assert len(csp_headers) == 1
     csp = csp_headers[0]
-    assert "default-src 'self'" in csp
-    assert "tunnelsats.com" in csp
     assert "fonts.googleapis.com" not in csp
-    assert "blob:" in csp
-    assert "'unsafe-eval'" in csp
-    assert "'unsafe-inline'" in csp
-    assert "frame-ancestors 'self'" in csp
+
+    directives = {}
+    for part in csp.split(";"):
+        tokens = part.strip().split()
+        if tokens:
+            directives[tokens[0]] = set(tokens[1:])
+
+    assert directives.get("default-src") == {"'self'"}
+    assert {"'self'", "'unsafe-eval'", "blob:"} <= directives.get("script-src", set())
+    assert {"'self'", "blob:"} <= directives.get("script-src-elem", set())
+    assert {"'self'", "blob:"} <= directives.get("worker-src", set())
+    assert {"'self'", "data:", "blob:", "https://*.tunnelsats.com"} <= directives.get("img-src", set())
+    assert {"'self'", "https://*.tunnelsats.com"} <= directives.get("connect-src", set())
+    assert {"'self'", "'unsafe-inline'"} <= directives.get("style-src", set())
+    assert directives.get("frame-ancestors") == {"'self'"}
+    assert directives.get("object-src") == {"'none'"}
     
     # Verify Defense-in-Depth headers
     assert res.headers.get('X-Frame-Options') == 'SAMEORIGIN'
@@ -2883,7 +2893,7 @@ class TestAnnouncementPrivacy:
             assert verified['rules_synced'] is True
             assert verified['announcement_verified'] is True
 
-            # In secure_mode the lnd dir is mounted :ro — readable but no lncli access.
+            # In secure_mode the lnd dir is mounted :ro - readable but no lncli access.
             # Trust the config file: conflict-free audit means announcement_verified = True.
             with patch('app.DATA_DIR', tmp_dir), patch('app.LND_CONFIG_PATH', lnd_path), \
                     patch('app.SECURE_MODE', True), patch('app.lnd_exists', return_value=True), \

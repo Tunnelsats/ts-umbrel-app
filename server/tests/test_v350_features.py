@@ -129,9 +129,10 @@ def test_assemble_wg_config_from_structured_claim_response():
     with patch("nwc.subprocess.run", side_effect=FileNotFoundError("no wg binary")):
         priv, pub = generate_wg_keypair()
         _, srv_pub = generate_wg_keypair()
+        _, other_pub = generate_wg_keypair()
 
+    # 1. Canonical structured claim where peer.publicKey is client key and server.publicKey is server key
     claim_data = {
-        "wgPublicKey": pub,
         "vpnPort": 36789,
         "expiresAt": "2027-01-15T00:00:00Z",
         "interface": {
@@ -139,10 +140,14 @@ def test_assemble_wg_config_from_structured_claim_response():
             "dns": "8.8.8.8",
         },
         "peer": {
-            "publicKey": srv_pub,
+            "publicKey": pub,
             "presharedKey": priv,
             "allowedIPs": "0.0.0.0/0",
             "endpoint": "de2.tunnelsats.com:51820",
+        },
+        "server": {
+            "publicKey": srv_pub,
+            "domain": "de2.tunnelsats.com",
         },
     }
     cfg = assemble_wg_config(priv, claim_data, fallback_server_id="de2")
@@ -155,9 +160,21 @@ def test_assemble_wg_config_from_structured_claim_response():
     assert f"# WG Public Key: {pub}" in cfg
     assert "# Subscription End: 2027-01-15T00:00:00Z" in cfg
     assert f"PublicKey = {srv_pub}" in cfg
+    assert f"PublicKey = {pub}" not in cfg
     assert f"PresharedKey = {priv}" in cfg
     assert "Endpoint = de2.tunnelsats.com:51820" in cfg
     assert "PersistentKeepalive = 25" in cfg
+
+    # 2. Rejects mismatched client peer.publicKey when server.publicKey is present
+    bad_claim = dict(claim_data, peer={**claim_data["peer"], "publicKey": other_pub})
+    assert assemble_wg_config(priv, bad_claim, fallback_server_id="de2") is None
+
+    # 3. Rejects when peer.publicKey is client key and no server.publicKey is provided
+    missing_srv_claim = {
+        "interface": {"address": "10.9.0.55"},
+        "peer": {"publicKey": pub, "endpoint": "de2.tunnelsats.com:51820"},
+    }
+    assert assemble_wg_config(priv, missing_srv_claim, fallback_server_id="de2") is None
 
 
 # ---------------------------------------------------------------------------
@@ -905,4 +922,256 @@ def test_update_local_metadata_syncs_telemetry_and_clears_matching_pending_renew
     assert meta["lastAmountSats"] == 45000
     assert meta["subscriptionTelemetry"]["bandwidthUsedGb"] == 12.34
     assert meta["subscriptionTelemetry"]["resetsThisMonth"] == 1
+
+
+def test_update_local_metadata_status_only_preserves_last_synced_at(data_dir):
+    from app import _update_local_metadata
+
+    meta_path = os.path.join(data_dir, app_module.META_FILE)
+    prior_sync = "2026-09-30T23:50:00+00:00"
+    with open(meta_path, "w", encoding="utf-8") as fp:
+        json.dump(
+            {
+                "wgPublicKey": "pubKeySync2",
+                "expiresAt": "2026-10-15T00:00:00Z",
+                "subscriptionTelemetry": {
+                    "bandwidthUsedGb": 84.0,
+                    "bandwidthLimitGb": 100.0,
+                    "resetsThisMonth": 1,
+                    "maxResetsPerMonth": 2,
+                    "status": "active",
+                    "lastSyncedAt": prior_sync,
+                },
+            },
+            fp,
+        )
+
+    ok = _update_local_metadata(
+        {"newExpiry": "2026-11-15T00:00:00Z", "status": "active"},
+        wg_pubkey="pubKeySync2",
+    )
+    assert ok is True
+    with open(meta_path, "r", encoding="utf-8") as fp:
+        meta = json.load(fp)
+    assert meta["subscriptionTelemetry"]["lastSyncedAt"] == prior_sync
+    # Month rollover still triggers because lastSyncedAt was not falsely bumped to October
+    tel = compute_bandwidth_telemetry(
+        meta["subscriptionTelemetry"],
+        now_dt=datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert tel["month_rolled_over"] is True
+    assert tel["bandwidth_used_gb"] == 0.0
+
+
+def test_nwc_connect_rejects_unreachable_tor_proxy_and_accepts_reachable(client, data_dir):
+    onion_uri = (
+        f"nostr+walletconnect://{VALID_WALLET_PUB}"
+        f"?relay=ws://abcdef1234567890.onion:4848&secret={VALID_SECRET}"
+    )
+    with patch("nwc.is_tor_socks_proxy_reachable", return_value=False):
+        r_fail_tor = client.post(
+            "/api/nwc/connect",
+            json={"uri": VALID_NWC_URI, "routeViaTor": True},
+        )
+        assert r_fail_tor.status_code == 400
+        assert "Tor SOCKS5 proxy" in r_fail_tor.get_json()["error"]
+
+        r_fail_onion = client.post(
+            "/api/nwc/connect",
+            json={"uri": onion_uri},
+        )
+        assert r_fail_onion.status_code == 400
+        assert "Tor SOCKS5 proxy" in r_fail_onion.get_json()["error"]
+
+    with patch("nwc.is_tor_socks_proxy_reachable", return_value=True):
+        r_ok = client.post(
+            "/api/nwc/connect",
+            json={"uri": onion_uri, "routeViaTor": True},
+        )
+        assert r_ok.status_code == 200
+        assert r_ok.get_json()["routeViaTor"] is True
+
+
+@patch("nwc.nwc_rpc_call")
+def test_maybe_nwc_auto_renew_ignores_mismatched_pending_duration_and_persists_before_pay(
+    mock_rpc, data_dir
+):
+    save_nwc_wallet(str(data_dir), VALID_NWC_URI, auto_renew_duration=3)
+    now = datetime(2026, 10, 25, 12, 0, 0, tzinfo=timezone.utc)
+    ph_1m = "11" * 32
+    ph_3m = "33" * 32
+    inv_1m = _make_bolt11(amount_hrp="100u", payment_hash_hex=ph_1m, timestamp=int(now.timestamp()))
+    inv_3m = _make_bolt11(amount_hrp="300u", payment_hash_hex=ph_3m, timestamp=int(now.timestamp()))
+
+    wg_pub = "L7vkSGz/ODjzBTmYo+gkJADq9GRF0NfxjOsFBNDVjQ4="
+    meta = {
+        "nwcConnected": True,
+        "wgPublicKey": wg_pub,
+        "serverId": "de2",
+        "expiresAt": (now + timedelta(days=5)).isoformat(),
+        "pendingRenewal": {
+            "paymentHash": ph_1m,
+            "invoice": inv_1m,
+            "amountSats": 10_000,
+            "serverId": "de2",
+            "wgPublicKey": wg_pub,
+            "duration": 1,
+            "createdAt": now.isoformat(),
+        },
+    }
+
+    persisted_snapshots = []
+
+    def persist_fn(m):
+        persisted_snapshots.append(json.loads(json.dumps(m)))
+
+    def create_renewal_fn(pubkey, server_id, duration):
+        assert duration == 3
+        return {"invoice": inv_3m, "paymentHash": ph_3m, "amountSats": 30_000}
+
+    def rpc_side_effect(wallet, method, params=None, **kw):
+        if method == "pay_invoice":
+            # Verify pendingRenewal for 3m was persisted BEFORE pay_invoice was called
+            assert len(persisted_snapshots) >= 1
+            assert persisted_snapshots[-1]["pendingRenewal"]["paymentHash"] == ph_3m
+            assert persisted_snapshots[-1]["pendingRenewal"]["duration"] == 3
+            return {"preimage": "ab" * 32}
+        return {}
+
+    mock_rpc.side_effect = rpc_side_effect
+    with patch("nwc.time.time", return_value=now.timestamp()):
+        res = maybe_nwc_auto_renew(
+            str(data_dir),
+            meta,
+            create_renewal_fn,
+            now_dt=now,
+            persist_meta_fn=persist_fn,
+        )
+    assert res["success"] is True
+    assert res["payment_hash"] == ph_3m
+    assert res["amount_sats"] == 30_000
+    assert meta["lastDuration"] == 3
+
+
+def test_evaluate_subscription_notices_does_not_suppress_when_nwc_has_last_error(data_dir):
+    now = datetime(2026, 10, 25, 12, 0, 0, tzinfo=timezone.utc)
+    n_err = evaluate_subscription_notices(
+        str(data_dir),
+        {
+            "expiresAt": (now + timedelta(days=2)).isoformat(),
+            "nwcConnected": True,
+            "nwcAutoRenewState": {
+                "attempts": 1,
+                "lastError": "NWC relay connection timed out",
+                "budgetWarning": False,
+                "fallbackTaskRaised": False,
+            },
+        },
+        now_dt=now,
+    )
+    assert n_err["suppressed_by_nwc"] is False
+    assert any(b["id"] == "expiry_3d" for b in n_err["banners"])
+
+
+def test_apply_vpn_port_skips_when_expected_pubkey_mismatches(data_dir):
+    meta_path = os.path.join(data_dir, app_module.META_FILE)
+    conf_path = os.path.join(data_dir, "tunnelsats.conf")
+    with open(meta_path, "w", encoding="utf-8") as fp:
+        json.dump(
+            {
+                "wgPublicKey": "newPubKey999",
+                "serverDomain": "de2.tunnelsats.com",
+                "vpnPort": 31111,
+            },
+            fp,
+        )
+    with open(conf_path, "w", encoding="utf-8") as fp:
+        fp.write("# Port Forwarding: 31111\n[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\n")
+
+    assert apply_vpn_port(39999, data_dir=str(data_dir), expected_pubkey="oldPubKey111") is False
+    with open(meta_path, "r", encoding="utf-8") as fp:
+        assert json.load(fp)["vpnPort"] == 31111
+
+
+@patch("app.requests.post")
+def test_create_subscription_reuses_identical_pending_order_and_preserves_multi_order_keys(
+    mock_post, client, data_dir
+):
+    resp_a = MagicMock()
+    resp_a.status_code = 200
+    resp_a.headers = {"Content-Type": "application/json"}
+    resp_a.content = b'{"paymentHash":"hashOrderA","invoice":"lnbc100u1a","amountSats":10000}'
+
+    resp_b = MagicMock()
+    resp_b.status_code = 200
+    resp_b.headers = {"Content-Type": "application/json"}
+    resp_b.content = b'{"paymentHash":"hashOrderB","invoice":"lnbc300u1b","amountSats":30000}'
+
+    mock_post.side_effect = [resp_a, resp_b]
+
+    # 1. Create Order A (de2, 1 month)
+    r1 = client.post("/api/subscription/create", json={"serverId": "de2", "duration": 1})
+    assert r1.status_code == 200
+    assert json.loads(r1.data)["paymentHash"] == "hashOrderA"
+
+    # 2. Repeat identical create request -> reuses Order A without calling upstream
+    r1_reuse = client.post("/api/subscription/create", json={"serverId": "de2", "duration": 1})
+    assert r1_reuse.status_code == 200
+    r1_reuse_json = r1_reuse.get_json()
+    assert r1_reuse_json["reused"] is True
+    assert r1_reuse_json["paymentHash"] == "hashOrderA"
+    assert mock_post.call_count == 1
+
+    # 3. Create Order B with different duration (3 months) -> creates new invoice, preserves Order A in pendingOrders
+    r2 = client.post("/api/subscription/create", json={"serverId": "de2", "duration": 3})
+    assert r2.status_code == 200
+    assert json.loads(r2.data)["paymentHash"] == "hashOrderB"
+
+    # 4. Claim Order A (even though Order B was created later) -> succeeds using Order A's private key
+    with patch("nwc.subprocess.run", side_effect=FileNotFoundError("no wg")):
+        _, srv_pub = generate_wg_keypair()
+
+    meta_path = os.path.join(data_dir, app_module.META_FILE)
+    with open(meta_path, "r", encoding="utf-8") as fp:
+        saved_meta = json.load(fp)
+    order_a_pub = saved_meta["pendingOrders"]["hashOrderA"]["wgPublicKey"]
+    order_a_priv = saved_meta["pendingOrders"]["hashOrderA"]["wgPrivateKey"]
+
+    claim_payload = {
+        "success": True,
+        "vpnPort": 35555,
+        "expiresAt": "2027-02-01T00:00:00Z",
+        "interface": {"address": "10.9.0.88/32", "dns": "8.8.8.8"},
+        "peer": {"publicKey": order_a_pub, "allowedIPs": "0.0.0.0/0"},
+        "server": {"publicKey": srv_pub, "endpoint": "de2.tunnelsats.com:51820"},
+    }
+    resp_claim = MagicMock()
+    resp_claim.status_code = 200
+    resp_claim.headers = {"Content-Type": "application/json"}
+    resp_claim.json.return_value = claim_payload
+    resp_claim.content = json.dumps(claim_payload).encode("utf-8")
+    mock_post.side_effect = None
+    mock_post.return_value = resp_claim
+
+    r_claim = client.post("/api/subscription/claim", json={"paymentHash": "hashOrderA"})
+    assert r_claim.status_code == 200
+    with open(os.path.join(data_dir, "tunnelsats.conf"), "r", encoding="utf-8") as fp:
+        conf_text = fp.read()
+    assert f"PrivateKey = {order_a_priv}" in conf_text
+    assert f"PublicKey = {srv_pub}" in conf_text
+
+
+def test_subscription_create_requires_management_csrf_when_security_enabled(data_dir):
+    app.config["TESTING"] = True
+    app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = True
+    try:
+        with app.test_client() as sec_client:
+            res = sec_client.post(
+                "/api/subscription/create",
+                json={"serverId": "de2", "duration": 1},
+            )
+            assert res.status_code == 403
+    finally:
+        app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = False
+
 

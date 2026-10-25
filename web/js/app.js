@@ -1,6 +1,8 @@
 // State (var for window-scope testability)
 var pollInterval;
 var activePaymentHash = null;
+var activeInvoiceExpired = false;
+var restoredPendingHashes = new Set();
 var purchaseMode = "buy"; // "buy", "renew", or "reset"
 var latestStatusData = null;
 var subscriptionCountdownInterval = null;
@@ -310,6 +312,18 @@ async function mockFetch(url) {
     return { ok: false, status: 404, body: { error: 'Not Found' } };
 }
 
+function resizeGlobe() {
+    const container = document.getElementById('globe-container');
+    if (!container || !myGlobe || typeof myGlobe === 'string') return;
+    const w = container.offsetWidth || container.clientWidth;
+    const h = container.offsetHeight || container.clientHeight;
+    if (w > 0 && h > 0) {
+        if (typeof myGlobe.width === 'function') myGlobe.width(w);
+        if (typeof myGlobe.height === 'function') myGlobe.height(h);
+    }
+}
+window.resizeGlobe = resizeGlobe;
+
 function initGlobe() {
     const container = document.getElementById('globe-container');
     if (!container || myGlobe) return;
@@ -352,27 +366,27 @@ function initGlobe() {
         globe.controls().autoRotateSpeed = 0.5;
         globe.controls().enableZoom = false;
 
-        if (typeof globe.width === 'function' && container.offsetWidth) {
-            globe.width(container.offsetWidth);
-        }
-        if (typeof globe.height === 'function' && container.offsetHeight) {
-            globe.height(container.offsetHeight);
-        }
-
         myGlobe = globe;
+        resizeGlobe();
         globeInitAttempts = 0;
         if (globeInitRetryTimer) {
             clearTimeout(globeInitRetryTimer);
             globeInitRetryTimer = null;
         }
 
-        // Resize handler
+        // Resize handler (ignore 0x0 when Buy tab is hidden)
         window.addEventListener('resize', () => {
-            if (myGlobe && typeof myGlobe !== 'string') {
-                myGlobe.width(container.offsetWidth);
-                myGlobe.height(container.offsetHeight);
-            }
+            resizeGlobe();
         });
+
+        if (typeof ResizeObserver === 'function') {
+            try {
+                const ro = new ResizeObserver(() => resizeGlobe());
+                ro.observe(container);
+            } catch (err) {
+                // Ignore if ResizeObserver is unsupported in environment
+            }
+        }
 
         // Optimization: Pause when tab hidden
         document.addEventListener('visibilitychange', () => {
@@ -903,7 +917,7 @@ function switchTab(tabId) {
 
     if (tabId === 'dashboard') {
         fetchStatus();
-        if (activePaymentHash && purchaseMode === 'reset') {
+        if (activePaymentHash && !activeInvoiceExpired && purchaseMode === 'reset') {
             const resetBox = document.getElementById('bandwidth-reset-invoice-box');
             if (resetBox) resetBox.classList.remove('hidden');
             pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
@@ -913,7 +927,7 @@ function switchTab(tabId) {
         const box = document.getElementById(`invoice-box-${mode}`);
         const btnCreate = document.getElementById(`btn-create-${mode}`);
 
-        if (activePaymentHash && tabId === mode && purchaseMode === mode) {
+        if (activePaymentHash && !activeInvoiceExpired && tabId === mode && purchaseMode === mode) {
             // Restore active invoice UI and resume polling
             if (box) box.classList.remove('hidden');
             if (btnCreate) {
@@ -926,10 +940,22 @@ function switchTab(tabId) {
             if (box) box.classList.add('hidden');
             if (btnCreate) {
                 btnCreate.textContent = mode === 'renew' ? "Generate Renewal Invoice" : "Generate Lightning Invoice";
-                btnCreate.disabled = false;
+                const noOnlineServers = mode === 'buy'
+                    && Array.isArray(tsServers)
+                    && tsServers.length > 0
+                    && !tsServers.some(s => isServerOnline(s));
+                btnCreate.disabled = noOnlineServers;
             }
         }
     });
+
+    if (tabId === 'buy') {
+        if (!myGlobe) initGlobe();
+        resizeGlobe();
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(resizeGlobe);
+        }
+    }
 
     // Fetch pricing on-demand when entering purchase flows
     if (tabId === 'buy' || tabId === 'renew') {
@@ -1896,6 +1922,9 @@ async function fetchStatus() {
         if (typeof renderBandwidthGauge === 'function') renderBandwidthGauge(data);
         if (typeof renderNwcStatusUI === 'function') renderNwcStatusUI(data);
         if (typeof renderNotices === 'function') renderNotices(data);
+        if (!activePaymentHash && typeof restorePendingPaymentFlow === 'function') {
+            restorePendingPaymentFlow(data);
+        }
 
         return data;
     } catch (e) {
@@ -1922,17 +1951,25 @@ function getServerRegion(server) {
 }
 window.getServerRegion = getServerRegion;
 
+function isServerOnline(s) {
+    if (!s || typeof s !== 'object') return false;
+    const status = s.status ? String(s.status).trim().toLowerCase() : 'online';
+    return status === 'online';
+}
+window.isServerOnline = isServerOnline;
+
 // 2. Fetch Servers
 async function fetchServers() {
     try {
         const res = await fetch('/api/servers');
         const data = await res.json();
+        const hasServerListPayload = Array.isArray(data) || Boolean(data && Array.isArray(data.servers));
         const servers = Array.isArray(data) ? data : (data.servers || []);
 
         tsServers = servers;
 
         const selBuyList = document.getElementById('buy-server-list');
-        const firstOnline = servers.find(s => !s.status || s.status === 'online') || servers[0] || null;
+        const firstOnline = servers.find(s => isServerOnline(s)) || null;
         const selectedId = firstOnline ? firstOnline.id : '';
 
         if (selBuyList) {
@@ -1963,8 +2000,8 @@ async function fetchServers() {
                 grid.className = 'grid grid-cols-1 sm:grid-cols-2 gap-2';
 
                 groupServers.forEach(s => {
-                    const status = s.status ? String(s.status).toLowerCase() : 'online';
-                    const isOnline = status === 'online';
+                    const status = s.status ? String(s.status).trim().toLowerCase() : 'online';
+                    const isOnline = isServerOnline(s);
                     const isSelected = s.id === selectedId && isOnline;
                     const label = `${s.flag || ''} ${s.country || ''} - ${s.city || ''}`.trim();
 
@@ -1988,6 +2025,10 @@ async function fetchServers() {
                         btn.addEventListener('click', () => {
                             selectOption('buy-server', s.id, label);
                             updateGlobeMarker(s);
+                            const btnCreateBuy = document.getElementById('btn-create-buy');
+                            if (btnCreateBuy && !(activePaymentHash && !activeInvoiceExpired && purchaseMode === 'buy')) {
+                                btnCreateBuy.disabled = false;
+                            }
                         });
                     }
 
@@ -2018,6 +2059,18 @@ async function fetchServers() {
             const firstLabel = `${firstOnline.flag || ''} ${firstOnline.country || ''} - ${firstOnline.city || ''}`.trim();
             selectOption('buy-server', firstOnline.id, firstLabel);
             updateGlobeMarker(firstOnline);
+            const btnCreateBuy = document.getElementById('btn-create-buy');
+            if (btnCreateBuy && !(activePaymentHash && !activeInvoiceExpired && purchaseMode === 'buy')) {
+                btnCreateBuy.disabled = false;
+            }
+        } else if (hasServerListPayload) {
+            const buyServerSelect = document.getElementById('buy-server-select');
+            if (buyServerSelect) buyServerSelect.value = '';
+            const buyServerLabel = document.getElementById('buy-server-label');
+            if (buyServerLabel) buyServerLabel.textContent = 'No online servers available';
+            updateGlobeMarker(null);
+            const btnCreateBuy = document.getElementById('btn-create-buy');
+            if (btnCreateBuy) btnCreateBuy.disabled = true;
         }
     } catch (e) {
         console.warn("Failed to fetch servers", e);
@@ -2119,34 +2172,37 @@ function renderQR(mode, text) {
     const box = document.getElementById(boxId);
     if (!box) return;
 
-    if (typeof QRCode === 'function') {
-        if (mode === 'buy') {
-            if (qrBuy) {
-                qrBuy.clear();
-            } else {
-                box.innerHTML = "";
-                qrBuy = new QRCode(box, { width: 192, height: 192 });
-            }
-            qrBuy.makeCode(text);
-        } else if (mode === 'renew') {
-            if (qrRenew) {
-                qrRenew.clear();
-            } else {
-                box.innerHTML = "";
-                qrRenew = new QRCode(box, { width: 192, height: 192 });
-            }
-            qrRenew.makeCode(text);
+    const size = mode === 'reset' ? 160 : 192;
+    const svg = createPureDomQrSvg(text, size);
+    if ((svg && svg.getAttribute('data-qr-mode') === 'matrix') || typeof QRCode !== 'function') {
+        box.replaceChildren(svg);
+        return;
+    }
+
+    if (mode === 'buy') {
+        if (qrBuy) {
+            qrBuy.clear();
         } else {
-            if (qrReset) {
-                qrReset.clear();
-            } else {
-                box.innerHTML = "";
-                qrReset = new QRCode(box, { width: 160, height: 160 });
-            }
-            qrReset.makeCode(text);
+            box.innerHTML = "";
+            qrBuy = new QRCode(box, { width: 192, height: 192 });
         }
+        qrBuy.makeCode(text);
+    } else if (mode === 'renew') {
+        if (qrRenew) {
+            qrRenew.clear();
+        } else {
+            box.innerHTML = "";
+            qrRenew = new QRCode(box, { width: 192, height: 192 });
+        }
+        qrRenew.makeCode(text);
     } else {
-        box.replaceChildren(createPureDomQrSvg(text, mode === 'reset' ? 160 : 192));
+        if (qrReset) {
+            qrReset.clear();
+        } else {
+            box.innerHTML = "";
+            qrReset = new QRCode(box, { width: 160, height: 160 });
+        }
+        qrReset.makeCode(text);
     }
 }
 
@@ -2156,14 +2212,11 @@ async function createSub(mode) {
     let serverId = null;
     const createBtn = document.getElementById(`btn-create-${mode}`);
     const previousPaymentHash = activePaymentHash;
+    const previousInvoiceExpired = activeInvoiceExpired;
     const previousPurchaseMode = purchaseMode;
     const previousPollInterval = pollInterval;
-    const hadActiveInvoiceForModeBeforeCall = Boolean(activePaymentHash && purchaseMode === mode);
+    const hadActiveInvoiceForModeBeforeCall = Boolean(activePaymentHash && !activeInvoiceExpired && purchaseMode === mode);
     let invoiceCreatedInThisCall = false;
-    if (mode === 'buy') {
-        serverId = document.getElementById('buy-server-select').value;
-        if (!serverId) return;
-    }
 
     // Helper for ui errors
     function displayPurchaseError(msg) {
@@ -2180,6 +2233,17 @@ async function createSub(mode) {
 
     const oldErr = document.getElementById(`purchase-error-${mode}`);
     if (oldErr) oldErr.remove();
+
+    if (mode === 'buy') {
+        serverId = document.getElementById('buy-server-select').value;
+        const hasKnownOfflineSelection = Array.isArray(tsServers)
+            && tsServers.length > 0
+            && !tsServers.some(s => s.id === serverId && isServerOnline(s));
+        if (!serverId || hasKnownOfflineSelection) {
+            displayPurchaseError('Selected server is currently unavailable. Please choose an online server.');
+            return;
+        }
+    }
 
     createBtn.textContent = "Loading...";
     createBtn.disabled = true;
@@ -2212,10 +2276,7 @@ async function createSub(mode) {
             }
         }
 
-        const requestFunction = endpoint === '/api/subscription/renew'
-            ? managementFetch
-            : fetch;
-        const res = await requestFunction(endpoint, {
+        const res = await managementFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -2224,6 +2285,7 @@ async function createSub(mode) {
 
         if (res.ok && data.paymentHash && data.invoice) {
             activePaymentHash = data.paymentHash;
+            activeInvoiceExpired = false;
             purchaseMode = mode;
             invoiceCreatedInThisCall = true;
             document.getElementById(`invoice-bolt11-${mode}`).value = data.invoice;
@@ -2236,14 +2298,19 @@ async function createSub(mode) {
                 updateInvoiceWalletButtons(mode);
             }
             if (typeof startInvoiceExpiryTimer === 'function') {
-                startInvoiceExpiryTimer(mode, data.expiresAt || data.expires_at);
+                const rawExp = data.expiresAt || data.expires_at;
+                const expMs = rawExp
+                    ? (typeof rawExp === 'number' ? (rawExp < 1e12 ? rawExp * 1000 : rawExp) : Date.parse(rawExp))
+                    : NaN;
+                const effectiveExp = (!Number.isNaN(expMs) && expMs > Date.now()) ? rawExp : undefined;
+                startInvoiceExpiryTimer(mode, effectiveExp);
             }
 
             // Start Polling (clear any existing interval first)
             if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
         } else {
-            const fallbackError = mode === 'renew'
+            const fallbackError = endpoint === '/api/subscription/renew'
                 ? "Unable to create renewal invoice."
                 : "Unable to create subscription invoice.";
             displayPurchaseError(data.error || data.message || fallbackError);
@@ -2253,6 +2320,7 @@ async function createSub(mode) {
         // If invoice setup fails after receiving data, reset state so retry is possible.
         if (invoiceCreatedInThisCall && purchaseMode === mode) {
             activePaymentHash = previousPaymentHash;
+            activeInvoiceExpired = previousInvoiceExpired;
             purchaseMode = previousPurchaseMode;
             invoiceCreatedInThisCall = false;
             // Only clear polling if this call created a new interval.
@@ -2273,13 +2341,153 @@ async function createSub(mode) {
     }
 }
 
+function isPendingRecordExpired(rec) {
+    if (!rec || typeof rec !== 'object') return false;
+    const rawTs = rec.expiresAt !== undefined ? rec.expiresAt : rec.expires_at;
+    if (rawTs === undefined || rawTs === null || rawTs === '') return false;
+    const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+    return !Number.isNaN(ms) && ms <= Date.now();
+}
+
+function restorePendingPaymentFlow(data) {
+    if (!data || typeof data !== 'object' || activePaymentHash) return Promise.resolve(false);
+
+    const pendingReset = data.pending_reset || data.pendingReset || null;
+    const pendingRenewal = data.pending_renewal || data.pendingRenewal || null;
+    const pendingOrder = data.pending_order || data.pendingOrder || null;
+
+    const resetHash = pendingReset && (pendingReset.paymentHash || pendingReset.payment_hash);
+    if (resetHash && !restoredPendingHashes.has(resetHash)) {
+        restoredPendingHashes.add(resetHash);
+        const invoice = pendingReset.invoice || pendingReset.payment_request || '';
+        const expired = isPendingRecordExpired(pendingReset);
+        purchaseMode = 'reset';
+        activePaymentHash = resetHash;
+        activeInvoiceExpired = false;
+
+        const input = document.getElementById('invoice-bolt11-reset');
+        const link = document.getElementById('pay-link-reset');
+        if (invoice) {
+            if (input) input.value = invoice;
+            if (link) link.href = `lightning:${invoice}`;
+            renderQR('reset', invoice);
+        }
+        updateInvoiceWalletButtons('reset');
+
+        if (!expired) {
+            const controlsEl = document.getElementById('bandwidth-reset-invoice-controls');
+            if (controlsEl) controlsEl.classList.remove('hidden');
+            const successEl = document.getElementById('bandwidth-reset-success-msg');
+            if (successEl) {
+                successEl.classList.add('hidden');
+                successEl.replaceChildren();
+            }
+            const box = document.getElementById('bandwidth-reset-invoice-box');
+            if (box) box.classList.remove('hidden');
+            startInvoiceExpiryTimer('reset', pendingReset.expiresAt || pendingReset.expires_at);
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
+        }
+
+        return Promise.resolve(pollPayment()).then((paid) => {
+            if (expired && !paid && activePaymentHash === resetHash) {
+                activePaymentHash = null;
+                activeInvoiceExpired = true;
+            }
+            return Boolean(paid);
+        });
+    }
+
+    const renewHash = pendingRenewal && (pendingRenewal.paymentHash || pendingRenewal.payment_hash);
+    if (renewHash && !restoredPendingHashes.has(renewHash)) {
+        restoredPendingHashes.add(renewHash);
+        const invoice = pendingRenewal.invoice || pendingRenewal.payment_request || '';
+        const expired = isPendingRecordExpired(pendingRenewal);
+        purchaseMode = 'renew';
+        activePaymentHash = renewHash;
+        activeInvoiceExpired = false;
+
+        const input = document.getElementById('invoice-bolt11-renew');
+        const link = document.getElementById('pay-link-renew');
+        if (invoice) {
+            if (input) input.value = invoice;
+            if (link) link.href = `lightning:${invoice}`;
+            renderQR('renew', invoice);
+        }
+        updateInvoiceWalletButtons('renew');
+
+        if (!expired) {
+            const box = document.getElementById('invoice-box-renew');
+            if (box) box.classList.remove('hidden');
+            const btnCreate = document.getElementById('btn-create-renew');
+            if (btnCreate) {
+                btnCreate.textContent = 'Invoice Active...';
+                btnCreate.disabled = true;
+            }
+            startInvoiceExpiryTimer('renew', pendingRenewal.expiresAt || pendingRenewal.expires_at);
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
+        }
+
+        return Promise.resolve(pollPayment()).then((paid) => {
+            if (expired && !paid && activePaymentHash === renewHash) {
+                activePaymentHash = null;
+                activeInvoiceExpired = true;
+            }
+            return Boolean(paid);
+        });
+    }
+
+    const orderHash = pendingOrder && (pendingOrder.paymentHash || pendingOrder.payment_hash);
+    if (orderHash && !restoredPendingHashes.has(orderHash)) {
+        restoredPendingHashes.add(orderHash);
+        const invoice = pendingOrder.invoice || pendingOrder.payment_request || '';
+        const expired = isPendingRecordExpired(pendingOrder);
+        purchaseMode = 'buy';
+        activePaymentHash = orderHash;
+        activeInvoiceExpired = false;
+
+        const input = document.getElementById('invoice-bolt11-buy');
+        const link = document.getElementById('pay-link-buy');
+        if (invoice) {
+            if (input) input.value = invoice;
+            if (link) link.href = `lightning:${invoice}`;
+            renderQR('buy', invoice);
+        }
+        updateInvoiceWalletButtons('buy');
+
+        if (!expired) {
+            const box = document.getElementById('invoice-box-buy');
+            if (box) box.classList.remove('hidden');
+            const btnCreate = document.getElementById('btn-create-buy');
+            if (btnCreate) {
+                btnCreate.textContent = 'Invoice Active...';
+                btnCreate.disabled = true;
+            }
+            startInvoiceExpiryTimer('buy', pendingOrder.expiresAt || pendingOrder.expires_at);
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(pollPayment, POLL_INTERVAL_MS);
+        }
+
+        return Promise.resolve(pollPayment()).then((paid) => {
+            if (expired && !paid && activePaymentHash === orderHash) {
+                activePaymentHash = null;
+                activeInvoiceExpired = true;
+            }
+            return Boolean(paid);
+        });
+    }
+    return Promise.resolve(false);
+}
+window.restorePendingPaymentFlow = restorePendingPaymentFlow;
+
 async function pollPayment() {
-    if (!activePaymentHash) return;
+    if (!activePaymentHash) return false;
 
     // Don't poll while the browser tab is completely hidden to save resources.
     // However, DO keep polling if they just switched to the Dashboard UI tab 
     // so they still get the success UI when they click back.
-    if (document.hidden) return;
+    if (document.hidden) return false;
 
     try {
         const res = await managementFetch(`/api/subscription/${activePaymentHash}`, {
@@ -2289,6 +2497,7 @@ async function pollPayment() {
 
         if (data.status === 'paid') {
             clearInterval(pollInterval);
+            pollInterval = null;
             if (invoiceExpiryInterval) {
                 clearInterval(invoiceExpiryInterval);
                 invoiceExpiryInterval = null;
@@ -2297,6 +2506,9 @@ async function pollPayment() {
                 ? 'bandwidth-reset-invoice-box'
                 : `invoice-box-${purchaseMode}`;
             const invoiceBox = document.getElementById(invoiceBoxId);
+            if (invoiceBox) {
+                invoiceBox.classList.remove('hidden');
+            }
             if (invoiceBox && purchaseMode !== 'reset') {
                 invoiceBox.replaceChildren(); // Clear content for buy/renew
             }
@@ -2386,8 +2598,12 @@ async function pollPayment() {
 
                 if (invoiceBox) invoiceBox.append(h3, p, button);
             }
+            return true;
         }
-    } catch (e) { }
+        return false;
+    } catch (e) {
+        return false;
+    }
 }
 
 async function claimSubscription(mode) {
@@ -4128,9 +4344,41 @@ function normalizeNwcDurationCode(durationCode) {
 }
 window.normalizeNwcDurationCode = normalizeNwcDurationCode;
 
-function updateNwcRecommendedBudget(durationCode = 'match') {
+function resolveEffectiveNwcDurationCode(durationCode = 'match') {
     const code = normalizeNwcDurationCode(durationCode);
-    const baseUsd = NWC_DURATION_USD[code] !== undefined ? NWC_DURATION_USD[code] : 2.89;
+    if (code !== 'match') return code;
+
+    const status = latestStatusData && typeof latestStatusData === 'object' ? latestStatusData : {};
+    const nwc = status.nwc && typeof status.nwc === 'object' ? status.nwc : {};
+    const nwcState = nwc.state && typeof nwc.state === 'object' ? nwc.state : {};
+    const sub = status.subscription && typeof status.subscription === 'object' ? status.subscription : {};
+    const telemetry = status.subscription_telemetry && typeof status.subscription_telemetry === 'object' ? status.subscription_telemetry : {};
+
+    const savedDur = nwc.last_duration
+        ?? nwc.lastDuration
+        ?? nwcState.lastDuration
+        ?? nwcState.last_duration
+        ?? sub.lastDuration
+        ?? sub.last_duration
+        ?? telemetry.last_duration
+        ?? telemetry.lastDuration
+        ?? status.lastDuration
+        ?? status.last_duration
+        ?? null;
+
+    if (savedDur !== null && savedDur !== undefined) {
+        const normalizedSaved = normalizeNwcDurationCode(savedDur);
+        if (normalizedSaved === '1m' || normalizedSaved === '3m' || normalizedSaved === '6m' || normalizedSaved === '12m') {
+            return normalizedSaved;
+        }
+    }
+    return '1m';
+}
+window.resolveEffectiveNwcDurationCode = resolveEffectiveNwcDurationCode;
+
+function updateNwcRecommendedBudget(durationCode = 'match') {
+    const effectiveCode = resolveEffectiveNwcDurationCode(durationCode);
+    const baseUsd = NWC_DURATION_USD[effectiveCode] !== undefined ? NWC_DURATION_USD[effectiveCode] : 2.89;
     const bufferedUsd = Number((baseUsd * 1.20).toFixed(2));
     const el = document.getElementById('nwc-recommended-budget');
     if (!el) return;
@@ -4379,6 +4627,14 @@ function startInvoiceExpiryTimer(mode, expiresAt) {
                 clearInterval(invoiceExpiryInterval);
                 invoiceExpiryInterval = null;
             }
+            activeInvoiceExpired = true;
+            if (purchaseMode === mode) {
+                activePaymentHash = null;
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                }
+            }
             const createBtn = document.getElementById(`btn-create-${mode}`);
             if (createBtn) {
                 createBtn.disabled = false;
@@ -4450,6 +4706,7 @@ async function requestBandwidthReset() {
         const invoice = data && (data.invoice || data.payment_request);
         if (res.ok && paymentHash && invoice) {
             activePaymentHash = paymentHash;
+            activeInvoiceExpired = false;
             purchaseMode = 'reset';
             const controlsEl = document.getElementById('bandwidth-reset-invoice-controls');
             if (controlsEl) controlsEl.classList.remove('hidden');

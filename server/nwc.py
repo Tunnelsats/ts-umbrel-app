@@ -40,6 +40,26 @@ TOR_SOCKS_HOST = os.environ.get("TOR_PROXY_IP", os.environ.get("TOR_SOCKS_HOST",
 TOR_SOCKS_PORT = int(os.environ.get("TOR_PROXY_PORT", os.environ.get("TOR_SOCKS_PORT", "9050")) or 9050)
 
 
+def is_tor_socks_proxy_reachable(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    timeout: float = 1.5,
+) -> bool:
+    """Return True if the configured Tor SOCKS5 proxy accepts TCP connections."""
+    target_host = (host or TOR_SOCKS_HOST or "").strip()
+    try:
+        target_port = int(port if port is not None else TOR_SOCKS_PORT)
+    except (TypeError, ValueError):
+        return False
+    if not target_host or not (1 <= target_port <= 65535):
+        return False
+    try:
+        with socket.create_connection((target_host, target_port), timeout=timeout):
+            return True
+    except (socket.timeout, OSError):
+        return False
+
+
 class NwcError(Exception):
     """Error raised during NIP-47 Nostr Wallet Connect operations."""
 
@@ -220,18 +240,43 @@ def assemble_wg_config(
     else:
         dns = str(dns_raw).strip() or "8.8.8.8"
 
-    server_pubkey = (
-        peer.get("publicKey")
-        or peer.get("serverPublicKey")
-        or server.get("publicKey")
+    derived_client_pubkey = derive_wg_public_key(priv_clean) if validate_wg_public_key(priv_clean) else ""
+    known_client_pubkey = str(
+        data.get("wgPublicKey")
+        or interface.get("publicKey")
+        or peer.get("clientPublicKey")
+        or ""
+    ).strip()
+    if derived_client_pubkey and known_client_pubkey and known_client_pubkey != derived_client_pubkey:
+        return None
+    expected_client_pubkey = derived_client_pubkey or known_client_pubkey
+
+    explicit_server_pubkey = (
+        server.get("publicKey")
         or server.get("wgPublicKey")
+        or peer.get("serverPublicKey")
         or data.get("serverPublicKey")
         or data.get("peerPublicKey")
-        or data.get("publicKey")
     )
-    if not server_pubkey or not isinstance(server_pubkey, str):
+    peer_pubkey_raw = peer.get("publicKey")
+
+    if explicit_server_pubkey and isinstance(explicit_server_pubkey, str) and explicit_server_pubkey.strip():
+        if (
+            peer_pubkey_raw
+            and isinstance(peer_pubkey_raw, str)
+            and expected_client_pubkey
+            and peer_pubkey_raw.strip() != expected_client_pubkey
+        ):
+            return None
+        server_pubkey = explicit_server_pubkey.strip()
+    else:
+        fallback_pubkey = peer_pubkey_raw or data.get("publicKey")
+        if not fallback_pubkey or not isinstance(fallback_pubkey, str):
+            return None
+        server_pubkey = fallback_pubkey.strip()
+
+    if not server_pubkey or (expected_client_pubkey and server_pubkey == expected_client_pubkey):
         return None
-    server_pubkey = server_pubkey.strip()
 
     preshared_key = (
         peer.get("presharedKey")
@@ -305,13 +350,11 @@ def assemble_wg_config(
         or ""
     )
     client_pubkey = (
-        data.get("wgPublicKey")
-        or interface.get("publicKey")
-        or peer.get("clientPublicKey")
+        known_client_pubkey
+        or (str(peer_pubkey_raw).strip() if (explicit_server_pubkey and isinstance(peer_pubkey_raw, str)) else "")
+        or derived_client_pubkey
         or ""
     )
-    if not client_pubkey and validate_wg_public_key(priv_clean):
-        client_pubkey = derive_wg_public_key(priv_clean)
 
     lines = [
         "[Interface]",
@@ -340,7 +383,7 @@ def assemble_wg_config(
 
 
 # ---------------------------------------------------------------------------
-# 2. Pure-Python BOLT11 Pre-Payment Verifier
+# 2. Pure-Python BOLT11 Structural & Checksum Pre-Payment Verifier
 # ---------------------------------------------------------------------------
 
 def _bech32_polymod(values: List[int]) -> int:
@@ -392,7 +435,12 @@ def verify_bolt11_invoice(
     max_amount_sats: int = NWC_MAX_AUTO_RENEW_SATS,
     check_expiry: bool = True,
 ) -> Dict[str, Any]:
-    """Cryptographically and structurally verify a BOLT11 invoice before NWC payment."""
+    """
+    Perform Bech32 checksum and structural field validation on a BOLT11 invoice before NWC payment.
+    Validates network prefix (lnbc), Bech32 polymod checksum, positive whole-satoshi amount,
+    safety cap, timestamp/expiry, 32-byte payment_hash (tag p), and 65-byte signature + recovery
+    flag presence without secp256k1 ECDSA signature recovery.
+    """
     if not isinstance(invoice, str) or not invoice.strip():
         return {"valid": False, "error": "Missing BOLT11 invoice"}
 
@@ -417,6 +465,8 @@ def verify_bolt11_invoice(
     words = data_words[:-6]
     if len(words) < 7 + 104:
         return {"valid": False, "error": "BOLT11 payload is too short"}
+    if words[-1] not in (0, 1, 2, 3):
+        return {"valid": False, "error": "Invalid BOLT11 signature recovery flag"}
 
     amount_sats = _bolt11_amount_sats(s)
     if amount_sats is None or amount_sats <= 0:
@@ -487,11 +537,15 @@ def verify_bolt11_invoice(
 
     return {
         "valid": True,
+        "structuralOnly": True,
         "amount_sats": amount_sats,
         "payment_hash": payment_hash_hex,
         "timestamp": timestamp,
         "expiry_seconds": expiry_seconds,
     }
+
+
+verify_bolt11_invoice_structure = verify_bolt11_invoice
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +936,11 @@ def save_nwc_wallet(
     """Validate and persist NWC wallet credentials to /data/nwc-wallet.json with mode 0600."""
     parsed = parse_nwc_uri(uri, route_via_tor=True if route_via_tor else None)
     effective_tor = bool(route_via_tor or parsed["has_onion_relay"])
+    if effective_tor and not is_tor_socks_proxy_reachable():
+        raise ValueError(
+            "Tor SOCKS5 proxy is not configured or unreachable. "
+            "Configure a reachable TOR_SOCKS_HOST/TOR_SOCKS_PORT or use a clearnet wss:// relay without Tor routing."
+        )
 
     norm_duration: Union[str, int]
     if str(auto_renew_duration).strip().lower() in ("match", ""):
@@ -917,7 +976,8 @@ def save_nwc_wallet(
         "connectedAt": datetime.now(timezone.utc).isoformat(),
     }
 
-    with open(tmp_path, "w", encoding="utf-8") as fp:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fp:
         json.dump(wallet_record, fp, indent=2)
     os.chmod(tmp_path, 0o600)
     try:
@@ -1471,6 +1531,7 @@ def maybe_nwc_auto_renew(
     meta: Dict[str, Any],
     create_renewal_fn: Callable[[str, str, int], Optional[Dict[str, Any]]],
     now_dt: Optional[datetime] = None,
+    persist_meta_fn: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate and execute NWC auto-renewal within a 180s monotonic deadline.
@@ -1570,13 +1631,25 @@ def maybe_nwc_auto_renew(
             "state_changed": True,
         }
 
-    # Reuse unexpired pendingRenewal or create a new one
+    # Reuse unexpired pendingRenewal only when wgPublicKey and duration match
     pending = meta.get("pendingRenewal") if isinstance(meta.get("pendingRenewal"), dict) else None
     invoice = ""
     payment_hash = ""
     expected_amount: Optional[int] = None
 
-    if pending and pending.get("invoice") and pending.get("wgPublicKey") == wg_pubkey:
+    pending_dur: Optional[int] = None
+    if pending and pending.get("duration") is not None:
+        try:
+            pending_dur = int(str(pending.get("duration")).rstrip("mM"))
+        except (TypeError, ValueError):
+            pending_dur = None
+
+    if (
+        pending
+        and pending.get("invoice")
+        and pending.get("wgPublicKey") == wg_pubkey
+        and pending_dur == duration_months
+    ):
         chk = verify_bolt11_invoice(
             str(pending["invoice"]),
             expected_payment_hash=pending.get("paymentHash"),
@@ -1611,6 +1684,11 @@ def maybe_nwc_auto_renew(
             "duration": duration_months,
             "createdAt": now.isoformat(),
         }
+        if persist_meta_fn is not None:
+            try:
+                persist_meta_fn(meta)
+            except Exception:
+                pass
 
     verification = verify_bolt11_invoice(
         invoice,
@@ -1833,7 +1911,14 @@ def evaluate_subscription_notices(
     budget_warning = bool(nwc_state.get("budgetWarning"))
     fallback_raised = bool(nwc_state.get("fallbackTaskRaised"))
     restore_needed = bool(nwc_state.get("restoreReconnectNeeded"))
-    nwc_healthy = bool(nwc_connected and not budget_warning and not fallback_raised and not restore_needed)
+    last_error = bool(nwc_state.get("lastError"))
+    nwc_healthy = bool(
+        nwc_connected
+        and not budget_warning
+        and not fallback_raised
+        and not restore_needed
+        and not last_error
+    )
 
     expiry_raw = meta_dict.get("expiresAt")
     expiry_dt = _parse_iso_dt(expiry_raw)
@@ -2033,7 +2118,8 @@ def evaluate_subscription_notices(
                     "updatedAt": now.isoformat(),
                 }
                 tmp_path = os.path.join(data_dir, f".{SUBSCRIPTION_NOTICES_FILE}.tmp.{uuid.uuid4().hex}")
-                with open(tmp_path, "w", encoding="utf-8") as fp:
+                fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fp:
                     json.dump(record, fp, indent=2)
                 os.chmod(tmp_path, 0o600)
                 os.replace(tmp_path, notices_path)

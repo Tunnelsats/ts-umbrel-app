@@ -1,3 +1,5 @@
+import errno
+import fcntl
 import json
 import os
 import re
@@ -172,6 +174,7 @@ MANAGEMENT_JSON_PATHS = frozenset(
     {
         "/api/local/upload-config",
         "/api/local/configure-node",
+        "/api/subscription/create",
         "/api/subscription/renew",
         "/api/subscription/claim",
         "/api/subscription/bandwidth-reset",
@@ -332,7 +335,7 @@ CLN_K8S_POD_SELECTOR = os.environ.get("CLN_K8S_POD_SELECTOR", "app=cln")
 K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-# Shared HTTP session for k8s API calls — enables TLS keep-alive across helpers so
+# Shared HTTP session for k8s API calls - enables TLS keep-alive across helpers so
 # the dashboard does not pay a fresh TCP+TLS handshake on every request.
 _k8s_session = requests.Session()
 
@@ -439,6 +442,7 @@ def _management_request_is_sensitive():
         request.path.startswith("/api/local")
         or request.path
         in (
+            "/api/subscription/create",
             "/api/subscription/renew",
             "/api/subscription/claim",
             "/api/subscription/bandwidth-reset",
@@ -1801,7 +1805,8 @@ def _write_file_secure(path, content):
     parent_dir = os.path.dirname(path) or "."
     os.makedirs(parent_dir, exist_ok=True)
     tmp_path = os.path.join(parent_dir, f".{os.path.basename(path)}.tmp.{uuid.uuid4().hex}")
-    with open(tmp_path, "w", encoding="utf-8") as fp:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fp:
         fp.write(content)
     os.chmod(tmp_path, 0o600)
     try:
@@ -1818,11 +1823,13 @@ def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
             os.makedirs(DATA_DIR, exist_ok=True)
             meta_path = os.path.join(DATA_DIR, META_FILE)
             merged_meta = dict(meta)
+            existing_meta: Dict[str, Any] = {}
             if os.path.exists(meta_path):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as existing_fp:
-                        existing_meta = json.load(existing_fp)
-                    if isinstance(existing_meta, dict):
+                        loaded_existing = json.load(existing_fp)
+                    if isinstance(loaded_existing, dict):
+                        existing_meta = loaded_existing
                         for preserved_key in (
                             "nwcConnected",
                             "nwcRelayHost",
@@ -1836,7 +1843,33 @@ def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
                                 merged_meta[preserved_key] = existing_meta[preserved_key]
                 except (IOError, OSError, json.JSONDecodeError):
                     pass
-            merged_meta.pop("pendingOrder", None)
+
+            claimed_hash = str(merged_meta.get("paymentHash") or "").strip()
+            if claimed_hash and isinstance(existing_meta.get("pendingOrders"), dict):
+                rem_orders = {
+                    k: v
+                    for k, v in existing_meta["pendingOrders"].items()
+                    if k != claimed_hash and isinstance(v, dict)
+                }
+                if rem_orders:
+                    merged_meta["pendingOrders"] = rem_orders
+                else:
+                    merged_meta.pop("pendingOrders", None)
+                existing_po = (
+                    existing_meta.get("pendingOrder")
+                    if isinstance(existing_meta.get("pendingOrder"), dict)
+                    else None
+                )
+                if existing_po and existing_po.get("paymentHash") and existing_po.get("paymentHash") != claimed_hash:
+                    merged_meta["pendingOrder"] = existing_po
+                elif rem_orders:
+                    merged_meta["pendingOrder"] = list(rem_orders.values())[-1]
+                else:
+                    merged_meta.pop("pendingOrder", None)
+            else:
+                merged_meta.pop("pendingOrder", None)
+                merged_meta.pop("pendingOrders", None)
+
             backup_existing_wireguard_configs()
             conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
             _write_file_secure(conf_path, config_text)
@@ -1847,7 +1880,11 @@ def _persist_tunnelsats_config_and_meta(config_text: str, meta: dict) -> bool:
             return False
 
 
-def apply_vpn_port(port: Any, data_dir: Optional[str] = None) -> bool:
+def apply_vpn_port(
+    port: Any,
+    data_dir: Optional[str] = None,
+    expected_pubkey: Optional[str] = None,
+) -> bool:
     """Synchronize a dynamic vpn_port across tunnelsats-meta.json and active WireGuard .conf files."""
     if isinstance(port, bool) or port is None:
         return False
@@ -1869,10 +1906,14 @@ def apply_vpn_port(port: Any, data_dir: Optional[str] = None) -> bool:
             try:
                 with open(meta_path, "r", encoding="utf-8") as fp:
                     meta = json.load(fp)
-                if isinstance(meta, dict) and meta.get("vpnPort") != port_int:
-                    meta["vpnPort"] = port_int
-                    _write_file_secure(meta_path, json.dumps(meta, indent=2))
-                    changed_any = True
+                if isinstance(meta, dict):
+                    active_pubkey = str(meta.get("wgPublicKey") or "").strip()
+                    if expected_pubkey and active_pubkey and active_pubkey != str(expected_pubkey).strip():
+                        return False
+                    if meta.get("vpnPort") != port_int:
+                        meta["vpnPort"] = port_int
+                        _write_file_secure(meta_path, json.dumps(meta, indent=2))
+                        changed_any = True
             except (IOError, OSError, json.JSONDecodeError) as exc:
                 app.logger.warning(f"Failed to update vpnPort in {meta_path}: {exc}")
 
@@ -3454,6 +3495,7 @@ _nwc_scheduler_thread: Optional[threading.Thread] = None
 _nwc_scheduler_stop = threading.Event()
 _nwc_retry_in_flight_lock = threading.Lock()
 _nwc_retry_in_flight = False
+_nwc_autorenew_exec_lock = threading.Lock()
 
 
 def _nwc_auto_renew_due_without_sync() -> bool:
@@ -3502,6 +3544,8 @@ def _nwc_auto_renew_due_without_sync() -> bool:
 
 def _trigger_async_nwc_auto_renew_if_due():
     global _nwc_retry_in_flight
+    if TUNNELSATS_ROLE == "daemon":
+        return
     if not _nwc_auto_renew_due_without_sync():
         return
     with _nwc_retry_in_flight_lock:
@@ -3571,12 +3615,13 @@ def _trigger_lazy_subscription_sync(wg_pubkey: str):
                         if key in status_info:
                             sync_payload[key] = status_info[key]
                     success = _update_local_metadata(sync_payload, wg_pubkey=pubkey)
-                    raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
-                    if raw_vpn_port is not None:
-                        apply_vpn_port(raw_vpn_port)
                     if success:
+                        raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
+                        if raw_vpn_port is not None:
+                            apply_vpn_port(raw_vpn_port, expected_pubkey=pubkey)
                         app.logger.info(f"Successfully synced subscription expiry to {expiry} via background sync")
-                        _run_background_nwc_auto_renew()
+                        if TUNNELSATS_ROLE != "daemon":
+                            _run_background_nwc_auto_renew()
                     else:
                         app.logger.warning("Background subscription sync: Failed to update local metadata")
                         with _subscription_sync_lock:
@@ -3686,64 +3731,96 @@ def _create_renewal_invoice_upstream(
 
 
 def _run_background_nwc_auto_renew() -> Dict[str, Any]:
-    meta_path = os.path.join(DATA_DIR, META_FILE)
-    with _metadata_lock:
-        if not os.path.exists(meta_path):
-            return {"attempted": False, "reason": "no_meta"}
+    if not os.path.exists(DATA_DIR):
+        return {"attempted": False, "reason": "no_meta"}
+    if not _nwc_autorenew_exec_lock.acquire(blocking=False):
+        return {"attempted": False, "reason": "already_in_progress"}
+
+    lock_path = os.path.join(DATA_DIR, ".nwc-autorenew.lock")
+    lock_fd: Optional[int] = None
+    try:
         try:
-            with open(meta_path, "r", encoding="utf-8") as fp:
-                meta = json.load(fp)
-        except (IOError, OSError, json.JSONDecodeError):
-            return {"attempted": False, "reason": "meta_unreadable"}
-        if not isinstance(meta, dict) or not meta.get("nwcConnected"):
-            return {"attempted": False, "reason": "nwc_not_connected"}
-        meta_snapshot = dict(meta)
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"attempted": False, "reason": "already_in_progress"}
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                return {"attempted": False, "reason": "already_in_progress"}
 
-    result = maybe_nwc_auto_renew(
-        DATA_DIR,
-        meta_snapshot,
-        create_renewal_fn=_create_renewal_invoice_upstream,
-    )
-    if result.get("state_changed") or result.get("attempted"):
+        meta_path = os.path.join(DATA_DIR, META_FILE)
         with _metadata_lock:
+            if not os.path.exists(meta_path):
+                return {"attempted": False, "reason": "no_meta"}
             try:
-                current_meta: Dict[str, Any] = {}
-                if os.path.exists(meta_path):
-                    with open(meta_path, "r", encoding="utf-8") as fp:
-                        loaded = json.load(fp)
-                        if isinstance(loaded, dict):
-                            current_meta = loaded
-                for key in (
-                    "nwcAutoRenewState",
-                    "pendingRenewal",
-                    "lastDuration",
-                    "lastAmountSats",
-                ):
-                    if key in meta_snapshot:
-                        current_meta[key] = meta_snapshot[key]
-                    else:
-                        current_meta.pop(key, None)
-                _write_file_secure(meta_path, json.dumps(current_meta, indent=2))
-            except (IOError, OSError, json.JSONDecodeError) as exc:
-                app.logger.warning(f"Failed to persist NWC auto-renewal state: {exc}")
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+            except (IOError, OSError, json.JSONDecodeError):
+                return {"attempted": False, "reason": "meta_unreadable"}
+            if not isinstance(meta, dict) or not meta.get("nwcConnected"):
+                return {"attempted": False, "reason": "nwc_not_connected"}
+            meta_snapshot = dict(meta)
 
-    # Refresh subscription expiry immediately after a successful NWC auto-renewal payment
-    if result.get("success"):
-        wg_pubkey = str(meta_snapshot.get("wgPublicKey") or "").strip()
-        if wg_pubkey:
+        def _persist_nwc_meta_snapshot(snapshot: Dict[str, Any]) -> None:
+            with _metadata_lock:
+                try:
+                    current_meta: Dict[str, Any] = {}
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r", encoding="utf-8") as fp:
+                            loaded = json.load(fp)
+                            if isinstance(loaded, dict):
+                                current_meta = loaded
+                    for key in (
+                        "nwcAutoRenewState",
+                        "pendingRenewal",
+                        "lastDuration",
+                        "lastAmountSats",
+                    ):
+                        if key in snapshot:
+                            current_meta[key] = snapshot[key]
+                        else:
+                            current_meta.pop(key, None)
+                    _write_file_secure(meta_path, json.dumps(current_meta, indent=2))
+                except (IOError, OSError, json.JSONDecodeError) as exc:
+                    app.logger.warning(f"Failed to persist NWC auto-renewal state: {exc}")
+
+        result = maybe_nwc_auto_renew(
+            DATA_DIR,
+            meta_snapshot,
+            create_renewal_fn=_create_renewal_invoice_upstream,
+            persist_meta_fn=_persist_nwc_meta_snapshot,
+        )
+        if result.get("state_changed") or result.get("attempted"):
+            _persist_nwc_meta_snapshot(meta_snapshot)
+
+        # Refresh subscription expiry immediately after a successful NWC auto-renewal payment
+        if result.get("success"):
+            wg_pubkey = str(meta_snapshot.get("wgPublicKey") or "").strip()
+            if wg_pubkey:
+                try:
+                    status_info = _fetch_subscription_status(wg_pubkey)
+                    if isinstance(status_info, dict):
+                        expiry = status_info.get("expiry") or status_info.get("expiresAt")
+                        if expiry:
+                            _update_local_metadata(
+                                {"expiresAt": expiry, **status_info},
+                                payment_hash=result.get("payment_hash"),
+                                wg_pubkey=wg_pubkey,
+                            )
+                except Exception as exc:
+                    app.logger.debug(f"Post-NWC renewal status sync skipped: {exc}")
+        return result
+    finally:
+        if lock_fd is not None:
             try:
-                status_info = _fetch_subscription_status(wg_pubkey)
-                if isinstance(status_info, dict):
-                    expiry = status_info.get("expiry") or status_info.get("expiresAt")
-                    if expiry:
-                        _update_local_metadata(
-                            {"expiresAt": expiry, **status_info},
-                            payment_hash=result.get("payment_hash"),
-                            wg_pubkey=wg_pubkey,
-                        )
-            except Exception as exc:
-                app.logger.debug(f"Post-NWC renewal status sync skipped: {exc}")
-    return result
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        _nwc_autorenew_exec_lock.release()
 
 
 def _nwc_auto_renew_scheduler_tick() -> Dict[str, Any]:
@@ -3779,10 +3856,10 @@ def _nwc_auto_renew_scheduler_tick() -> Dict[str, Any]:
             if isinstance(status_info, dict):
                 expiry = status_info.get("expiry") or status_info.get("expiresAt")
                 if expiry:
-                    _update_local_metadata({"expiresAt": expiry, **status_info}, wg_pubkey=wg_pubkey)
-                    raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
-                    if raw_vpn_port is not None:
-                        apply_vpn_port(raw_vpn_port)
+                    if _update_local_metadata({"expiresAt": expiry, **status_info}, wg_pubkey=wg_pubkey):
+                        raw_vpn_port = status_info.get("vpn_port", status_info.get("vpnPort"))
+                        if raw_vpn_port is not None:
+                            apply_vpn_port(raw_vpn_port, expected_pubkey=wg_pubkey)
                 else:
                     with _subscription_sync_lock:
                         _next_subscription_sync_time[wg_pubkey] = time.time() + RETRY_INTERVAL_SECONDS
@@ -3796,6 +3873,8 @@ def _nwc_auto_renew_scheduler_tick() -> Dict[str, Any]:
 def start_nwc_auto_renew_scheduler(interval_seconds: Optional[float] = None) -> bool:
     """Start the background server-side NWC auto-renewal scheduler daemon thread if not running."""
     global _nwc_scheduler_thread
+    if TUNNELSATS_ROLE == "daemon":
+        return False
     interval = max(10.0, float(interval_seconds or NWC_SCHEDULER_INTERVAL_SECONDS))
     with _nwc_scheduler_lock:
         if _nwc_scheduler_thread is not None and _nwc_scheduler_thread.is_alive():
@@ -3834,8 +3913,31 @@ def create_subscription():
             return jsonify({"success": False, "error": "Invalid referralCode format."}), 400
         payload["referralCode"] = ref_code.strip()
 
+    meta_path = os.path.join(DATA_DIR, META_FILE)
+    custom_pub = str(payload.get("wgPublicKey") or "").strip()
+    if not custom_pub and os.path.exists(meta_path):
+        with _metadata_lock:
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fp:
+                    loaded_meta = json.load(fp)
+                if isinstance(loaded_meta, dict):
+                    existing_po = loaded_meta.get("pendingOrder")
+                    if (
+                        isinstance(existing_po, dict)
+                        and _is_pending_invoice_active(existing_po)
+                        and str(existing_po.get("serverId") or "") == str(payload.get("serverId") or "")
+                        and str(existing_po.get("duration") or "") == str(payload.get("duration") or "")
+                        and str(existing_po.get("referralCode") or "") == str(payload.get("referralCode") or "")
+                        and existing_po.get("wgPublicKey")
+                        and existing_po.get("wgPrivateKey")
+                    ):
+                        sanitized = _sanitize_pending_record(existing_po) or {}
+                        return jsonify({**sanitized, "reused": True}), 200
+            except (IOError, OSError, json.JSONDecodeError):
+                pass
+
     local_priv = ""
-    local_pub = str(payload.get("wgPublicKey") or "").strip()
+    local_pub = custom_pub
     if not local_pub:
         local_priv, local_pub = generate_wg_keypair()
         if payload.get("generateLocalKey") is True:
@@ -3854,12 +3956,12 @@ def create_subscription():
                         "amountSats": data.get("amountSats", data.get("amount")),
                         "serverId": str(payload.get("serverId") or ""),
                         "duration": payload.get("duration"),
+                        "referralCode": str(payload.get("referralCode") or ""),
                         "wgPublicKey": local_pub,
                         "wgPrivateKey": local_priv,
                         "expiresAt": str(data.get("expiresAt") or ""),
                         "createdAt": datetime.now(timezone.utc).isoformat(),
                     }
-                    meta_path = os.path.join(DATA_DIR, META_FILE)
                     with _metadata_lock:
                         meta: Dict[str, Any] = {}
                         if os.path.exists(meta_path):
@@ -3870,6 +3972,18 @@ def create_subscription():
                                         meta = loaded
                             except (IOError, OSError, json.JSONDecodeError):
                                 meta = {}
+                        pending_orders = (
+                            dict(meta.get("pendingOrders") or {})
+                            if isinstance(meta.get("pendingOrders"), dict)
+                            else {}
+                        )
+                        ph_key = str(pending_order["paymentHash"])
+                        pending_orders.pop(ph_key, None)
+                        pending_orders[ph_key] = pending_order
+                        while len(pending_orders) > 20:
+                            oldest_key = next(iter(pending_orders))
+                            pending_orders.pop(oldest_key, None)
+                        meta["pendingOrders"] = pending_orders
                         meta["pendingOrder"] = pending_order
                         _write_file_secure(meta_path, json.dumps(meta, indent=2))
             except Exception as exc:
@@ -4080,7 +4194,7 @@ def _update_local_metadata(
             meta["lastAmountSats"] = subscription_data["amountSats"]
             changed = True
 
-        telemetry_keys = (
+        bandwidth_counter_keys = (
             "bandwidth_used_gb",
             "bandwidthUsedGb",
             "bandwidth_limit_gb",
@@ -4089,9 +4203,12 @@ def _update_local_metadata(
             "resetsThisMonth",
             "max_resets_per_month",
             "maxResetsPerMonth",
+        )
+        telemetry_keys = bandwidth_counter_keys + (
             "status",
             "subscription_status",
             "subscriptionStatus",
+            "lastSyncedAt",
         )
         if any(k in subscription_data for k in telemetry_keys):
             sub_tel = (
@@ -4138,9 +4255,10 @@ def _update_local_metadata(
             )
             if status_val:
                 sub_tel["status"] = str(status_val)
-            sub_tel["lastSyncedAt"] = (
-                subscription_data.get("lastSyncedAt") or datetime.now(timezone.utc).isoformat()
-            )
+            if any(k in subscription_data for k in bandwidth_counter_keys) or "lastSyncedAt" in subscription_data:
+                sub_tel["lastSyncedAt"] = (
+                    subscription_data.get("lastSyncedAt") or datetime.now(timezone.utc).isoformat()
+                )
             meta["subscriptionTelemetry"] = sub_tel
             changed = True
 
@@ -4172,16 +4290,25 @@ def claim_subscription():
         payload["referralCode"] = ref_code.strip()
 
     pending_order: Dict[str, Any] = {}
+    req_hash = str(payload.get("paymentHash") or "").strip()
     meta_path = os.path.join(DATA_DIR, META_FILE)
     with _metadata_lock:
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as fp:
                     loaded_meta = json.load(fp)
-                if isinstance(loaded_meta, dict) and isinstance(loaded_meta.get("pendingOrder"), dict):
-                    po = loaded_meta["pendingOrder"]
-                    if not po.get("paymentHash") or po.get("paymentHash") == payload.get("paymentHash"):
-                        pending_order = dict(po)
+                if isinstance(loaded_meta, dict):
+                    pending_orders_map = (
+                        loaded_meta.get("pendingOrders")
+                        if isinstance(loaded_meta.get("pendingOrders"), dict)
+                        else {}
+                    )
+                    if req_hash and isinstance(pending_orders_map.get(req_hash), dict):
+                        pending_order = dict(pending_orders_map[req_hash])
+                    elif isinstance(loaded_meta.get("pendingOrder"), dict):
+                        po = loaded_meta["pendingOrder"]
+                        if not po.get("paymentHash") or po.get("paymentHash") == req_hash:
+                            pending_order = dict(po)
             except (IOError, OSError, json.JSONDecodeError):
                 pass
 
@@ -4239,6 +4366,33 @@ def claim_subscription():
                 or "unknown"
             ) or "unknown"
 
+            expected_client_pub = str(
+                pending_order.get("wgPublicKey") or payload.get("wgPublicKey") or ""
+            ).strip()
+            has_server_pub = bool(
+                server_data.get("publicKey")
+                or server_data.get("wgPublicKey")
+                or peer_data.get("serverPublicKey")
+                or data.get("serverPublicKey")
+                or data.get("peerPublicKey")
+            )
+            if (
+                peer_data.get("publicKey")
+                and has_server_pub
+                and expected_client_pub
+                and str(peer_data.get("publicKey")).strip() != expected_client_pub
+            ):
+                app.logger.error("Upstream claim returned mismatched client peer.publicKey.")
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "Invalid upstream payload: peer.publicKey does not match local WireGuard public key",
+                        }
+                    ),
+                    400,
+                )
+
             full_config = data.get("config") or data.get("fullConfig") or data.get("wireguardConfig")
             if not full_config:
                 local_priv = (
@@ -4268,7 +4422,7 @@ def claim_subscription():
             meta = {
                 "serverId": server_id,
                 "paymentHash": payment_hash,
-                "wgPublicKey": parsed.get("wgPublicKey") or payload.get("wgPublicKey", ""),
+                "wgPublicKey": parsed.get("wgPublicKey") or payload.get("wgPublicKey") or pending_order.get("wgPublicKey") or "",
                 "peerAddress": peer_data.get("address", parsed.get("peerAddress", "")),
                 "presharedKey": peer_data.get("presharedKey", parsed.get("presharedKey", "")),
                 "vpnPort": data.get("vpnPort") or parsed.get("vpnPort", 0),
@@ -4557,6 +4711,12 @@ def nwc_pay():
                                 if amount_sats is None:
                                     amount_sats = cand.get("amountSats")
                                 break
+                        if not invoice and isinstance(meta.get("pendingOrders"), dict):
+                            cand = meta["pendingOrders"].get(payment_hash)
+                            if isinstance(cand, dict):
+                                invoice = str(cand.get("invoice") or "").strip()
+                                if amount_sats is None:
+                                    amount_sats = cand.get("amountSats")
                 except (IOError, OSError, json.JSONDecodeError):
                     pass
 
@@ -5343,7 +5503,7 @@ def export_config():
         return jsonify({"success": False, "error": "No configuration directory found."}), 404
     conf_path = os.path.join(DATA_DIR, "tunnelsats.conf")
     if not os.path.exists(conf_path):
-        # Filter to tunnelsats-prefixed profiles only — matching runtime discovery;
+        # Filter to tunnelsats-prefixed profiles only - matching runtime discovery;
         # non-TunnelSats configs (e.g. mullvad.conf) must never be exported as a backup.
         confs = [
             f for f in os.listdir(DATA_DIR)
@@ -5429,6 +5589,12 @@ def get_metadata():
                         meta_data["pendingOrder"] = _sanitize_pending_record(
                             meta_data["pendingOrder"]
                         )
+                    if isinstance(meta_data.get("pendingOrders"), dict):
+                        meta_data["pendingOrders"] = {
+                            k: _sanitize_pending_record(v)
+                            for k, v in meta_data["pendingOrders"].items()
+                            if isinstance(v, dict)
+                        }
                 else:
                     meta_data = {}
         except FileNotFoundError:
