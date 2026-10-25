@@ -500,6 +500,25 @@ def read_app_version():
         # Graceful fallback for all manifest-reading failures
         return APP_VERSION
 
+
+_PACKAGE_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}")
+
+
+def get_user_agent() -> str:
+    """Return the first-party Umbrel User-Agent header for TunnelSats Public API attribution."""
+    raw = str(read_app_version() or APP_VERSION).strip()
+    semver = raw[1:] if raw.startswith(("v", "V")) else raw
+    version = semver if _PACKAGE_VERSION_RE.fullmatch(semver) else "unknown"
+    return f"TunnelSats-Umbrel/{version}"
+
+
+def _upstream_headers() -> Dict[str, str]:
+    """Return canonical HTTP headers for outbound TunnelSats Public API requests."""
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": get_user_agent(),
+    }
+
 def get_server_geodata(s_id):
     """Unified lookup for server coordinates, labels and flags."""
     if not s_id:
@@ -3283,7 +3302,7 @@ def protect_management_response(response):
 # Proxy function to forward requests to the core Tunnelsats API
 def proxy_request(method, endpoint, payload=None):
     url = f"{TUNNELSATS_API_URL}/{endpoint}"
-    headers = {"Content-Type": "application/json"}
+    headers = _upstream_headers()
     try:
         if method == "GET":
             resp = requests.get(url, headers=headers, timeout=10)
@@ -3398,7 +3417,12 @@ def _fetch_subscription_status(wg_public_key: str) -> Optional[Dict[str, Any]]:
     """Fetch subscription status from the TunnelSats Public API."""
     try:
         url = f"{TUNNELSATS_API_URL}/subscription/status"
-        res = requests.post(url, json={"wgPublicKey": wg_public_key}, timeout=10)
+        res = requests.post(
+            url,
+            json={"wgPublicKey": wg_public_key},
+            headers=_upstream_headers(),
+            timeout=10,
+        )
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict):
@@ -3721,7 +3745,7 @@ def _create_renewal_invoice_upstream(
     resp = requests.post(
         url,
         json={"wgPublicKey": wg_pubkey, "serverId": server_id, "duration": duration_months},
-        headers={"Content-Type": "application/json"},
+        headers=_upstream_headers(),
         timeout=15,
     )
     if resp.status_code == 200:
@@ -3996,7 +4020,7 @@ def check_subscription(paymentHash):
     # Proxy the check request to the core API
     url = f"{TUNNELSATS_API_URL}/subscription/{paymentHash}"
     try:
-        resp = requests.get(url, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.get(url, headers=_upstream_headers(), timeout=10)
         if resp.status_code in (200, 202):
             try:
                 data = resp.json()
@@ -4322,7 +4346,7 @@ def claim_subscription():
     app.logger.info("Initiating subscription claim upstream")
     
     try:
-        resp = requests.post(url, json=upstream_payload, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(url, json=upstream_payload, headers=_upstream_headers(), timeout=10)
         app.logger.info(f"Upstream claim responded with HTTP {resp.status_code}, len: {len(resp.content)}")
 
         excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
@@ -4901,7 +4925,7 @@ def reachability_test():
         resp = requests.post(
             url,
             json={"socket": target_socket},
-            headers={"Content-Type": "application/json"},
+            headers=_upstream_headers(),
             timeout=15,
         )
         if resp.status_code == 200:

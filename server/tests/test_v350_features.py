@@ -1175,3 +1175,53 @@ def test_subscription_create_requires_management_csrf_when_security_enabled(data
         app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = False
 
 
+def test_umbrel_user_agent_header_sent_on_all_outbound_public_api_requests(client, data_dir):
+    expected_version = app_module.read_app_version().lstrip("v")
+    expected_ua = f"TunnelSats-Umbrel/{expected_version}"
+    assert app_module.get_user_agent() == expected_ua
+    assert app_module._upstream_headers() == {
+        "Content-Type": "application/json",
+        "User-Agent": expected_ua,
+    }
+
+    with patch.object(app_module, "read_app_version", return_value="invalid version!"):
+        assert app_module.get_user_agent() == "TunnelSats-Umbrel/unknown"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"Content-Type": "application/json"}
+    mock_resp.content = b'{"status":"active"}'
+    mock_resp.json.return_value = {"status": "active"}
+
+    with patch("app.requests.post", return_value=mock_resp) as mock_post, patch(
+        "app.requests.get", return_value=mock_resp
+    ) as mock_get:
+        app_module.proxy_request("GET", "servers")
+        assert mock_get.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        app_module.proxy_request("POST", "subscription/create", {"serverId": "de2", "duration": 1})
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        app_module._fetch_subscription_status("pubKey123")
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        app_module._create_renewal_invoice_upstream("pubKey123", "de2", 3)
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        client.get("/api/subscription/hash123")
+        assert mock_get.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        client.post(
+            "/api/subscription/claim",
+            json={"paymentHash": "hash123", "wgPublicKey": "pubKey123"},
+        )
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+        client.post(
+            "/api/local/test-reachability",
+            json={"socket": f"{'02' + 'a' * 64}@de2.tunnelsats.com:31234"},
+        )
+        assert mock_post.call_args.kwargs["headers"]["User-Agent"] == expected_ua
+
+
+

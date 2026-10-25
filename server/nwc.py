@@ -1269,7 +1269,7 @@ def _ws_open(relay_url: str, route_via_tor: bool = False, timeout: float = 15.0)
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {ws_key}\r\n"
             "Sec-WebSocket-Version: 13\r\n"
-            "User-Agent: TunnelSats/3.5.0\r\n\r\n"
+            "User-Agent: TunnelSats-Umbrel/3.5.0\r\n\r\n"
         )
         sock.sendall(handshake.encode("ascii"))
 
