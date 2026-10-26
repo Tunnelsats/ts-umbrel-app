@@ -318,7 +318,16 @@ run_promote() {
 
     IMAGE="tunnelsats/ts-umbrel-app:${VERSION}"
     log_info "Polling Docker Hub for $IMAGE multi-arch index digest..."
-    DIGEST=$(docker buildx imagetools inspect "$IMAGE" | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
+    DIGEST=""
+    if command -v docker >/dev/null 2>&1; then
+        DIGEST=$(docker buildx imagetools inspect "$IMAGE" 2>/dev/null | grep "Digest: " | head -1 | awk '{print $2}' || echo "")
+    fi
+    if [ -z "$DIGEST" ] && command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        DIGEST=$(curl -fsSL --connect-timeout 10 --max-time 30 "https://hub.docker.com/v2/repositories/tunnelsats/ts-umbrel-app/tags/${VERSION#v}" 2>/dev/null | jq -r '.digest // empty' || echo "")
+    fi
+    if ! [[ "${DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        DIGEST=""
+    fi
 
     if [ -z "$DIGEST" ]; then
         log_error "Failed to retrieve digest from Docker Hub. Is the image published?"

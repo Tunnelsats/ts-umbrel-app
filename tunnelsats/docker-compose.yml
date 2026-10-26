@@ -10,7 +10,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   tunnelsats-web:
-    image: tunnelsats/ts-umbrel-app:3.4.4
+    image: tunnelsats/ts-umbrel-app:3.5.0
     container_name: tunnelsats-web
     restart: on-failure
     user: "1000:1000"
@@ -31,7 +31,7 @@ services:
       - ${APP_DATA_DIR}/runtime:/run/tunnelsats
 
   tunnelsats-daemon:
-    image: tunnelsats/ts-umbrel-app:3.4.4
+    image: tunnelsats/ts-umbrel-app:3.5.0
     container_name: tunnelsats-daemon
     restart: on-failure
     network_mode: "host"
@@ -47,7 +47,7 @@ services:
       - SECURE_MODE=${SECURE_MODE:-false}
       - MANAGEMENT_BROWSER_SECURITY_ENABLED=false
     volumes:
-      # Persistent peer directory (Uninstall-safe)
+      # Persistent application state directory
       - ${APP_DATA_DIR}/../tunnelsats-data:/data
       # Read-only legacy config source for one-time upgrades from older layouts
       - ${APP_DATA_DIR}/.:/migration_source:ro

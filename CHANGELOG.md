@@ -31,3 +31,7 @@
 ## [3.4.4]
 
 - Harden container CA trust store by distrusting compromised eMudhra (emSign) root CAs and enforcing system CA bundle validation
+
+## [3.5.0]
+
+- Add NWC auto-renewal engine, 3D server globe, subscription timeline ring, Diagnostics & Logs drawer, and 20% faster test suite
