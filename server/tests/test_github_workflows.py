@@ -15,6 +15,7 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEPENDABOT_PATH = REPO_ROOT / ".github" / "dependabot.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 AUTO_MERGE_PATH = WORKFLOWS_DIR / "dependabot-auto-merge.yml"
 TEST_WORKFLOW_PATH = WORKFLOWS_DIR / "test.yml"
@@ -23,6 +24,14 @@ TEST_WORKFLOW_PATH = WORKFLOWS_DIR / "test.yml"
 def load_workflow(path):
     with path.open(encoding="utf-8") as source:
         return yaml.safe_load(source)
+
+
+def test_dependabot_enforces_three_day_cooldown_across_all_ecosystems():
+    config = load_workflow(DEPENDABOT_PATH)
+    updates = config.get("updates", [])
+    assert len(updates) == 4
+    for entry in updates:
+        assert entry.get("cooldown", {}).get("default-days") == 3
 
 
 def workflow_triggers(workflow):
