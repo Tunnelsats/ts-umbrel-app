@@ -35,3 +35,7 @@
 ## [3.5.0]
 
 - Add NWC auto-renewal engine, 3D server globe, subscription timeline ring, Diagnostics & Logs drawer, and 20% faster test suite
+
+## [3.6.0]
+
+- Add native Umbrel home screen widgets (2x2 Shield Grid and Subscription & Bandwidth Overview) with unified fail-closed status badges
