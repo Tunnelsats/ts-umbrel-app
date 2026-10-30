@@ -5064,6 +5064,7 @@ def local_session():
 
 
 WIDGET_STATUS_CACHE_TTL_SECONDS = 5.0
+_widget_status_build_lock = threading.Lock()
 _widget_status_cache_lock = threading.Lock()
 _widget_status_cache: Dict[str, Any] = {
     "gen": 0,
@@ -5555,7 +5556,6 @@ def _get_widget_status_dict() -> Dict[str, Any]:
     pre_sig = _widget_state_signature()
     now_mono = time.monotonic()
     with _widget_status_cache_lock:
-        pre_gen = int(_widget_status_cache.get("gen", 0))
         cached = _widget_status_cache["data"]
         if (
             cached is not None
@@ -5564,15 +5564,28 @@ def _get_widget_status_dict() -> Dict[str, Any]:
         ):
             return cached
 
-    fresh = _build_local_status_dict()
-    post_sig = _widget_state_signature()
-    if post_sig == pre_sig:
+    with _widget_status_build_lock:
+        pre_sig = _widget_state_signature()
+        now_mono = time.monotonic()
         with _widget_status_cache_lock:
-            if int(_widget_status_cache.get("gen", 0)) == pre_gen:
-                _widget_status_cache["ts"] = time.monotonic()
-                _widget_status_cache["signature"] = pre_sig
-                _widget_status_cache["data"] = fresh
-    return fresh
+            pre_gen = int(_widget_status_cache.get("gen", 0))
+            cached = _widget_status_cache["data"]
+            if (
+                cached is not None
+                and _widget_status_cache["signature"] == pre_sig
+                and (now_mono - _widget_status_cache["ts"]) < ttl
+            ):
+                return cached
+
+        fresh = _build_local_status_dict()
+        post_sig = _widget_state_signature()
+        if post_sig == pre_sig:
+            with _widget_status_cache_lock:
+                if int(_widget_status_cache.get("gen", 0)) == pre_gen:
+                    _widget_status_cache["ts"] = time.monotonic()
+                    _widget_status_cache["signature"] = pre_sig
+                    _widget_status_cache["data"] = fresh
+        return fresh
 
 
 @app.route("/api/local/widgets/status", methods=["GET"])

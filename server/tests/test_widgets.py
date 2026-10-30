@@ -592,3 +592,146 @@ def test_widget_status_cache_skips_caching_when_metadata_mutates_mid_build(clien
     finally:
         app.config.pop("WIDGET_STATUS_CACHE_TTL", None)
         app_module._invalidate_widget_status_cache()
+
+
+def test_widgets_stopped_target_node_never_reports_active(client, env_setup, monkeypatch):
+    """Regression for Greptile P1: if LND stops while rules_synced and lnd.conf remain, never report Active."""
+    _seed_healthy_state(env_setup, node_type="lnd", nwc=True, days=28, used_gb=14.2, limit_gb=90.0)
+    monkeypatch.setattr(app_module, "SECURE_MODE", False)
+
+    dataplane_stale_synced = {
+        "dataplane_mode": "docker",
+        "target_container": "lightning_lnd_1",
+        "target_ip": "10.21.21.9",
+        "target_impl": "lnd",
+        "docker_network": "umbrel_main_network",
+        "forwarding_port": 36789,
+        "rules_synced": True,
+        "ipv4_rules_synced": True,
+        "ipv6_rules_synced": True,
+        "dns_protected": True,
+        "decommissioned": False,
+        "last_reconcile_at": datetime.now(timezone.utc).isoformat(),
+        "last_error": None,
+    }
+
+    # 1. Pre-reconcile window: LND stopped, rules_synced still True, lnd.conf intact
+    with (
+        patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+        patch.object(app_module, "_trigger_lazy_subscription_sync"),
+        patch.object(app_module, "read_dataplane_state", return_value=dataplane_stale_synced),
+        patch.object(app_module, "lnd_exists", return_value=False),
+        patch.object(app_module, "cln_exists", return_value=False),
+        patch.object(app_module, "list_containers", return_value=[]),
+    ):
+        s_body = client.get("/api/local/widgets/status").get_json()
+        assert s_body["items"][0] == {"title": "LND Shield", "text": "🔴 Node Off", "subtext": ""}
+
+        o_body = client.get("/api/local/widgets/overview").get_json()
+        assert o_body["title"] == "🔴 Node Off · LND · 🇺🇸 us3"
+
+    # 2. Unrelated CLN container running while protected LND is stopped -> still 🔴 Node Off (never 🟢 Active)
+    env_setup["cln_conf"].write_text("network=bitcoin\n", encoding="utf-8")
+    cln_only_containers = [
+        {"Id": "cln1", "Names": ["/core-lightning_lightningd_1"], "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.96"}}}}
+    ]
+    with (
+        patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+        patch.object(app_module, "_trigger_lazy_subscription_sync"),
+        patch.object(app_module, "read_dataplane_state", return_value=dataplane_stale_synced),
+        patch.object(app_module, "lnd_exists", return_value=False),
+        patch.object(app_module, "cln_exists", return_value=True),
+        patch.object(app_module, "list_containers", return_value=cln_only_containers),
+    ):
+        s_cln_side = client.get("/api/local/widgets/status").get_json()
+        assert s_cln_side["items"][0] == {"title": "LND Shield", "text": "🔴 Node Off", "subtext": ""}
+
+    # 3. Post-reconcile window: rules_synced=False with Waiting for the protected node to start
+    dataplane_waiting = {
+        **dataplane_stale_synced,
+        "rules_synced": False,
+        "last_error": "Waiting for the protected node to start: LND (lightning_lnd_1)",
+    }
+    env_setup["lnd_conf"].unlink()
+    with (
+        patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+        patch.object(app_module, "_trigger_lazy_subscription_sync"),
+        patch.object(app_module, "read_dataplane_state", return_value=dataplane_waiting),
+        patch.object(app_module, "lnd_exists", return_value=False),
+        patch.object(app_module, "cln_exists", return_value=True),
+        patch.object(app_module, "list_containers", return_value=cln_only_containers),
+    ):
+        s_waiting = client.get("/api/local/widgets/status").get_json()
+        assert s_waiting["items"][0] == {"title": "LND Shield", "text": "🔴 Node Off", "subtext": ""}
+
+
+def test_widget_status_cache_singleflights_concurrent_cold_polls(env_setup, monkeypatch):
+    """Regression for Greptile P2: simultaneous cold widget polls share one _build_local_status_dict() call."""
+    import concurrent.futures
+    import threading
+
+    _seed_healthy_state(env_setup, node_type="lnd", nwc=True, days=28, used_gb=14.2, limit_gb=90.0)
+    monkeypatch.setattr(app_module, "SECURE_MODE", True)
+    app.config["TESTING"] = True
+    app.config["MANAGEMENT_BROWSER_SECURITY_ENABLED"] = False
+    app.config["WIDGET_STATUS_CACHE_TTL"] = 5.0
+    app_module._invalidate_widget_status_cache()
+
+    dataplane_ok = {
+        "dataplane_mode": "docker",
+        "target_container": "lightning_lnd_1",
+        "target_ip": "10.21.21.9",
+        "target_impl": "lnd",
+        "docker_network": "umbrel_main_network",
+        "forwarding_port": 36789,
+        "rules_synced": True,
+        "dns_protected": True,
+        "decommissioned": False,
+        "last_reconcile_at": datetime.now(timezone.utc).isoformat(),
+        "last_error": None,
+    }
+
+    orig_build = app_module._build_local_status_dict
+    build_calls = {"count": 0}
+    count_lock = threading.Lock()
+    entered_build = threading.Event()
+    release_build = threading.Event()
+
+    def _slow_build():
+        with count_lock:
+            build_calls["count"] += 1
+        entered_build.set()
+        release_build.wait(timeout=2.0)
+        return orig_build()
+
+    def _poll(path: str):
+        with app.test_client() as local_client:
+            return local_client.get(path).get_json()
+
+    try:
+        with (
+            patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+            patch.object(app_module, "_trigger_lazy_subscription_sync"),
+            patch.object(app_module, "read_dataplane_state", return_value=dataplane_ok),
+            patch.object(app_module, "lnd_exists", return_value=True),
+            patch.object(app_module, "cln_exists", return_value=False),
+            patch.object(app_module, "_build_local_status_dict", side_effect=_slow_build),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f1 = pool.submit(_poll, "/api/local/widgets/status")
+                assert entered_build.wait(timeout=2.0)
+                f2 = pool.submit(_poll, "/api/local/widgets/overview")
+                # Give second worker a moment to reach _get_widget_status_dict() while first build is in flight
+                import time as _t
+                _t.sleep(0.05)
+                release_build.set()
+                res1 = f1.result(timeout=3.0)
+                res2 = f2.result(timeout=3.0)
+
+            assert res1["type"] == "four-stats"
+            assert res2["type"] == "text-with-progress"
+            assert build_calls["count"] == 1
+    finally:
+        release_build.set()
+        app.config.pop("WIDGET_STATUS_CACHE_TTL", None)
+        app_module._invalidate_widget_status_cache()

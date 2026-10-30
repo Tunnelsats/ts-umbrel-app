@@ -64,9 +64,10 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
     - `🟠 Conflict`: Announcement conflict or unverified clearnet/config state.
     - `🟠 Blocked`: Dataplane fail-closed gate active due to operational error.
     - `🟠 Setup`: WireGuard connected, waiting for Lightning node configuration.
-    - `🟡 Syncing`: Target switch or initial dataplane reconciliation pending.
+    - `🟡 Syncing`: Target switch, wallet unlock, or initial dataplane reconciliation pending.
     - `🟡 Pending`: WireGuard handshake pending.
     - `🟡 Starting`: Daemon socket temporarily starting/restarting.
+    - `🔴 Node Off`: WireGuard connected, protected Lightning node is stopped.
     - `🔴 Offline`: WireGuard tunnel disconnected or unconfigured.
     """
     target_impl = str(status_dict.get("target_impl") or "").strip().lower()
@@ -93,15 +94,32 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
     if status_dict.get("_degraded_daemon_unavailable"):
         return ("starting", shield_title, "🟡 Starting", node_short)
 
-    active_routing = cln_routing if target_impl == "cln" else lnd_routing
+    active_detected = (
+        cln_detected if target_impl == "cln" else (lnd_detected if target_impl == "lnd" else False)
+    )
+    active_routing = (
+        cln_routing if target_impl == "cln" else (lnd_routing if target_impl == "lnd" else False)
+    )
     rules_synced = bool(status_dict.get("rules_synced"))
     decommissioned = bool(status_dict.get("decommissioned"))
     conflicts = status_dict.get("announcement_conflicts") or []
     verification_required = bool(status_dict.get("announcement_verification_required"))
     announcement_verified = status_dict.get("announcement_verified")
+    last_error_code = str(status_dict.get("last_error_code") or "").strip()
+    diagnostics = status_dict.get("announcement_diagnostics")
+    only_verification_pending = bool(
+        isinstance(diagnostics, list)
+        and diagnostics
+        and not conflicts
+        and all(
+            isinstance(d, dict) and d.get("kind") == "verification-pending"
+            for d in diagnostics
+        )
+    )
 
     if (
         vpn_active
+        and active_detected
         and active_routing
         and rules_synced
         and not decommissioned
@@ -110,13 +128,29 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
     ):
         return ("active", shield_title, "🟢 Active", node_short)
 
+    if only_verification_pending and vpn_active:
+        return ("syncing", shield_title, "🟡 Syncing", node_short)
+
     if (vpn_active or active_routing) and (
         bool(conflicts) or (verification_required and announcement_verified is False)
     ):
         return ("conflict", shield_title, "🟠 Conflict", node_short)
 
+    if vpn_active and status_dict.get("target_switch_pending"):
+        return ("syncing", shield_title, "🟡 Syncing", node_short)
+
+    if (
+        vpn_active
+        and not active_detected
+        and (active_routing or last_error_code == "protected_node_not_running")
+    ):
+        return ("node_off", shield_title, "🔴 Node Off", node_short)
+
+    if vpn_active and decommissioned:
+        return ("setup", shield_title, "🟠 Setup", node_short)
+
     if vpn_active and active_routing and not rules_synced:
-        if status_dict.get("target_switch_pending") or status_dict.get("last_reconcile_at") is None:
+        if not status_dict.get("last_reconcile_at"):
             return ("syncing", shield_title, "🟡 Syncing", node_short)
         return ("blocked", shield_title, "🟠 Blocked", node_short)
 
@@ -290,6 +324,7 @@ def _format_expiry(
         title = "Expires ⚡" if nwc_healthy else ("Expires ⚠️" if nwc_connected else "Expires")
         hero_map = {
             "active": "Active",
+            "node_off": "Node Off",
             "setup": "Finish Setup",
             "syncing": "Syncing",
             "pending": "Connecting",
