@@ -338,7 +338,8 @@ def test_widgets_fail_closed_conflict_blocked_setup_and_fresh_install(client, en
         o_fresh = client.get("/api/local/widgets/overview").get_json()
         assert o_fresh["title"] == "🔴 Offline · TunnelSats"
         assert o_fresh["text"] == "No Sub"
-        assert o_fresh["progressLabel"] == "Open TunnelSats to get started"
+        assert o_fresh["progressLabel"] == "Open app to get started"
+        assert len(o_fresh["progressLabel"]) <= 24
         assert o_fresh["progress"] == 0.0
 
     # 2. Secure Mode announcement conflict (clearnet externalip in lnd.conf) -> 🟠 Conflict
@@ -380,7 +381,8 @@ def test_widgets_fail_closed_conflict_blocked_setup_and_fresh_install(client, en
         assert o_conf["title"] == "🟠 Conflict · LND · 🇩🇪 de2"
         assert o_conf["text"] == "Fix Config"
         assert o_conf["subtext"] == "· Blocked"
-        assert o_conf["progressLabel"] == "Clearnet gossip leak prevented"
+        assert o_conf["progressLabel"] == "Clearnet leak prevented"
+        assert len(o_conf["progressLabel"]) <= 24
         assert o_conf["progress"] == 0.0
 
     # 3. Tunnel up, but LND externalhosts not configured yet -> 🟠 Setup (never false 🟢 Active)
@@ -409,6 +411,25 @@ def test_widgets_fail_closed_conflict_blocked_setup_and_fresh_install(client, en
         assert s_blk["items"][0] == {"title": "LND Shield", "text": "🟠 Blocked", "subtext": ""}
         assert s_blk["items"][2] == {"title": "Routing", "text": "Blocked", "subtext": ""}
         assert s_blk["items"][3] == {"title": "Action", "text": "Check App", "subtext": ""}
+        o_blk = client.get("/api/local/widgets/overview").get_json()
+        assert o_blk["progressLabel"] == "Fail-closed block active"
+        assert len(o_blk["progressLabel"]) <= 24
+
+    # 5. Configured subscription before first telemetry sync -> concise <= 24-char label on 160px mobile
+    meta_path = env_setup["data_dir"] / "tunnelsats-meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("subscriptionTelemetry", None)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    with (
+        patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+        patch.object(app_module, "_trigger_lazy_subscription_sync"),
+        patch.object(app_module, "read_dataplane_state", return_value=dataplane_ok),
+        patch.object(app_module, "lnd_exists", return_value=True),
+        patch.object(app_module, "cln_exists", return_value=False),
+    ):
+        o_syncing = client.get("/api/local/widgets/overview").get_json()
+        assert o_syncing["progressLabel"] == "Syncing bandwidth..."
+        assert len(o_syncing["progressLabel"]) <= 24
 
 
 def test_split_runtime_web_role_serves_degraded_widget_when_daemon_unavailable(client, env_setup, monkeypatch):

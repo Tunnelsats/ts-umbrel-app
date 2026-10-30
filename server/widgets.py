@@ -194,9 +194,9 @@ def _format_bandwidth(status_dict: Dict[str, Any]) -> Tuple[str, str, str, float
             or status_dict.get("server_domain")
         )
         label = (
-            "Syncing bandwidth telemetry..."
+            "Syncing bandwidth..."
             if has_sub
-            else "Open TunnelSats to get started"
+            else "Open app to get started"
         )
         return ("--", "", label, 0.0)
 
@@ -400,9 +400,9 @@ def build_widget_overview_payload(
     if state_key in ("conflict", "blocked"):
         hero_text = "Fix Config" if state_key == "conflict" else "Check App"
         progress_label = (
-            "Clearnet gossip leak prevented"
+            "Clearnet leak prevented"
             if state_key == "conflict"
-            else "Dataplane fail-closed active"
+            else "Fail-closed block active"
         )
         return {
             "type": "text-with-progress",
