@@ -49,6 +49,11 @@ from nwc import (
     validate_wg_public_key,
     verify_bolt11_invoice,
 )
+from widgets import (
+    build_degraded_status_dict,
+    build_widget_overview_payload,
+    build_widget_status_payload,
+)
 
 # Ensure verbose logging for container restarts is visible and unbuffered
 import logging
@@ -3340,6 +3345,8 @@ def restrict_local_api():
 
 @app.after_request
 def protect_management_response(response):
+    if _management_request_requires_csrf():
+        _invalidate_widget_status_cache()
     if _management_browser_security_enabled() and _management_request_is_sensitive():
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -3529,6 +3536,35 @@ def dispatch_split_runtime_request():
             **request_kwargs,
         )
     except (DaemonUnavailable, ValueError, TypeError):
+        if request.method == "GET" and request.path in (
+            "/api/local/widgets/status",
+            "/api/local/widgets/overview",
+        ):
+            app.logger.info(
+                "Serving degraded widget payload while daemon socket is unavailable: path=%s",
+                request.path,
+            )
+            degraded = build_degraded_status_dict(
+                DATA_DIR,
+                meta_file=META_FILE,
+                metadata_lock=_metadata_lock,
+                server_geodata_fn=get_server_geodata,
+            )
+            if request.path.endswith("/overview"):
+                return jsonify(
+                    build_widget_overview_payload(
+                        degraded,
+                        refresh="5s",
+                        server_geodata_fn=get_server_geodata,
+                    )
+                ), 200
+            return jsonify(
+                build_widget_status_payload(
+                    degraded,
+                    refresh="5s",
+                    server_geodata_fn=get_server_geodata,
+                )
+            ), 200
         app.logger.warning(
             "Privileged management request failed closed: method=%s path=%s",
             request.method,
@@ -5027,8 +5063,64 @@ def local_session():
     )
 
 
+WIDGET_STATUS_CACHE_TTL_SECONDS = 5.0
+_widget_status_cache_lock = threading.Lock()
+_widget_status_cache: Dict[str, Any] = {
+    "gen": 0,
+    "ts": 0.0,
+    "signature": None,
+    "data": None,
+}
+
+
+def _invalidate_widget_status_cache() -> None:
+    with _widget_status_cache_lock:
+        _widget_status_cache["gen"] = int(_widget_status_cache.get("gen", 0)) + 1
+        _widget_status_cache["ts"] = 0.0
+        _widget_status_cache["signature"] = None
+        _widget_status_cache["data"] = None
+
+
+def _widget_state_signature() -> Tuple[Any, ...]:
+    def _stat_sig(path: str) -> Tuple[int, int]:
+        if not path:
+            return (-1, -1)
+        try:
+            st = os.stat(path)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return (-1, -1)
+
+    conf_sigs: List[Tuple[str, int, int]] = []
+    if os.path.isdir(DATA_DIR):
+        try:
+            for fname in sorted(os.listdir(DATA_DIR)):
+                if fname.endswith(".conf"):
+                    st_m, st_s = _stat_sig(os.path.join(DATA_DIR, fname))
+                    conf_sigs.append((fname, st_m, st_s))
+        except OSError:
+            pass
+
+    cln_cfg, _ = resolve_node_config("cln")
+    return (
+        DATA_DIR,
+        SECURE_MODE,
+        K3S_MODE,
+        tuple(conf_sigs),
+        _stat_sig(os.path.join(DATA_DIR, META_FILE)),
+        _stat_sig(os.path.join(DATA_DIR, NWC_WALLET_FILE)),
+        _stat_sig(STATE_FILE),
+        _stat_sig(LND_CONFIG_PATH),
+        _stat_sig(cln_cfg or CLN_CONFIG_PATH),
+    )
+
+
 @app.route("/api/local/status", methods=["GET"])
 def local_status():
+    return jsonify(_build_local_status_dict())
+
+
+def _build_local_status_dict() -> Dict[str, Any]:
     app.logger.debug("Action Request: Fetching local status")
     wg_status, wg_pubkey = _get_wireguard_state()
     if wg_pubkey:
@@ -5380,73 +5472,130 @@ def local_status():
         "state": nwc_state_dict,
     }
 
+    return {
+        "wg_status": wg_status,
+        "wg_pubkey": wg_pubkey,
+        "vpn_internal_ip": vpn_internal_ip,
+        "configs_found": configs,
+        "version": read_app_version(),
+        "lnd_ip": lnd_ip,
+        "cln_ip": cln_ip,
+        "vpn_active": vpn_active,
+        "lnd_detected": lnd_detected,
+        "cln_detected": cln_detected,
+        "lnd_routing_active": lnd_routing_active,
+        "cln_routing_active": cln_routing_active,
+        "server_domain": server_domain,
+        "lat": lat,
+        "lng": lng,
+        "label": label,
+        "flag": flag,
+        "expires_at": expires_at,
+        "vpn_port": vpn_port,
+        "dataplane_mode": dataplane["dataplane_mode"],
+        "secure_mode": SECURE_MODE,
+        "target_container": dataplane["target_container"],
+        "target_ip": dataplane["target_ip"],
+        "target_impl": active_target_impl,
+        "requested_target_impl": requested_target_impl,
+        "target_switch_pending": target_switch_pending,
+        "announcement_verified": announcement_verified,
+        "announcement_verification_source": verification_source,
+        "docker_network": dataplane["docker_network"],
+        "forwarding_port": dataplane["forwarding_port"],
+        "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
+        "rules_synced": effective_rules_synced,
+        "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
+        "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
+        "dns_protected": dns_protected,
+        "decommissioned": dataplane.get("decommissioned", False),
+        "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
+        "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
+        "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
+        "last_reconcile_at": dataplane["last_reconcile_at"],
+        "last_error": effective_error,
+        "last_error_code": last_error_code,
+        "announcement_conflicts": announcement_conflicts,
+        "announcement_diagnostics": announcement_diagnostics,
+        "announcement_help": _announcement_help_or_empty(
+            active_target_impl, str(server_domain), expected_port, target_container
+        ),
+        "announcement_verification_required": verification_required,
+        "subscription_telemetry": telemetry,
+        "bandwidth_used_gb": telemetry["bandwidth_used_gb"],
+        "bandwidth_limit_gb": telemetry["bandwidth_limit_gb"],
+        "bandwidth_resets_this_month": telemetry["bandwidth_resets_this_month"],
+        "max_resets_per_month": telemetry["max_resets_per_month"],
+        "resets_remaining_this_month": telemetry["resets_remaining_this_month"],
+        "next_free_reset_utc": telemetry["next_free_reset_utc"],
+        "pace_pct": telemetry["pace_pct"],
+        "projected_gb": telemetry["projected_gb"],
+        "subscription_status": telemetry["subscription_status"],
+        "last_synced_at": telemetry["last_synced_at"],
+        "nwc": nwc_info,
+        "notices": notices,
+        "pending_order": _sanitize_pending_record(meta_data.get("pendingOrder")),
+        "pending_renewal": _sanitize_pending_record(meta_data.get("pendingRenewal")),
+        "pending_reset": _sanitize_pending_record(meta_data.get("pendingReset")),
+    }
+
+
+def _get_widget_status_dict() -> Dict[str, Any]:
+    configured_ttl = app.config.get("WIDGET_STATUS_CACHE_TTL")
+    if configured_ttl is not None:
+        ttl = max(0.0, float(configured_ttl))
+    elif app.config.get("TESTING"):
+        ttl = 0.0
+    else:
+        ttl = WIDGET_STATUS_CACHE_TTL_SECONDS
+
+    if ttl <= 0.0:
+        return _build_local_status_dict()
+
+    pre_sig = _widget_state_signature()
+    now_mono = time.monotonic()
+    with _widget_status_cache_lock:
+        pre_gen = int(_widget_status_cache.get("gen", 0))
+        cached = _widget_status_cache["data"]
+        if (
+            cached is not None
+            and _widget_status_cache["signature"] == pre_sig
+            and (now_mono - _widget_status_cache["ts"]) < ttl
+        ):
+            return cached
+
+    fresh = _build_local_status_dict()
+    post_sig = _widget_state_signature()
+    if post_sig == pre_sig:
+        with _widget_status_cache_lock:
+            if int(_widget_status_cache.get("gen", 0)) == pre_gen:
+                _widget_status_cache["ts"] = time.monotonic()
+                _widget_status_cache["signature"] = pre_sig
+                _widget_status_cache["data"] = fresh
+    return fresh
+
+
+@app.route("/api/local/widgets/status", methods=["GET"])
+def local_widget_status():
+    status_dict = _get_widget_status_dict()
     return jsonify(
-        {
-            "wg_status": wg_status,
-            "wg_pubkey": wg_pubkey,
-            "vpn_internal_ip": vpn_internal_ip,
-            "configs_found": configs,
-            "version": read_app_version(),
-            "lnd_ip": lnd_ip,
-            "cln_ip": cln_ip,
-            "vpn_active": vpn_active,
-            "lnd_detected": lnd_detected,
-            "cln_detected": cln_detected,
-            "lnd_routing_active": lnd_routing_active,
-            "cln_routing_active": cln_routing_active,
-            "server_domain": server_domain,
-            "lat": lat,
-            "lng": lng,
-            "label": label,
-            "flag": flag,
-            "expires_at": expires_at,
-            "vpn_port": vpn_port,
-            "dataplane_mode": dataplane["dataplane_mode"],
-            "secure_mode": SECURE_MODE,
-            "target_container": dataplane["target_container"],
-            "target_ip": dataplane["target_ip"],
-            "target_impl": active_target_impl,
-            "requested_target_impl": requested_target_impl,
-            "target_switch_pending": target_switch_pending,
-            "announcement_verified": announcement_verified,
-            "announcement_verification_source": verification_source,
-            "docker_network": dataplane["docker_network"],
-            "forwarding_port": dataplane["forwarding_port"],
-            "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
-            "rules_synced": effective_rules_synced,
-            "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
-            "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
-            "dns_protected": dns_protected,
-            "decommissioned": dataplane.get("decommissioned", False),
-            "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
-            "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
-            "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
-            "last_reconcile_at": dataplane["last_reconcile_at"],
-            "last_error": effective_error,
-            "last_error_code": last_error_code,
-            "announcement_conflicts": announcement_conflicts,
-            "announcement_diagnostics": announcement_diagnostics,
-            "announcement_help": _announcement_help_or_empty(
-                active_target_impl, str(server_domain), expected_port, target_container
-            ),
-            "announcement_verification_required": verification_required,
-            "subscription_telemetry": telemetry,
-            "bandwidth_used_gb": telemetry["bandwidth_used_gb"],
-            "bandwidth_limit_gb": telemetry["bandwidth_limit_gb"],
-            "bandwidth_resets_this_month": telemetry["bandwidth_resets_this_month"],
-            "max_resets_per_month": telemetry["max_resets_per_month"],
-            "resets_remaining_this_month": telemetry["resets_remaining_this_month"],
-            "next_free_reset_utc": telemetry["next_free_reset_utc"],
-            "pace_pct": telemetry["pace_pct"],
-            "projected_gb": telemetry["projected_gb"],
-            "subscription_status": telemetry["subscription_status"],
-            "last_synced_at": telemetry["last_synced_at"],
-            "nwc": nwc_info,
-            "notices": notices,
-            "pending_order": _sanitize_pending_record(meta_data.get("pendingOrder")),
-            "pending_renewal": _sanitize_pending_record(meta_data.get("pendingRenewal")),
-            "pending_reset": _sanitize_pending_record(meta_data.get("pendingReset")),
-        }
+        build_widget_status_payload(
+            status_dict,
+            refresh="15s",
+            server_geodata_fn=get_server_geodata,
+        )
+    )
+
+
+@app.route("/api/local/widgets/overview", methods=["GET"])
+def local_widget_overview():
+    status_dict = _get_widget_status_dict()
+    return jsonify(
+        build_widget_overview_payload(
+            status_dict,
+            refresh="15s",
+            server_geodata_fn=get_server_geodata,
+        )
     )
 
 
