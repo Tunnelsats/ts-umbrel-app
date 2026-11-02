@@ -6,7 +6,7 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.3.3",
-    "autoprefixer": "^10.6.1",
+    "autoprefixer": "^10.6.2",
     "jest": "^30.5.2",
     "jest-environment-jsdom": "^30.5.2",
     "sharp": "^0.35.5",
