@@ -37,9 +37,15 @@ run_unit() {
     python3 -m pytest server/tests/
 
     log_info "Compiling Tailwind CSS bundle..."
-    npm run build:css
+    if [ ! -x "${REPO_ROOT}/node_modules/.bin/tailwindcss" ]; then
+        (cd "${REPO_ROOT}" && npm ci --ignore-scripts)
+    fi
+    (cd "${REPO_ROOT}" && npm run build:css)
 
     log_info "Running Web UI Jest Tests..."
+    if [ ! -x "${REPO_ROOT}/web/node_modules/.bin/jest" ]; then
+        (cd "${REPO_ROOT}/web" && npm ci --ignore-scripts)
+    fi
     (cd "$REPO_ROOT/web" && npm test)
 }
 

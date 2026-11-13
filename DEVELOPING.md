@@ -63,8 +63,9 @@ Make your code changes on a feature/fix branch and run local test suites:
 # Python Backend & Version Sync Guardrails
 pytest server/tests/
 
-# Frontend Web UI Tests
-cd web && npm test
+# Frontend Web UI Tests (compile Tailwind CSS at repo root first)
+npm ci && npm run build:css
+cd web && npm ci && npm test
 
 # Exact official-store manifest rules (from a sibling umbrel-apps checkout)
 node ../umbrel-apps/.tools/lint-apps.mjs tunnelsats \

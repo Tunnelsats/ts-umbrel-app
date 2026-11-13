@@ -29,3 +29,16 @@ def test_node_hot_patch_uses_umbreld_and_updates_both_split_runtime_roles():
     assert 'docker cp /home/umbrel/dev-patch/scripts/. "${WEB_CONTAINER}":/app/scripts/' in node_patch
     assert 'docker cp /home/umbrel/dev-patch/scripts/. "${DAEMON_CONTAINER}":/app/scripts/' in node_patch
     assert 'docker exec --user 0 "${WEB_CONTAINER}" chmod +x' in node_patch
+
+
+def test_node_hot_patch_compiles_tailwind_css_before_rsync_staging():
+    source = SYNC_SCRIPT.read_text(encoding="utf-8")
+    node_patch = source[source.index("run_node()") : source.index("run_monorepo()")]
+
+    assert 'node_modules/.bin/tailwindcss' in node_patch
+    assert 'npm ci --ignore-scripts' in node_patch
+    assert 'npm run build:css' in node_patch
+    assert 'chmod -R a+rX "${REPO_ROOT}/web/dist"' in node_patch
+    assert '--exclude="web/dist"' not in node_patch
+    assert '--exclude="dist"' not in node_patch
+    assert node_patch.index("npm run build:css") < node_patch.index("rsync -av --delete")

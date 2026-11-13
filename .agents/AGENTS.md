@@ -36,5 +36,5 @@
 pytest server/tests/
 
 # Frontend verification
-npm test
+npm ci && npm run build:css && npm test
 ```

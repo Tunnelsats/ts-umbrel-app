@@ -15,6 +15,24 @@ describe('Favicon Optimization Contracts', () => {
     });
 });
 
+function ensureCompiledTailwindCss(repoRoot, distCssPath) {
+    if (fs.existsSync(distCssPath)) {
+        return;
+    }
+    const binName = process.platform === 'win32' ? 'tailwindcss.cmd' : 'tailwindcss';
+    const tailwindBin = path.join(repoRoot, 'node_modules', '.bin', binName);
+    if (!fs.existsSync(tailwindBin)) {
+        throw new Error(
+            'Missing web/dist/tailwind.css and root Tailwind CLI. ' +
+            'Run "npm ci && npm run build:css" from the repository root before running frontend tests.'
+        );
+    }
+    execFileSync('npm', ['run', 'build:css'], {
+        cwd: repoRoot,
+        stdio: 'pipe',
+    });
+}
+
 describe('Tailwind CSS v4 Build Contracts', () => {
     test('package.json, input.css, and compiled dist/tailwind.css satisfy Tailwind v4 contract', () => {
         const pkgPath = path.resolve(__dirname, '../../package.json');
@@ -35,13 +53,9 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         expect(inputCss).toContain('@keyframes pulse-green');
         expect(inputCss).toContain('@keyframes pulse-yellow');
 
+        const repoRoot = path.resolve(__dirname, '../..');
         const distCssPath = path.resolve(__dirname, '../dist/tailwind.css');
-        if (!fs.existsSync(distCssPath)) {
-            execFileSync('npm', ['run', 'build:css'], {
-                cwd: path.resolve(__dirname, '../..'),
-                stdio: 'pipe',
-            });
-        }
+        ensureCompiledTailwindCss(repoRoot, distCssPath);
         const distCss = fs.readFileSync(distCssPath, 'utf8');
         expect(distCss).toContain('tailwindcss v4.');
         expect(distCss).toContain('.bg-tsgreen');
@@ -55,6 +69,19 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         expect(distCss).toContain('.bg-red-950\\/40');
         expect(distCss).toContain('.text-red-300');
         expect(distCss).toContain('.border-red-800\\/70');
+    });
+
+    test('ensureCompiledTailwindCss surfaces clear root npm ci prerequisite when Tailwind CLI is absent', () => {
+        const os = require('os');
+        const emptyRepoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-tailwind-prereq-'));
+        try {
+            const missingDist = path.join(emptyRepoRoot, 'web', 'dist', 'tailwind.css');
+            expect(() => ensureCompiledTailwindCss(emptyRepoRoot, missingDist)).toThrow(
+                /npm ci && npm run build:css/
+            );
+        } finally {
+            fs.rmSync(emptyRepoRoot, { recursive: true, force: true });
+        }
     });
 });
 

@@ -169,7 +169,8 @@ The workspace uses a single **Source of Truth (SOT)** for backend tests, E2E dat
 
 ### Frontend UI Tests
 ```bash
-cd web && npm test
+npm ci && npm run build:css
+cd web && npm ci && npm test
 ```
 
 ### Troubleshooting & API

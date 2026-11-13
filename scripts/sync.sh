@@ -72,7 +72,14 @@ run_node() {
         exit 1
     fi
 
-    # 2. Stage local files on node (excluding build artifacts)
+    # 2. Build Tailwind CSS bundle & stage local files on node
+    log_info "Compiling Tailwind CSS bundle for hot-sync..."
+    if [ ! -x "${REPO_ROOT}/node_modules/.bin/tailwindcss" ]; then
+        (cd "${REPO_ROOT}" && npm ci --ignore-scripts)
+    fi
+    (cd "${REPO_ROOT}" && npm run build:css)
+    chmod -R a+rX "${REPO_ROOT}/web/dist"
+
     log_info "Staging local source on node..."
     ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} "mkdir -p dev-patch"
     ${SSH_PREFIX}rsync -av --delete \
