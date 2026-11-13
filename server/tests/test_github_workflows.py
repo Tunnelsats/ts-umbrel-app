@@ -9,6 +9,7 @@ workflow file comes from the pull request's merge ref.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -19,6 +20,9 @@ DEPENDABOT_PATH = REPO_ROOT / ".github" / "dependabot.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 AUTO_MERGE_PATH = WORKFLOWS_DIR / "dependabot-auto-merge.yml"
 TEST_WORKFLOW_PATH = WORKFLOWS_DIR / "test.yml"
+DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
+DOCKERIGNORE_PATH = REPO_ROOT / ".dockerignore"
+GITIGNORE_PATH = REPO_ROOT / ".gitignore"
 
 
 def load_workflow(path):
@@ -113,7 +117,61 @@ def test_frontend_tests_workflow_uses_supported_node_lts_and_verifies_css_build(
     assert (".", "npm ci") in run_commands
     assert (
         ".",
-        "npm run build:css\ngit diff --exit-code -- web/dist/tailwind.css",
+        "npm run build:css\ntest -s web/dist/tailwind.css",
     ) in run_commands
+    assert all("git diff" not in cmd for _, cmd in run_commands)
     assert ("./web", "npm ci") in run_commands
     assert ("./web", "npm test") in run_commands
+
+    compose_steps = workflow["jobs"]["test-compose"]["steps"]
+    compose_runs = "\n".join(
+        str(step.get("run", "")) for step in compose_steps if "run" in step
+    )
+    assert (
+        "curl --fail --silent http://127.0.0.1:9740/dist/tailwind.css >/dev/null"
+        in compose_runs
+    )
+
+
+def test_dockerfile_compiles_tailwind_css_in_multistage_build_and_git_ignores_dist():
+    dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    from_lines = [
+        line.strip()
+        for line in dockerfile.splitlines()
+        if line.strip().upper().startswith("FROM ")
+    ]
+    assert len(from_lines) == 2
+    assert from_lines[0] == "FROM --platform=$BUILDPLATFORM node:22-slim AS css-builder"
+    assert from_lines[1] == "FROM debian:13-slim"
+    assert "RUN npm ci --ignore-scripts" in dockerfile
+    assert "RUN npm run build:css" in dockerfile
+    assert (
+        "COPY --from=css-builder /build/web/dist/tailwind.css /app/web/dist/tailwind.css"
+        in dockerfile
+    )
+    assert "chmod -R a+rX /app/web" in dockerfile
+
+    assert DOCKERIGNORE_PATH.exists()
+    dockerignore_entries = {
+        line.strip()
+        for line in DOCKERIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    for required_ignore in ("**/node_modules", "web/dist", ".git", "venv"):
+        assert required_ignore in dockerignore_entries
+
+    gitignore_entries = {
+        line.strip()
+        for line in GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    assert "web/dist/" in gitignore_entries
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "web/dist/"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert tracked.stdout.strip() == "", "web/dist/ artifacts must not be tracked in git"

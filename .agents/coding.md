@@ -76,7 +76,8 @@ export UMBREL_HOST="umbrel.local"
 For manual emergency fallback without the script:
 ```bash
 export SSHPASS="$UMBREL_PASSWORD"
-# 1. Sync source directory to Umbrel host
+# 1. Compile Tailwind CSS bundle and sync source directory to Umbrel host
+npm ci --ignore-scripts && npm run build:css
 sshpass -e rsync -avz --exclude "node_modules" --exclude ".venv" ./ "umbrel@$UMBREL_HOST:dev-patch/"
 
 # 2. Copy updated server and web files into the split containers

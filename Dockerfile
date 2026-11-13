@@ -1,3 +1,11 @@
+FROM --platform=$BUILDPLATFORM node:22-slim AS css-builder
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY tailwind.config.js ./
+COPY web/ ./web/
+RUN npm run build:css
+
 FROM debian:13-slim
 
 RUN apt-get update && apt-get install -y \
@@ -25,10 +33,12 @@ RUN sed -i 's/sysctl -q net.ipv4.conf.all.src_valid_mark=1/echo "Bypassing sysct
 
 COPY scripts/ /app/scripts/
 COPY web/ /app/web/
+COPY --from=css-builder /build/web/dist/tailwind.css /app/web/dist/tailwind.css
 COPY server/ /app/server/
 COPY tunnelsats/umbrel-app.yml /app/
 RUN for f in /app/scripts/*.sh; do tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done \
-    && chmod +x /app/scripts/*.sh
+    && chmod +x /app/scripts/*.sh \
+    && chmod -R a+rX /app/web /app/server /app/umbrel-app.yml
 
 ENV WG_CONF_PATH="/data/tunnelsats*.conf"
 
