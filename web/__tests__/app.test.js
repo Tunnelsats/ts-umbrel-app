@@ -1,3 +1,4 @@
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -35,6 +36,12 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         expect(inputCss).toContain('@keyframes pulse-yellow');
 
         const distCssPath = path.resolve(__dirname, '../dist/tailwind.css');
+        if (!fs.existsSync(distCssPath)) {
+            execFileSync('npm', ['run', 'build:css'], {
+                cwd: path.resolve(__dirname, '../..'),
+                stdio: 'pipe',
+            });
+        }
         const distCss = fs.readFileSync(distCssPath, 'utf8');
         expect(distCss).toContain('tailwindcss v4.');
         expect(distCss).toContain('.bg-tsgreen');

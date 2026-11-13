@@ -36,6 +36,9 @@ run_unit() {
     if [ -f "venv/bin/activate" ]; then source venv/bin/activate; elif [ -f ".venv/bin/activate" ]; then source .venv/bin/activate; fi
     python3 -m pytest server/tests/
 
+    log_info "Compiling Tailwind CSS bundle..."
+    npm run build:css
+
     log_info "Running Web UI Jest Tests..."
     (cd "$REPO_ROOT/web" && npm test)
 }

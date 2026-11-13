@@ -1,0 +1,23 @@
+# Git & CI metadata
+.git
+.github
+
+# Node & compiled frontend artifacts
+**/node_modules
+web/dist
+web/__tests__
+
+# Python environments, caches & test suites
+**/__pycache__
+.pytest_cache
+.venv-tests
+venv
+server/tests
+
+# Documentation & local scratch
+docs
+data
+*.tmp
+*.temp
+*.bak
+*.bak.*

@@ -958,12 +958,25 @@ def test_localized_vendor_assets_are_reachable(client):
         '/vendor/img/earth-dark.jpg',
         '/vendor/img/earth-topology.png',
         '/vendor/inter.css',
-        '/dist/tailwind.css',
         '/vendor/qrcode.min.js'
     ]
     for file_path in vendor_files:
         res = client.get(file_path)
         assert res.status_code == 200, f"Failed to reach localized asset: {file_path}"
+
+
+def test_compiled_tailwind_stylesheet_is_served_from_static_dist(client, tmp_path, monkeypatch):
+    """Test that compiled /dist/tailwind.css is served when staged into static_folder."""
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    css_payload = "/*! tailwindcss v4.x */ .bg-tsgreen{background-color:#22c55e}"
+    (dist_dir / "tailwind.css").write_text(css_payload, encoding="utf-8")
+    monkeypatch.setattr(app_module.app, "static_folder", str(tmp_path))
+
+    res = client.get("/dist/tailwind.css")
+    assert res.status_code == 200
+    assert "text/css" in res.headers.get("Content-Type", "")
+    assert ".bg-tsgreen" in res.get_data(as_text=True)
 
 def test_proxy_fix(client):
     res = client.get('/api/local/status', environ_base={
