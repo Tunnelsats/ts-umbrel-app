@@ -33,15 +33,29 @@ function ensureCompiledTailwindCss(repoRoot, distCssPath) {
     });
 }
 
+function assertTailwindPackageParity(pkg, pkgLock) {
+    const tailwindRange = pkg?.devDependencies?.['tailwindcss'];
+    const cliRange = pkg?.devDependencies?.['@tailwindcss/cli'];
+    expect(tailwindRange).toMatch(/^[\^~]?4\./);
+    expect(cliRange).toMatch(/^[\^~]?4\./);
+
+    const tailwindLocked = pkgLock?.packages?.['node_modules/tailwindcss']?.version;
+    const cliLocked = pkgLock?.packages?.['node_modules/@tailwindcss/cli']?.version;
+    expect(tailwindLocked).toMatch(/^4\./);
+    expect(cliLocked).toBe(tailwindLocked);
+}
+
 describe('Tailwind CSS v4 Build Contracts', () => {
     test('package.json, input.css, and compiled dist/tailwind.css satisfy Tailwind v4 contract', () => {
-        const pkgPath = path.resolve(__dirname, '../../package.json');
+        const repoRoot = path.resolve(__dirname, '../..');
+        const pkgPath = path.join(repoRoot, 'package.json');
+        const pkgLockPath = path.join(repoRoot, 'package-lock.json');
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        const pkgLock = JSON.parse(fs.readFileSync(pkgLockPath, 'utf8'));
         expect(pkg.scripts['build:css']).toBe(
             'tailwindcss -i web/css/input.css -o web/dist/tailwind.css --minify'
         );
-        expect(pkg.devDependencies['tailwindcss']).toBeDefined();
-        expect(pkg.devDependencies['@tailwindcss/cli']).toBe(pkg.devDependencies['tailwindcss']);
+        assertTailwindPackageParity(pkg, pkgLock);
 
         const inputCssPath = path.resolve(__dirname, '../css/input.css');
         const inputCss = fs.readFileSync(inputCssPath, 'utf8');
@@ -53,7 +67,6 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         expect(inputCss).toContain('@keyframes pulse-green');
         expect(inputCss).toContain('@keyframes pulse-yellow');
 
-        const repoRoot = path.resolve(__dirname, '../..');
         const distCssPath = path.resolve(__dirname, '../dist/tailwind.css');
         ensureCompiledTailwindCss(repoRoot, distCssPath);
         const distCss = fs.readFileSync(distCssPath, 'utf8');
@@ -82,6 +95,32 @@ describe('Tailwind CSS v4 Build Contracts', () => {
         } finally {
             fs.rmSync(emptyRepoRoot, { recursive: true, force: true });
         }
+    });
+
+    test('assertTailwindPackageParity accepts compatible caret ranges when lockfile versions match and rejects lockfile drift', () => {
+        expect(() =>
+            assertTailwindPackageParity(
+                { devDependencies: { '@tailwindcss/cli': '^4.3.5', tailwindcss: '^4.3.3' } },
+                {
+                    packages: {
+                        'node_modules/@tailwindcss/cli': { version: '4.3.5' },
+                        'node_modules/tailwindcss': { version: '4.3.5' },
+                    },
+                }
+            )
+        ).not.toThrow();
+
+        expect(() =>
+            assertTailwindPackageParity(
+                { devDependencies: { '@tailwindcss/cli': '^4.3.5', tailwindcss: '^4.3.3' } },
+                {
+                    packages: {
+                        'node_modules/@tailwindcss/cli': { version: '4.3.5' },
+                        'node_modules/tailwindcss': { version: '4.3.3' },
+                    },
+                }
+            )
+        ).toThrow();
     });
 });
 
