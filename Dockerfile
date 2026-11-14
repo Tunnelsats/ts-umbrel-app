@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:22-slim AS css-builder
+FROM --platform=$BUILDPLATFORM node:25-slim AS css-builder
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
