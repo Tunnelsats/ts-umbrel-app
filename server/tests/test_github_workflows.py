@@ -36,6 +36,8 @@ def test_dependabot_enforces_three_day_cooldown_across_all_ecosystems():
     assert len(updates) == 4
     for entry in updates:
         assert entry.get("cooldown", {}).get("default-days") == 3
+        if entry.get("package-ecosystem") == "npm":
+            assert entry.get("versioning-strategy") == "increase"
 
 
 def workflow_triggers(workflow):
