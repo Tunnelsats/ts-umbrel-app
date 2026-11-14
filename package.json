@@ -5,7 +5,7 @@
     "promote": "bash scripts/sync.sh promote"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/cli": "^4.3.5",
     "autoprefixer": "^10.6.2",
     "jest": "^30.5.2",
     "jest-environment-jsdom": "^30.5.2",
