@@ -124,6 +124,162 @@ describe('Tailwind CSS v4 Build Contracts', () => {
     });
 });
 
+function parseSemverParts(version) {
+    const match = String(version || '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+    if (!match) {
+        throw new Error(`Invalid semver version: ${version}`);
+    }
+    return {
+        major: Number(match[1]),
+        minor: Number(match[2]),
+        patch: Number(match[3]),
+        prerelease: match[4] || null,
+    };
+}
+
+function isSemverAtLeast(actual, minimum) {
+    const a = parseSemverParts(actual);
+    const m = parseSemverParts(minimum);
+    if (a.major !== m.major) return a.major > m.major;
+    if (a.minor !== m.minor) return a.minor > m.minor;
+    if (a.patch !== m.patch) return a.patch > m.patch;
+    if (a.prerelease && !m.prerelease) return false;
+    return true;
+}
+
+function assertLockfilePatchedTransitives(pkgLock, label) {
+    const packages = pkgLock?.packages || {};
+    const minimumPatchedVersions = {
+        minimatch: '11.0.1', // GHSA-g3hv-75wg-m249
+        glob: '14.0.2',      // GHSA-3g3m-2fjr-6pw4
+    };
+
+    for (const [pkgName, minVersion] of Object.entries(minimumPatchedVersions)) {
+        const suffix = `node_modules/${pkgName}`;
+        const matchingEntries = Object.entries(packages).filter(
+            ([pkgKey, meta]) =>
+                (pkgKey === suffix || pkgKey.endsWith(`/${suffix}`)) &&
+                meta &&
+                typeof meta.version === 'string'
+        );
+        expect(matchingEntries.length).toBeGreaterThan(0);
+        for (const [pkgKey, meta] of matchingEntries) {
+            expect({
+                lockfile: label,
+                pkgKey,
+                version: meta.version,
+                atLeastMin: isSemverAtLeast(meta.version, minVersion),
+            }).toEqual({
+                lockfile: label,
+                pkgKey,
+                version: meta.version,
+                atLeastMin: true,
+            });
+        }
+    }
+
+    for (const [pkgKey, meta] of Object.entries(packages)) {
+        if (meta && typeof meta.resolved === 'string') {
+            expect({
+                lockfile: label,
+                pkgKey,
+                canonicalRegistry: meta.resolved.startsWith('https://registry.npmjs.org/'),
+            }).toEqual({
+                lockfile: label,
+                pkgKey,
+                canonicalRegistry: true,
+            });
+        }
+    }
+}
+
+describe('NPM Lockfile Security & Registry Hygiene Contracts', () => {
+    test('root and web package-lock.json resolve patched minimatch/glob versions and public npm registry URLs', () => {
+        const repoRoot = path.resolve(__dirname, '../..');
+        const rootLock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
+        const webLock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'web', 'package-lock.json'), 'utf8'));
+
+        assertLockfilePatchedTransitives(rootLock, 'package-lock.json');
+        assertLockfilePatchedTransitives(webLock, 'web/package-lock.json');
+    });
+
+    test('assertLockfilePatchedTransitives rejects unpatched transitives and non-canonical registry URLs', () => {
+        const validLock = {
+            packages: {
+                'node_modules/minimatch': {
+                    version: '11.0.8',
+                    resolved: 'https://registry.npmjs.org/minimatch/-/minimatch-11.0.8.tgz',
+                },
+                'node_modules/glob': {
+                    version: '14.0.6',
+                    resolved: 'https://registry.npmjs.org/glob/-/glob-14.0.6.tgz',
+                },
+            },
+        };
+        expect(() => assertLockfilePatchedTransitives(validLock, 'valid')).not.toThrow();
+
+        expect(() =>
+            assertLockfilePatchedTransitives(
+                {
+                    packages: {
+                        ...validLock.packages,
+                        'node_modules/test-exclude/node_modules/minimatch': {
+                            version: '9.0.9',
+                            resolved: 'https://registry.npmjs.org/minimatch/-/minimatch-9.0.9.tgz',
+                        },
+                    },
+                },
+                'unpatched-nested-minimatch'
+            )
+        ).toThrow();
+
+        expect(() =>
+            assertLockfilePatchedTransitives(
+                {
+                    packages: {
+                        ...validLock.packages,
+                        'node_modules/glob': {
+                            version: '14.0.1',
+                            resolved: 'https://registry.npmjs.org/glob/-/glob-14.0.1.tgz',
+                        },
+                    },
+                },
+                'unpatched-glob'
+            )
+        ).toThrow();
+
+        expect(() =>
+            assertLockfilePatchedTransitives(
+                {
+                    packages: {
+                        ...validLock.packages,
+                        'node_modules/minimatch': {
+                            version: '11.0.1-alpha.1',
+                            resolved: 'https://registry.npmjs.org/minimatch/-/minimatch-11.0.1-alpha.1.tgz',
+                        },
+                    },
+                },
+                'prerelease-below-patched'
+            )
+        ).toThrow();
+
+        expect(() =>
+            assertLockfilePatchedTransitives(
+                {
+                    packages: {
+                        ...validLock.packages,
+                        'node_modules/minimatch': {
+                            version: '11.0.8',
+                            resolved: 'http://internal-mirror.example/minimatch-11.0.8.tgz',
+                        },
+                    },
+                },
+                'private-registry'
+            )
+        ).toThrow();
+    });
+});
+
 // --- Helpers ---
 
 function createMockGlobeInstance() {
