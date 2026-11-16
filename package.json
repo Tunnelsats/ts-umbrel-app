@@ -18,7 +18,9 @@
     },
     "@tailwindcss/cli": {
       "@parcel/watcher": "^2.6.0"
-    }
+    },
+    "glob": "^14.0.6",
+    "minimatch": "^11.0.8"
   },
   "jest": {
     "testEnvironment": "jsdom"
