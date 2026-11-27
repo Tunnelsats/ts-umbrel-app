@@ -139,7 +139,9 @@ def test_promotion_generates_linter_compatible_split_manifest(tmp_path):
     assert promoted_manifest["name"] == "TunnelSats"
     assert promoted_manifest["version"] == source_manifest["version"]
     assert promoted_manifest["tagline"] == source_manifest["tagline"]
-    assert promoted_manifest["description"] == source_manifest["description"]
+    assert "After you activate it, the app shows the settings" in promoted_manifest["description"]
+    assert "Uninstalling also deletes your WireGuard config" in promoted_manifest["description"]
+    assert "tunnelsats-data" not in promoted_manifest["description"]
     assert promoted_manifest["releaseNotes"] == source_manifest["releaseNotes"]
     assert len(promoted_manifest["releaseNotes"]) > 0
     assert "icon" not in promoted_manifest
@@ -388,3 +390,45 @@ def test_promotion_aborts_without_modifying_store_when_digest_lookup_fails(
     )
     assert result.returncode != 0
     assert sentinel.read_text(encoding="utf-8") == "sentinel: unchanged\n"
+
+
+def test_community_and_official_descriptions_match_respective_uninstall_storage_and_mode(
+    tmp_path,
+):
+    source_manifest = yaml.safe_load(
+        (REPO_ROOT / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8")
+    )
+    community_desc = source_manifest["description"]
+    assert "tunnelsats-data" in community_desc
+    assert "Uninstalling also deletes your WireGuard config" not in community_desc
+
+    project = setup_promotion_project(tmp_path)
+    store = tmp_path / "umbrel-apps"
+    store.mkdir()
+    fake_bin, _ = make_fake_docker_bin(tmp_path, "d")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "UMBREL_APPS_DIR": str(store),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(project / "scripts" / "sync.sh"), "promote"],
+        cwd=project,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    official_manifest = yaml.safe_load(
+        (store / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8")
+    )
+    official_desc = official_manifest["description"]
+    assert "Uninstalling also deletes your WireGuard config" in official_desc
+    assert "After you activate it, the app shows the settings" in official_desc
+    assert "tunnelsats-data" not in official_desc
+    assert "On the Community App Store" not in official_desc
+

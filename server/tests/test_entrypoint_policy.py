@@ -6922,5 +6922,68 @@ printf '[Interface]\nPrivateKey = abc\n' > "${WG_DATA_DIR}/tunnelsats.conf"
     assert result.returncode == 0, result.stderr
 
 
+def test_failed_armed_state_persist_retries_until_durable_for_k3s_watcher():
+    result = run_bash(
+        r'''
+source "$1"
+K3S_MODE="true"
+SECURE_MODE="false"
+
+# Simulate post-decommission disk state (armed: false on disk, DECOMMISSIONED cleared)
+printf '{"version":1,"armed":false}\n' > "${KILL_SWITCH_ARMED_STATE_FILE}"
+printf '{"version":1,"decommissioned":false}\n' > "${DECOMMISSION_STATE_FILE}"
+printf '[Interface]\nPrivateKey = reactivate\n' > "${WG_DATA_DIR}/tunnelsats.conf"
+
+PERSIST_ATTEMPTS=0
+FAIL_PERSIST="true"
+orig_persist="$(declare -f persist_kill_switch_armed_state)"
+eval "${orig_persist/persist_kill_switch_armed_state ()/_real_persist_kill_switch_armed_state ()}"
+
+persist_kill_switch_armed_state() {
+    PERSIST_ATTEMPTS=$((PERSIST_ATTEMPTS + 1))
+    if [ "${FAIL_PERSIST}" = "true" ]; then
+        LAST_ERROR="Simulated disk failure writing armed state"
+        return 1
+    fi
+    _real_persist_kill_switch_armed_state
+}
+
+# Attempt 1 fails to persist: must stay fail-closed in memory AND leave disk untouched.
+if evaluate_kill_switch_arming; then
+    exit 1
+fi
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${KILL_SWITCH_ARMED_PERSISTED}" == "false" ]]
+[[ "${PERSIST_ATTEMPTS}" == "1" ]]
+jq -e '.armed == false' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+
+# Attempt 2 while disk is still failing MUST retry persist and MUST NOT succeed
+# (otherwise k3s_pod_watch_loop would reload armed:false from disk and sleep).
+if evaluate_kill_switch_arming; then
+    exit 1
+fi
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${KILL_SWITCH_ARMED_PERSISTED}" == "false" ]]
+[[ "${PERSIST_ATTEMPTS}" == "2" ]]
+jq -e '.armed == false' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+
+# Attempt 3 after disk recovers MUST write armed:true and mark persisted.
+FAIL_PERSIST="false"
+evaluate_kill_switch_arming
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${KILL_SWITCH_ARMED_PERSISTED}" == "true" ]]
+[[ "${PERSIST_ATTEMPTS}" == "3" ]]
+jq -e '.version == 1 and .armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+
+# Attempt 4 now sees persisted=true and does not rewrite disk unnecessarily.
+evaluate_kill_switch_arming
+[[ "${PERSIST_ATTEMPTS}" == "3" ]]
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+
 
 

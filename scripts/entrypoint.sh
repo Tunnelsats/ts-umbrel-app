@@ -286,6 +286,7 @@ DECOMMISSIONED="${DECOMMISSIONED:-false}"
 DECOMMISSION_STATE_LOADED="false"
 KILL_SWITCH_ARMED="${KILL_SWITCH_ARMED:-false}"
 KILL_SWITCH_ARMED_STATE_LOADED="false"
+KILL_SWITCH_ARMED_PERSISTED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
@@ -941,6 +942,7 @@ load_kill_switch_armed_state() {
     local state armed
     if [ ! -e "${KILL_SWITCH_ARMED_STATE_FILE}" ] && [ ! -L "${KILL_SWITCH_ARMED_STATE_FILE}" ]; then
         KILL_SWITCH_ARMED_STATE_LOADED="true"
+        KILL_SWITCH_ARMED_PERSISTED="false"
         return 0
     fi
     state=$(cat "${KILL_SWITCH_ARMED_STATE_FILE}" 2>/dev/null) || {
@@ -957,6 +959,7 @@ load_kill_switch_armed_state() {
     armed=$(printf '%s' "${state}" | jq -r '.armed')
     KILL_SWITCH_ARMED="${armed}"
     KILL_SWITCH_ARMED_STATE_LOADED="true"
+    KILL_SWITCH_ARMED_PERSISTED="${armed}"
 }
 
 persist_kill_switch_armed_state() {
@@ -986,6 +989,7 @@ persist_kill_switch_armed_state() {
         return 1
     fi
     KILL_SWITCH_ARMED_STATE_LOADED="true"
+    KILL_SWITCH_ARMED_PERSISTED="${armed_json}"
 }
 
 lightning_config_has_tunnelsats_markers() {
@@ -1120,12 +1124,21 @@ evaluate_kill_switch_arming() {
         return 1
     fi
     if [ "${signal_rc}" -eq 0 ]; then
-        if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+        if [ "${KILL_SWITCH_ARMED:-false}" != "true" ] || [ "${KILL_SWITCH_ARMED_PERSISTED:-false}" != "true" ]; then
+            local newly_armed="false"
+            if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+                newly_armed="true"
+            fi
             KILL_SWITCH_ARMED="true"
+            KILL_SWITCH_ARMED_PERSISTED="false"
             if ! persist_kill_switch_armed_state; then
                 return 1
             fi
-            log INFO "kill_switch_armed=true (latched from active configuration or state)"
+            if [ "${newly_armed}" = "true" ]; then
+                log INFO "kill_switch_armed=true (latched from active configuration or state)"
+            else
+                log INFO "kill_switch_armed=true (persisted latch state after retry)"
+            fi
         fi
     fi
 
@@ -10535,11 +10548,13 @@ decommission_dataplane() {
 
     local was_decommissioned="${DECOMMISSIONED:-false}"
     local was_armed="${KILL_SWITCH_ARMED:-false}"
+    local was_armed_persisted="${KILL_SWITCH_ARMED_PERSISTED:-false}"
     DECOMMISSIONED="true"
     if ! persist_decommissioned_state; then
         restore_saved_decommission_ownership
         DECOMMISSIONED="${was_decommissioned}"
         KILL_SWITCH_ARMED="${was_armed}"
+        KILL_SWITCH_ARMED_PERSISTED="${was_armed_persisted}"
         RULES_SYNCED="false"
         IPV4_RULES_SYNCED="false"
         IPV6_RULES_SYNCED="false"
@@ -10553,12 +10568,14 @@ decommission_dataplane() {
     fi
 
     KILL_SWITCH_ARMED="false"
+    KILL_SWITCH_ARMED_PERSISTED="false"
     if ! persist_kill_switch_armed_state; then
         local disarm_error="${LAST_ERROR:-Failed to persist kill switch armed state}"
         restore_saved_decommission_ownership
         DECOMMISSIONED="${was_decommissioned}"
         persist_decommissioned_state || true
         KILL_SWITCH_ARMED="${was_armed}"
+        KILL_SWITCH_ARMED_PERSISTED="${was_armed_persisted}"
         LAST_ERROR="${disarm_error}"
         RULES_SYNCED="false"
         IPV4_RULES_SYNCED="false"

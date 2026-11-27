@@ -5,13 +5,13 @@ name: TunnelSats
 version: "3.6.1"
 tagline: Run your Lightning node on clearnet without exposing your home IP
 description: >-
-  ⚠️ TunnelSats is a paid service. You buy and renew a subscription with Lightning inside the app. After you activate it, the app shows the settings to add to your Lightning Node or Core Lightning config, and you restart that app yourself.
+  ⚠️ TunnelSats is a paid service. You buy and renew a subscription with Lightning inside the app. On the Community App Store, TunnelSats can configure your Lightning Node or Core Lightning automatically (or show manual steps if you enable Secure Mode).
 
 
   ⚠️ Once you activate or import a WireGuard subscription, TunnelSats enables a fail-closed kill switch for your Lightning node's clearnet traffic so your home IP cannot leak if the tunnel drops. Before you activate a subscription, your node's networking is not touched. Tor connections always keep working.
 
 
-  ⚠️ Before uninstalling an active setup, open Uninstall in the app and follow its steps. They undo your node config changes and lift the kill switch. If you skip them after activating a subscription, your node stays off clearnet until you restart your Umbrel. Uninstalling also deletes your WireGuard config, so download a backup in the app first if you want to restore your subscription later.
+  ⚠️ Before uninstalling an active setup, open Uninstall in the app and follow its steps. They undo your node config changes and lift the kill switch. If you skip them after activating a subscription, your node stays off clearnet until you restart your Umbrel. On the Community App Store, your WireGuard config is kept in persistent storage (tunnelsats-data) across uninstalls; download a backup in the app if you plan to move to the Official Umbrel App Store or another node.
 
 
   TunnelSats connects your Umbrel to a TunnelSats server over WireGuard and sends only your Lightning node's traffic through it. Other nodes reach you on the server's public IP address, so you get the speed and reliability of clearnet without revealing your home IP. The rest of your Umbrel's traffic is not touched.

@@ -23,6 +23,23 @@ import yaml
 DEFAULT_SUBMISSION_URL = "https://github.com/getumbrel/umbrel-apps/pull/4919"
 DEFAULT_SUBMITTER = "Tunnelsats"
 DEFAULT_OFFICIAL_GALLERY = ["1.webp", "2.webp", "3.webp", "4.webp"]
+COMMUNITY_SETUP_SENTENCE = (
+    "On the Community App Store, TunnelSats can configure your Lightning Node or "
+    "Core Lightning automatically (or show manual steps if you enable Secure Mode)."
+)
+OFFICIAL_SETUP_SENTENCE = (
+    "After you activate it, the app shows the settings to add to your Lightning Node "
+    "or Core Lightning config, and you restart that app yourself."
+)
+COMMUNITY_UNINSTALL_STORAGE_SENTENCE = (
+    "On the Community App Store, your WireGuard config is kept in persistent storage "
+    "(tunnelsats-data) across uninstalls; download a backup in the app if you plan to "
+    "move to the Official Umbrel App Store or another node."
+)
+OFFICIAL_UNINSTALL_STORAGE_SENTENCE = (
+    "Uninstalling also deletes your WireGuard config, so download a backup in the app "
+    "first if you want to restore your subscription later."
+)
 IMAGE_REPO = "tunnelsats/ts-umbrel-app"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION_PATTERN = re.compile(
@@ -400,6 +417,15 @@ def validate_source_manifest(manifest: Any) -> dict[str, Any]:
     return manifest
 
 
+def adapt_description_for_official_store(description: str) -> str:
+    """Adapt Community Store storage and setup notices to Official Store Secure Mode semantics."""
+    adapted = description.replace(COMMUNITY_SETUP_SENTENCE, OFFICIAL_SETUP_SENTENCE)
+    adapted = adapted.replace(
+        COMMUNITY_UNINSTALL_STORAGE_SENTENCE, OFFICIAL_UNINSTALL_STORAGE_SENTENCE
+    )
+    return adapted
+
+
 def render_official_manifest(
     source_manifest: dict[str, Any],
     version: str,
@@ -409,7 +435,7 @@ def render_official_manifest(
     validate_source_manifest(source_manifest)
 
     tagline = str(source_manifest["tagline"]).strip().rstrip(".")
-    description = str(source_manifest["description"])
+    description = adapt_description_for_official_store(str(source_manifest["description"]))
     release_notes = str(source_manifest.get("releaseNotes", ""))
     default_username = str(source_manifest.get("defaultUsername", ""))
     default_password = str(source_manifest.get("defaultPassword", ""))
