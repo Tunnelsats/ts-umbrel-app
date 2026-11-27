@@ -64,7 +64,7 @@ app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.6.0"
+APP_VERSION = "v3.6.1"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -3090,6 +3090,7 @@ def read_dataplane_state():
         "ipv6_rules_synced": False,
         "dns_protected": False,
         "decommissioned": False,
+        "kill_switch_armed": False,
         "ipv6_policy": "deny",
         "target_ipv6_addresses": [],
         "target_ipv6_default_route": False,
@@ -5510,6 +5511,7 @@ def _build_local_status_dict() -> Dict[str, Any]:
         "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
         "dns_protected": dns_protected,
         "decommissioned": dataplane.get("decommissioned", False),
+        "kill_switch_armed": bool(dataplane.get("kill_switch_armed", False)),
         "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
         "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
         "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),

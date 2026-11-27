@@ -39,3 +39,7 @@
 ## [3.6.0]
 
 - Add native Umbrel home screen widgets (2x2 Shield Grid and Subscription & Bandwidth Overview) with unified fail-closed status badges
+
+## [3.6.1]
+
+- Arm the fail-closed kill switch only after a WireGuard subscription or TunnelSats node config is present (keeping fresh installs in non-blocking standby), and align Official Umbrel App Store promotion tooling with PR #6433
