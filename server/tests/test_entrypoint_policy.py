@@ -7088,6 +7088,118 @@ fi
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_runtime_arming_error_and_api_exit_from_standby_install_pre_discovery_containment():
+    result = run_bash(
+        r'''
+source "$1"
+K3S_MODE="true"
+SECURE_MODE="false"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app=lnd"
+DOCKER_TARGET_IP="10.9.9.9"
+MANAGED_K3S_TARGET_IP=""
+K3S_CANDIDATE_POD_IPS=""
+K3S_UNSEEN_REPLACEMENT_PENDING="false"
+K3S_POD_API_QUERY_OK="false"
+
+NETPOL_CALLS=0
+QUARANTINE_CALLS=0
+QUARANTINE_HINT="unset"
+PRESERVE_CALLS=0
+
+ensure_k3s_emergency_network_policy() {
+    NETPOL_CALLS=$((NETPOL_CALLS + 1))
+    return 0
+}
+ensure_k3s_subnet_quarantine() {
+    QUARANTINE_CALLS=$((QUARANTINE_CALLS + 1))
+    QUARANTINE_HINT="${1:-}"
+    return 0
+}
+wg() { return 1; }
+
+# 1. Start cleanly in standby
+reconcile_once "startup"
+[[ "${KILL_SWITCH_ARMED}" == "false" ]]
+[[ "${NETPOL_CALLS}" == "0" ]]
+[[ "${QUARANTINE_CALLS}" == "0" ]]
+
+# 2. Runtime arming failure in K3S_MODE=true from standby (malformed latch)
+#    must install selector NetworkPolicy + pod-CIDR quarantine and filter 10.9.9.9.
+printf '{corrupt-json\n' > "${KILL_SWITCH_ARMED_STATE_FILE}"
+if reconcile_once "periodic"; then
+    exit 1
+fi
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${NETPOL_CALLS}" -ge 1 ]]
+[[ "${QUARANTINE_CALLS}" -ge 1 ]]
+[[ "${QUARANTINE_HINT}" == "" ]]
+jq -e '.kill_switch_armed == true and (.last_error | contains("malformed"))' "${STATE_FILE}" >/dev/null
+
+# 3. Unexpected API_PID exit in main_loop under K3S_MODE=true must call
+#    preserve_fail_closed_dataplane before exiting 1.
+(
+    preserve_fail_closed_dataplane() {
+        printf 'preserved\n' > "${POLICY_TEST_STATE_FILE}.api_exit_preserved"
+        return 0
+    }
+    API_PID=999999
+    kill() { return 1; }
+    main_loop
+) && exit 1
+[[ -f "${POLICY_TEST_STATE_FILE}.api_exit_preserved" ]]
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_lightning_config_scan_error_overwrites_stale_standby_last_error():
+    result = run_bash(
+        r'''
+source "$1"
+K3S_MODE="false"
+SECURE_MODE="true"
+wg() { return 1; }
+ensure_source_blackhole_rule() { return 0; }
+cleanup_dataplane() { return 0; }
+
+# 1. Standby sets LAST_ERROR="No WireGuard config found in /data"
+reconcile_once "startup"
+[[ "${LAST_ERROR}" == "No WireGuard config found in /data" ]]
+
+# 2. Directory at LND_CONFIG_PATH must overwrite stale standby LAST_ERROR
+mkdir -p "${LND_CONFIG_PATH}"
+if reconcile_once "periodic"; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Failed to inspect Lightning config"* ]]
+[[ "${LAST_ERROR}" != "No WireGuard config found in /data" ]]
+jq -e '.last_error | contains("Failed to inspect Lightning config")' "${STATE_FILE}" >/dev/null
+
+# 3. Reset to standby, then directory at CLN config must also overwrite stale LAST_ERROR
+rmdir "${LND_CONFIG_PATH}"
+KILL_SWITCH_ARMED="false"
+KILL_SWITCH_ARMED_PERSISTED="false"
+KILL_SWITCH_ARMED_STATE_LOADED="false"
+rm -f "${KILL_SWITCH_ARMED_STATE_FILE}"
+reconcile_once "startup"
+[[ "${LAST_ERROR}" == "No WireGuard config found in /data" ]]
+
+mkdir -p "${CLN_DATA_DIR}/bitcoin/config"
+if reconcile_once "periodic"; then
+    exit 1
+fi
+[[ "${LAST_ERROR}" == *"Failed to inspect CLN config"* ]]
+[[ "${LAST_ERROR}" != "No WireGuard config found in /data" ]]
+jq -e '.last_error | contains("Failed to inspect CLN config")' "${STATE_FILE}" >/dev/null
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+
 
 
 

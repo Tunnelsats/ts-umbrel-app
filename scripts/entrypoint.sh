@@ -1052,7 +1052,7 @@ lightning_config_has_tunnelsats_markers() {
         scan_rc=0
         scan_output="$(_scan_lightning_config_markers_and_includes "${LND_CONFIG_PATH}" "false")" || scan_rc=$?
         if [ "${scan_rc}" -ne 0 ]; then
-            LAST_ERROR="${LAST_ERROR:-Failed to inspect Lightning config ${LND_CONFIG_PATH}}"
+            LAST_ERROR="Failed to inspect Lightning config ${LND_CONFIG_PATH}"
             return 2
         fi
         if printf '%s\n' "${scan_output}" | grep -Fxq "MARKER"; then
@@ -1109,7 +1109,7 @@ lightning_config_has_tunnelsats_markers() {
             scan_rc=0
             scan_output="$(_scan_lightning_config_markers_and_includes "${resolved_cfg}" "true")" || scan_rc=$?
             if [ "${scan_rc}" -ne 0 ]; then
-                LAST_ERROR="${LAST_ERROR:-Failed to inspect CLN config ${cfg}}"
+                LAST_ERROR="Failed to inspect CLN config ${cfg}"
                 return 2
             fi
 
@@ -9591,9 +9591,17 @@ fail_reconcile_closed() {
     # k3s owns a separate layered isolation and recovery lifecycle. Preserve
     # that state instead of applying the Docker/Secure Mode cleanup below.
     if [[ "${K3S_MODE}" == "true" ]]; then
-        if [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" = "true" ] || \
+        local k3s_target_ip="${DOCKER_TARGET_IP:-}"
+        if [ "${k3s_target_ip}" = "10.9.9.9" ]; then
+            k3s_target_ip=""
+        fi
+        if [ -z "${k3s_target_ip}" ] && [ "${MANAGED_K3S_TARGET_IP:-}" != "10.9.9.9" ]; then
+            k3s_target_ip="${MANAGED_K3S_TARGET_IP:-}"
+        fi
+        if [ -z "${k3s_target_ip}" ] || \
+           [ "${K3S_UNSEEN_REPLACEMENT_PENDING:-false}" = "true" ] || \
            ! k3s_candidate_pod_guards_are_synced >/dev/null 2>&1; then
-            ensure_k3s_pre_discovery_containment "${DOCKER_TARGET_IP:-${MANAGED_K3S_TARGET_IP:-}}" || true
+            ensure_k3s_pre_discovery_containment "${k3s_target_ip}" || true
             LAST_ERROR="${failure_error}"
         fi
         RULES_SYNCED="false"
@@ -9690,6 +9698,17 @@ reconcile_once() {
         IPV4_RULES_SYNCED="false"
         IPV6_RULES_SYNCED="false"
         DNS_PROTECTED="false"
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            if [ -n "${MANAGED_K3S_TARGET_IP:-}" ]; then
+                ensure_k3s_egress_guard "${MANAGED_K3S_TARGET_IP}" || true
+                ensure_fallback_blackhole_rule \
+                    "${MANAGED_K3S_TARGET_IP}" \
+                    "k3s: Failed to protect managed pod after arming error" \
+                    "${K3S_RULE_PROTOCOL}" || true
+            else
+                ensure_k3s_pre_discovery_containment "" || true
+            fi
+        fi
         LAST_ERROR="${arm_error}"
         fail_reconcile_closed "${request_id}"
         log ERROR "${LAST_ERROR}"
@@ -10849,7 +10868,11 @@ main_loop() {
             LAST_ERROR="Internal management process exited unexpectedly"
             log ERROR "${LAST_ERROR}"
             if ! evaluate_kill_switch_arming || [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
-                fail_reconcile_closed || true
+                if [[ "${K3S_MODE}" == "true" ]]; then
+                    preserve_fail_closed_dataplane || true
+                else
+                    fail_reconcile_closed || true
+                fi
             fi
             exit 1
         fi
