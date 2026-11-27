@@ -20,14 +20,16 @@
 
 ## Code Quality & Diligence Standards
 - **Strict Regex for Container Targeting**: Umbrel environments run multiple containers with similar substrings (e.g. `lightning_app_1` vs `lightning_app_proxy_1`). Use the production middleware pattern, which accepts Compose project prefixes while excluding proxy and backup containers: `r"(^|[_-])(lightning[_-]app|lnd[_-]app|lightning[_-]ui)(?:[_-]?\d+)?$"`.
+- **Never Hardcode `container_name` in Umbrel Compose Files**: Always omit `container_name` in `tunnelsats-community/docker-compose.yml` (and promoted Official Store compose) so umbrelOS injects `<app-id>_<service>_1` (`tunnelsats-community_tunnelsats-web_1` / `tunnelsats-community_tunnelsats-daemon_1` vs Official `tunnelsats_tunnelsats-web_1` / `tunnelsats_tunnelsats-daemon_1`). Hardcoding bare `tunnelsats-web` causes umbrelOS `lan-ingress` to hijack Official `tunnelsats` proxy traffic. When targeting TunnelSats containers from scripts or CLI, always filter by Compose project and service labels (`docker ps -q --filter label=com.docker.compose.project=tunnelsats-community --filter label=com.docker.compose.service=tunnelsats-web`) or use `docker compose -f /home/umbrel/umbrel/app-data/<app-id>/docker-compose.yml`.
 - **Atomic Configuration Swapping**: Write configuration changes to temporary files (with unique UUIDs) and execute `os.replace()`, followed by post-write byte-verification from disk before initiating service restarts.
 - **Full-Spectrum Subsystem Auditing**: When altering routing tables, firewall rules, or VPN state, audit 100% of mutation and teardown pathways to prevent orphaned rules.
 
 ## Repository Discovery & Navigation
 - `server/`: Python backend daemon (`app.py`), WireGuard manager, API endpoints, and system routing hooks.
-- `web/`: Frontend React application for the Umbrel web dashboard.
-- `tunnelsats/`: Umbrel App Store package manifests, `docker-compose.yml`, and container initialization scripts.
-- `scripts/`: Development workflows, synchronization (`scripts/sync.sh`), and packaging tools.
+- `web/`: Frontend web dashboard for Umbrel.
+- `tunnelsats-community/`: Canonical Community App Store package (`id: tunnelsats-community`, `port: 9741`, `SECURE_MODE=false`, `${APP_DATA_DIR}/../tunnelsats-data:/data`), `docker-compose.yml`, `scripts/verify.sh`, and source of truth for Official Store promotion via `scripts/promote_official_store.py`.
+- `tunnelsats/`: **Temporary conflict-guard stub** (`id: tunnelsats`) retained only until Official Store `v3.6.3` (with the 3-line `releaseNotes` warning and cross-grade recovery banner) merges into `getumbrel/umbrel-apps` so legacy Community users stay protected in `ambiguousAppIds`; remove immediately once Official `v3.6.3` is live.
+- `scripts/`: Development workflows, synchronization (`scripts/sync.sh`), promotion (`scripts/promote_official_store.py`), and packaging tools.
 - `docs/`: Historical implementation and authentication plans.
 
 ## Test & Verification Commands

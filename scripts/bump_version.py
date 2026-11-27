@@ -2,8 +2,8 @@
 """
 Transactional Version Bump Tool for ts-umbrel-app
 Updates version string across all 5 canonical file locations:
-  1. tunnelsats/umbrel-app.yml (version and releaseNotes)
-  2. tunnelsats/docker-compose.yml (image tag)
+  1. tunnelsats-community/umbrel-app.yml (version and releaseNotes)
+  2. tunnelsats-community/docker-compose.yml (image tag)
   3. server/app.py (APP_VERSION)
   4. web/index.html (#app-version)
   5. k3s/deployment.yaml (image tag)
@@ -19,8 +19,8 @@ import tempfile
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-MANIFEST_PATH = os.path.join(REPO_ROOT, "tunnelsats", "umbrel-app.yml")
-COMPOSE_PATH = os.path.join(REPO_ROOT, "tunnelsats", "docker-compose.yml")
+MANIFEST_PATH = os.path.join(REPO_ROOT, "tunnelsats-community", "umbrel-app.yml")
+COMPOSE_PATH = os.path.join(REPO_ROOT, "tunnelsats-community", "docker-compose.yml")
 APP_PY_PATH = os.path.join(REPO_ROOT, "server", "app.py")
 INDEX_HTML_PATH = os.path.join(REPO_ROOT, "web", "index.html")
 DEPLOYMENT_K3S_PATH = os.path.join(REPO_ROOT, "k3s", "deployment.yaml")

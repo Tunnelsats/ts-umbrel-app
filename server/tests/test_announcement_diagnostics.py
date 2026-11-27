@@ -366,7 +366,9 @@ class TestRemediationCommands:
             )
 
     def test_announcement_help_for_docker_modes(self):
-        with patch('app.SECURE_MODE', True), patch('app.K3S_MODE', False):
+        with patch('app.SECURE_MODE', True), patch('app.K3S_MODE', False), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('UMBREL_APP_ID', None)
             help_payload = app_module.build_announcement_help('lnd', SERVER, PORT, 'lightning_lnd_1')
         assert help_payload == {
             'impl': 'lnd',
@@ -385,6 +387,26 @@ class TestRemediationCommands:
                 f'sudo docker compose -f {UMBREL_COMPOSE} logs --tail 100 tunnelsats-web',
             ],
         }
+
+    def test_announcement_help_parameterizes_compose_path_via_umbrel_app_id(self, monkeypatch):
+        monkeypatch.setenv('UMBREL_APP_ID', 'tunnelsats-community')
+        with patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False):
+            help_payload = app_module.build_announcement_help('lnd', SERVER, PORT, 'lightning_lnd_1')
+        community_compose = '/home/umbrel/umbrel/app-data/tunnelsats-community/docker-compose.yml'
+        assert help_payload['logs_commands'] == [
+            f'sudo docker compose -f {community_compose} logs --tail 100 tunnelsats-daemon',
+            f'sudo docker compose -f {community_compose} logs --tail 100 tunnelsats-web',
+        ]
+
+    @pytest.mark.parametrize('bad_id', ['', '   ', '../etc', 'tunnelsats; rm -rf /', 'UPPER_CASE', '-leading', 'a/b'])
+    def test_announcement_help_sanitizes_invalid_umbrel_app_id(self, monkeypatch, bad_id):
+        monkeypatch.setenv('UMBREL_APP_ID', bad_id)
+        with patch('app.SECURE_MODE', False), patch('app.K3S_MODE', False):
+            help_payload = app_module.build_announcement_help('lnd', SERVER, PORT, 'lightning_lnd_1')
+        assert help_payload['logs_commands'] == [
+            f'sudo docker compose -f {UMBREL_COMPOSE} logs --tail 100 tunnelsats-daemon',
+            f'sudo docker compose -f {UMBREL_COMPOSE} logs --tail 100 tunnelsats-web',
+        ]
 
     def test_announcement_help_for_k3s(self):
         with patch('app.K3S_MODE', True), patch('app.SECURE_MODE', False), \

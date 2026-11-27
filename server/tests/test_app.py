@@ -4295,5 +4295,217 @@ class TestIssue202FailClosedStatusReporting:
             assert data["last_error_code"] == app_module.STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING
 
 
+class TestUmbrelAppIdAndCrossGradeDetection:
+    """UMBREL_APP_ID compose path parameterization and Community -> Official cross-grade recovery detection."""
+
+    def test_resolve_umbrel_app_id_defaults_accepts_valid_and_rejects_unsafe(self):
+        assert app_module.resolve_umbrel_app_id("tunnelsats-community") == "tunnelsats-community"
+        assert app_module.resolve_umbrel_app_id("  tunnelsats  ") == "tunnelsats"
+        assert app_module.resolve_umbrel_app_id("tunnelsats-dev-2") == "tunnelsats-dev-2"
+        for invalid in ("", "   ", "../tunnelsats-data", "tunnelsats;id", "TUNNELSATS", "-tunnelsats", "a/b", "a b"):
+            assert app_module.resolve_umbrel_app_id(invalid) == "tunnelsats"
+        assert app_module.umbrel_tunnelsats_compose_path("tunnelsats-community") == (
+            "/home/umbrel/umbrel/app-data/tunnelsats-community/docker-compose.yml"
+        )
+        assert app_module.umbrel_tunnelsats_compose_path("../evil") == (
+            "/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml"
+        )
+
+    @staticmethod
+    def _kernel_runner(*, ip_rule="", ip_route="", wg_show=None, ip_link=None):
+        def _run(cmd, *args, **kwargs):
+            if cmd == ["ip", "rule", "show"]:
+                return MagicMock(returncode=0, stdout=ip_rule)
+            if cmd == ["ip", "route", "show"]:
+                return MagicMock(returncode=0, stdout=ip_route)
+            if cmd == ["wg", "show", app_module.WG_INTERFACE_NAME]:
+                if wg_show is None:
+                    return MagicMock(returncode=1, stdout="")
+                return MagicMock(returncode=0, stdout=wg_show)
+            if cmd == ["ip", "link", "show", "dev", app_module.WG_INTERFACE_NAME]:
+                if ip_link is None:
+                    return MagicMock(returncode=1, stdout="")
+                return MagicMock(returncode=0, stdout=ip_link)
+            return MagicMock(returncode=1, stdout="")
+        return _run
+
+    @pytest.mark.parametrize(
+        "runner_kwargs,expected_fragment",
+        [
+            ({"ip_rule": "0:\tfrom all lookup local\n32762:\tfrom 10.9.9.0/25 blackhole\n"}, "ip_rule:10.9.9.0/25"),
+            ({"ip_rule": "32762:\tfrom 10.9.9.9 blackhole\n"}, "ip_rule:10.9.9.9"),
+            ({"ip_route": "10.9.9.0/25 dev br-abc123 proto kernel scope link src 10.9.9.1\n"}, "ip_route:10.9.9.0/25"),
+            ({"ip_route": "10.9.9.1 dev br-abc123 scope link\n"}, "ip_route:10.9.9.1"),
+            (
+                {
+                    "ip_rule": "32762:\tfrom 10.9.9.0/25 blackhole\n",
+                    "wg_show": "interface: tunnelsatsv2\n  public key: abc123\n",
+                },
+                "wg_interface:tunnelsatsv2",
+            ),
+            (
+                {
+                    "ip_route": "10.9.9.0/25 dev br-abc123 proto kernel scope link src 10.9.9.1\n",
+                    "wg_show": None,
+                    "ip_link": "12: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n",
+                },
+                "ip_link:tunnelsatsv2",
+            ),
+        ],
+    )
+    def test_detect_community_cross_grade_positive_for_standard_mode_remnants(
+        self, runner_kwargs, expected_fragment
+    ):
+        detected, evidence = app_module.detect_community_cross_grade(
+            configs=[],
+            secure_mode=True,
+            k3s_mode=False,
+            role="daemon",
+            run_cmd=self._kernel_runner(**runner_kwargs),
+        )
+        assert detected is True
+        assert expected_fragment in evidence
+
+    @pytest.mark.parametrize(
+        "runner_kwargs",
+        [
+            {"wg_show": "interface: tunnelsatsv2\n  public key: abc123\n"},
+            {
+                "wg_show": None,
+                "ip_link": "12: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n",
+            },
+            {
+                "ip_rule": "0:\tfrom all lookup local\n32762:\tfrom 10.21.21.9 blackhole\n",
+                "ip_route": "default via 192.168.1.1 dev eth0\n10.21.21.0/24 dev br-umbrel src 10.21.21.1\n",
+                "wg_show": "interface: tunnelsatsv2\n  public key: abc123\n",
+            },
+        ],
+    )
+    def test_detect_community_cross_grade_negative_for_official_reinstall_without_standard_mode_remnants(
+        self, runner_kwargs
+    ):
+        detected, evidence = app_module.detect_community_cross_grade(
+            configs=[],
+            secure_mode=True,
+            k3s_mode=False,
+            role="daemon",
+            run_cmd=self._kernel_runner(**runner_kwargs),
+        )
+        assert detected is False
+        assert evidence == []
+
+    def test_detect_community_cross_grade_negative_when_config_exists(self):
+        detected, evidence = app_module.detect_community_cross_grade(
+            configs=["tunnelsats.conf"],
+            secure_mode=True,
+            k3s_mode=False,
+            role="daemon",
+            run_cmd=self._kernel_runner(
+                ip_rule="32762:\tfrom 10.9.9.0/25 blackhole\n",
+                wg_show="interface: tunnelsatsv2\n  public key: abc\n",
+            ),
+        )
+        assert detected is False
+        assert evidence == []
+
+    def test_detect_community_cross_grade_negative_when_secure_mode_false_or_k3s_or_web(self):
+        remnant_runner = self._kernel_runner(
+            ip_rule="32762:\tfrom 10.9.9.0/25 blackhole\n",
+            wg_show="interface: tunnelsatsv2\n  public key: abc\n",
+        )
+        assert app_module.detect_community_cross_grade(
+            configs=[], secure_mode=False, k3s_mode=False, role="daemon", run_cmd=remnant_runner
+        ) == (False, [])
+        assert app_module.detect_community_cross_grade(
+            configs=[], secure_mode=True, k3s_mode=True, role="daemon", run_cmd=remnant_runner
+        ) == (False, [])
+        assert app_module.detect_community_cross_grade(
+            configs=[], secure_mode=True, k3s_mode=False, role="web", run_cmd=remnant_runner
+        ) == (False, [])
+
+    def test_detect_community_cross_grade_negative_on_clean_fresh_official_install(self):
+        clean_runner = self._kernel_runner(
+            ip_rule="0:\tfrom all lookup local\n32766:\tfrom all lookup main\n",
+            ip_route="default via 192.168.1.1 dev eth0\n10.21.21.0/24 dev br-umbrel src 10.21.21.1\n10.9.0.100/32 dev dummy0\n10.9.9.100/32 dev dummy1\n",
+            wg_show=None,
+            ip_link=None,
+        )
+        detected, evidence = app_module.detect_community_cross_grade(
+            configs=[],
+            secure_mode=True,
+            k3s_mode=False,
+            role="daemon",
+            run_cmd=clean_runner,
+        )
+        assert detected is False
+        assert evidence == []
+
+    def test_local_status_surfaces_cross_grade_flag_and_recovery_banner(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataplane = app_module.read_dataplane_state()
+            dataplane.update({
+                "dataplane_mode": "secure-mode",
+                "rules_synced": False,
+                "last_error": "No WireGuard config found",
+            })
+
+            def _cross_grade_run(cmd, *args, **kwargs):
+                if cmd == ["ip", "rule", "show"]:
+                    return MagicMock(returncode=0, stdout="32762:\tfrom 10.9.9.0/25 blackhole\n")
+                if cmd == ["ip", "route", "show"]:
+                    return MagicMock(returncode=0, stdout="10.9.9.0/25 dev br-ts proto kernel scope link src 10.9.9.1\n")
+                if cmd == ["wg", "show", app_module.WG_INTERFACE_NAME]:
+                    return MagicMock(returncode=0, stdout="interface: tunnelsatsv2\n  public key: abc\n")
+                return MagicMock(returncode=1, stdout="")
+
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.SECURE_MODE", True), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app.TUNNELSATS_ROLE", "daemon"), \
+                    patch("app._get_wireguard_state", return_value=("Disconnected", "")), \
+                    patch("app.lnd_exists", return_value=True), \
+                    patch("app.cln_exists", return_value=False), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch("app.subprocess.run", side_effect=_cross_grade_run):
+                data = json.loads(client.get("/api/local/status").data)
+
+            assert data["cross_grade_detected"] is True
+            assert "ip_rule:10.9.9.0/25" in data["cross_grade_evidence"]
+            assert "wg_interface:tunnelsatsv2" in data["cross_grade_evidence"]
+            assert data["notices"]["cross_grade_detected"] is True
+            banners = data["notices"]["banners"]
+            cg_banners = [b for b in banners if b.get("id") == app_module.CROSS_GRADE_NOTICE_ID]
+            assert len(cg_banners) == 1
+            assert cg_banners[0]["action_type"] == "cross_grade_recovery"
+            assert "app-data/tunnelsats-data/" in cg_banners[0]["message"]
+            assert "TunnelSats (Community)" in cg_banners[0]["message"]
+
+    def test_local_status_cross_grade_false_when_config_present(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(os.path.join(tmp_dir, "tunnelsats.conf"), "w", encoding="utf-8") as fp:
+                fp.write("[Interface]\nPrivateKey = fake\n")
+            dataplane = app_module.read_dataplane_state()
+            dataplane.update({"dataplane_mode": "secure-mode", "rules_synced": True, "last_error": None})
+
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.SECURE_MODE", True), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app.TUNNELSATS_ROLE", "daemon"), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pub1")), \
+                    patch("app.lnd_exists", return_value=True), \
+                    patch("app.cln_exists", return_value=False), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch("app.subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
+                data = json.loads(client.get("/api/local/status").data)
+
+            assert data["cross_grade_detected"] is False
+            assert data["cross_grade_evidence"] == []
+            assert not any(
+                b.get("id") == app_module.CROSS_GRADE_NOTICE_ID
+                for b in (data["notices"].get("banners") or [])
+            )
+
+
+
 
 

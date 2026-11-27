@@ -49,6 +49,57 @@
 
             <!-- 1. Dashboard View -->
             <section id="view-dashboard" class="relative z-10 space-y-6">
+                <!-- Cross-Grade Recovery Banner (Community -> Official Secure Mode safety net) -->
+                <div id="cross-grade-recovery-banner"
+                    class="hidden rounded-2xl border border-tsyellow/50 bg-yellow-950/30 p-5 space-y-4 shadow-lg"
+                    role="alert" aria-live="assertive">
+                    <div class="flex items-start gap-3">
+                        <svg class="w-5 h-5 text-tsyellow shrink-0 mt-0.5" fill="none" stroke="currentColor"
+                            viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z">
+                            </path>
+                        </svg>
+                        <div class="space-y-1">
+                            <h3 class="text-sm font-bold text-tsyellow">Community Edition Detected &mdash; Your Subscription Config Is Safe</h3>
+                            <p class="text-xs text-gray-300 leading-relaxed">
+                                Your WireGuard config is still safe in
+                                <code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">app-data/tunnelsats-data/</code>.
+                                This Official Umbrel App Store update switched TunnelSats to <strong>Official Secure Mode</strong>,
+                                which reads from a separate folder (<code class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-gray-200 font-mono text-xs">app-data/tunnelsats/data/</code>).
+                                Choose how you want to continue:
+                            </p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div class="bg-gray-900/80 border border-tsgreen/40 rounded-xl p-4 space-y-2">
+                            <h4 class="text-xs font-bold text-tsgreen">Option 1 (Recommended): Return to Community Automatic Mode &mdash; zero re-import</h4>
+                            <p class="text-xs text-gray-300 leading-relaxed">
+                                Uninstall <strong class="text-white">TunnelSats</strong> in the Umbrel App Store
+                                (<strong class="text-white">skip</strong> in-app Restore) and install
+                                <strong class="text-white">TunnelSats (Community)</strong> from the TunnelSats Community App Store
+                                &mdash; your subscription restores automatically.
+                            </p>
+                        </div>
+                        <div class="bg-gray-900/80 border border-gray-700 rounded-xl p-4 space-y-2.5 flex flex-col justify-between">
+                            <div class="space-y-2">
+                                <h4 class="text-xs font-bold text-white">Option 2: Stay on Official Secure Mode</h4>
+                                <p class="text-xs text-gray-300 leading-relaxed">
+                                    Import <code class="bg-gray-950 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">tunnelsats.conf</code>
+                                    from <code class="bg-gray-950 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">app-data/tunnelsats-data/</code>
+                                    and <strong class="text-white">reboot Umbrel</strong> to clear the old Docker bridge route.
+                                </p>
+                            </div>
+                            <div>
+                                <button id="btn-cross-grade-import" type="button"
+                                    class="bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3 py-1.5 rounded-lg transition">
+                                    Import tunnelsats.conf
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Actionable Subscription & Bandwidth Notice Banners (v3.5.0) -->
                 <div id="notice-region" class="space-y-3 mb-6 hidden" role="region" aria-label="Subscription and Bandwidth Notices" aria-live="polite"></div>
 
@@ -953,10 +1004,11 @@
                                     directory for configuration files. If you are using SSH or restoring a backup, place
                                     your <code
                                         class="bg-gray-900 px-1 py-0.5 rounded text-tsgreen font-mono text-xs border border-gray-800">.conf</code>
-                                    file into this folder:</p>
+                                    file into the folder for your installed edition:</p>
                                 <p
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
-                                    ~/umbrel/app-data/tunnelsats-data/</p>
+                                    Community Store (TunnelSats (Community)): ~/umbrel/app-data/tunnelsats-data/<br>
+                                    Official Store (TunnelSats): ~/umbrel/app-data/tunnelsats/data/</p>
                                 <div
                                     class="bg-blue-900/10 border border-blue-500/30 border-l-2 border-l-blue-500 p-3 rounded text-blue-300 mt-2 shadow-sm">
                                     <span class="font-bold flex items-center gap-1.5 mb-1.5 text-blue-400"><svg
@@ -964,8 +1016,10 @@
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                 d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                         </svg> Note</span>
-                                    Files placed in the parent directory <code
+                                    Files placed directly in the parent app folders <code
                                         class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-blue-300 font-mono text-xs">~/umbrel/app-data/tunnelsats/</code>
+                                    or <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-blue-300 font-mono text-xs">~/umbrel/app-data/tunnelsats-community/</code>
                                     will be ignored.
                                 </div>
                             </div>
@@ -999,11 +1053,15 @@
                             <div class="text-sm text-gray-300 space-y-3 leading-relaxed">
                                 <p>The dashboard uses an Umbrel-authenticated <strong>Dataplane API</strong>. From an
                                     SSH session on the Umbrel host, query the non-root web service inside its container.
-                                    The privileged daemon has no TCP listener:</p>
+                                    The privileged daemon has no TCP listener (use <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">app-data/tunnelsats-community/docker-compose.yml</code>
+                                    for TunnelSats (Community) or <code
+                                        class="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded text-tsgreen font-mono text-xs">app-data/tunnelsats/docker-compose.yml</code>
+                                    for Official Store):</p>
                                 <div
                                     class="font-mono text-tsgreen bg-gray-900 border border-gray-800 p-2.5 rounded-lg text-xs overflow-x-auto shadow-inner">
                                     sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml exec -T tunnelsats-web curl -s http://127.0.0.1:9740/api/local/status | jq</div>
-                                <p>Port 9739 is the authenticated Umbrel proxy, not a public LAN API. Perform
+                                <p>Port 9739 (Official) / 9741 (Community) is the authenticated Umbrel proxy, not a public LAN API. Perform
                                     state-changing actions through the dashboard. The container-local status request returns
                                     a JSON payload containing the active WireGuard endpoint, internal
                                     routing metrics, and any failure logs (<code
@@ -1248,7 +1306,7 @@
                                         <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker exec lightning_lnd_1 lncli peers updatenodeannouncement --address_remove=203.0.113.5:9735</code>
                                     </li>
                                     <li>
-                                        <strong>Read the TunnelSats logs</strong> (useful for a support request):
+                                        <strong>Read the TunnelSats logs</strong> (useful for a support request &mdash; replace <code class="text-tsgreen">tunnelsats</code> with <code class="text-tsgreen">tunnelsats-community</code> for the Community Store edition):
                                         <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-daemon</code>
                                         <code class="block bg-gray-950 border border-gray-800 p-2 rounded text-tsgreen font-mono text-xs overflow-x-auto mt-1">sudo docker compose -f /home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml logs --tail 100 tunnelsats-web</code>
                                     </li>
@@ -1321,7 +1379,7 @@
                 <div class="flex flex-col">
                     <h1 class="text-xl font-bold text-white tracking-wider">Tunnel<span
                             class="text-tsyellow">Sats</span></h1>
-                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.6.2</span>
+                    <span id="app-version" class="text-[10px] font-mono text-tsgreen/80 mt-0.5 tracking-tighter">v3.6.3</span>
                 </div>
             </div>
 

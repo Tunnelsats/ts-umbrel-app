@@ -345,6 +345,24 @@ function mockStatusScenario(base) {
         'no-subscription': {
             ...base, vpn_active: false, wg_status: 'Disconnected', rules_synced: false, server_domain: '', vpn_port: '',
             last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config', announcement_diagnostics: []
+        },
+        'cross-grade': {
+            ...base, secure_mode: true, vpn_active: false, wg_status: 'Disconnected', rules_synced: false,
+            server_domain: '', vpn_port: '', configs_found: [],
+            cross_grade_detected: true,
+            cross_grade_evidence: ['ip_rule:10.9.9.0/25', 'wg_interface:tunnelsatsv2'],
+            notices: {
+                cross_grade_detected: true,
+                banners: [{
+                    id: 'community_cross_grade_recovery',
+                    kind: 'cross_grade',
+                    severity: 'critical',
+                    title: 'Community Edition Config Detected (Official Secure Mode Active)',
+                    message: 'Your WireGuard config is still safe in app-data/tunnelsats-data/.',
+                    action_type: 'cross_grade_recovery'
+                }]
+            },
+            last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config', announcement_diagnostics: []
         }
     };
     return { ok: true, body: scenarios[scenario] || base };
@@ -932,6 +950,7 @@ function initApp() {
     attachListener('btn-copy-invoice-buy', 'click', () => copyInvoice('buy'));
     attachListener('btn-dash-enable-routing', 'click', () => switchTab('import'));
     attachListener('btn-dash-disable-routing', 'click', () => switchTab('uninstall'));
+    attachListener('btn-cross-grade-import', 'click', () => switchTab('import'));
     attachListener('btn-copy-invoice-renew', 'click', () => copyInvoice('renew'));
     attachListener('btn-copy-invoice-reset', 'click', () => copyInvoice('reset'));
     attachListener('btn-claim-install', 'click', () => claimSubscription('import'));
@@ -4401,12 +4420,40 @@ function renderNwcStatusUI(data) {
 }
 window.renderNwcStatusUI = renderNwcStatusUI;
 
+function isCrossGradeBannerEntry(banner) {
+    if (!banner || typeof banner !== 'object') return false;
+    const id = String(banner.id || banner.code || banner.type || '');
+    const actionType = String(banner.action_type || banner.actionType || '');
+    return id === 'community_cross_grade_recovery' || actionType === 'cross_grade_recovery';
+}
+
+function renderCrossGradeRecoveryBanner(data) {
+    const status = data && typeof data === 'object' ? data : {};
+    const rawBackendBanners = status.notices && Array.isArray(status.notices.banners)
+        ? status.notices.banners
+        : [];
+    const detected = Boolean(
+        status.cross_grade_detected === true
+        || (status.notices && status.notices.cross_grade_detected === true)
+        || rawBackendBanners.some((b) => isCrossGradeBannerEntry(b))
+    );
+    const bannerEl = document.getElementById('cross-grade-recovery-banner');
+    if (bannerEl) {
+        bannerEl.classList.toggle('hidden', !detected);
+    }
+    return detected;
+}
+window.renderCrossGradeRecoveryBanner = renderCrossGradeRecoveryBanner;
+
 function renderNotices(data) {
+    const status = data && typeof data === 'object' ? data : {};
+    renderCrossGradeRecoveryBanner(status);
+    const hasDedicatedCrossGradeBanner = Boolean(document.getElementById('cross-grade-recovery-banner'));
+
     const region = document.getElementById('notice-region');
     if (!region) return;
     region.replaceChildren();
 
-    const status = data && typeof data === 'object' ? data : {};
     const { connected: nwcConnected, healthy: nwcHealthy, lastError: nwcError } = extractNwcState(status);
     const telemetry = (status.subscription_telemetry && typeof status.subscription_telemetry === 'object')
         ? status.subscription_telemetry
@@ -4421,6 +4468,9 @@ function renderNotices(data) {
     if (rawBackendBanners) {
         rawBackendBanners.forEach((b) => {
             if (!b || typeof b !== 'object') return;
+            if (hasDedicatedCrossGradeBanner && isCrossGradeBannerEntry(b)) {
+                return;
+            }
             const id = String(b.id || b.code || b.type || '');
             // Suppress manual 7d and 3d expiry notices when NWC auto-renewal is active and healthy
             if (nwcHealthy && (id === 'expiring_7d' || id === 'expiring_3d' || id === 'expiry_7d' || id === 'expiry_3d' || id === 'renew_soon' || id === 'renew_now')) {
@@ -4572,6 +4622,13 @@ function renderNotices(data) {
             btnRenew.textContent = 'Renew Manually';
             btnRenew.addEventListener('click', () => switchTab('renew'));
             actionsWrap.append(btnNwc, btnRenew);
+        } else if (item.actionType === 'cross_grade_recovery' || item.id === 'community_cross_grade_recovery') {
+            const btnImport = document.createElement('button');
+            btnImport.type = 'button';
+            btnImport.className = 'bg-tsyellow hover:bg-yellow-400 text-black font-bold text-xs px-3 py-1.5 rounded-lg transition';
+            btnImport.textContent = 'Import tunnelsats.conf';
+            btnImport.addEventListener('click', () => switchTab('import'));
+            actionsWrap.appendChild(btnImport);
         } else if (item.actionType === 'refresh' || item.id === 'telemetry_stale') {
             const btnRefresh = document.createElement('button');
             btnRefresh.type = 'button';

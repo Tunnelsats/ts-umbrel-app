@@ -64,13 +64,13 @@ run_e2e() {
 run_persistence() {
     log_info "Running Data Persistence TDD Suite..."
     # Logic from test-persistence.sh
-    APP_ID="tunnelsats"
+    APP_ID="tunnelsats-community"
     TEMP_ROOT="/tmp/tunnelsats_persistence_test"
     USER_HOME="${TEMP_ROOT}/home/umbrel"
     UMBREL_ROOT="${USER_HOME}/umbrel"
     APP_DATA_DIR="${UMBREL_ROOT}/app-data/${APP_ID}"
-    PERSISTENT_DATA_DIR="${UMBREL_ROOT}/app-data/${APP_ID}-data"
-    MAPPED_DIR="${PERSISTENT_DATA_DIR}" # Simulated mapping
+    PERSISTENT_DATA_DIR="${UMBREL_ROOT}/app-data/tunnelsats-data"
+    MAPPED_DIR="${APP_DATA_DIR}/../tunnelsats-data" # Relative compose mount
 
     mkdir -p "${APP_DATA_DIR}" "${PERSISTENT_DATA_DIR}"
 
@@ -145,7 +145,7 @@ run_entrypoint() {
     log_info "Case 4 (CLN Port 9736): PASS"
 
     # Case 5: Metadata Path Priority (Persistent path first, then legacy fallbacks)
-    find_meta() { local paths=("/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"); echo "${paths[0]}"; }
+    find_meta() { local paths=("/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats-community/data/tunnelsats-meta.json" "/home/umbrel/umbrel/app-data/tunnelsats/data/tunnelsats-meta.json"); echo "${paths[0]}"; }
     [ "$(find_meta)" == "/data/tunnelsats-meta.json" ] || { log_error "Failed Case 5"; return 1; }
     log_info "Case 5 (Meta Path): PASS"
 

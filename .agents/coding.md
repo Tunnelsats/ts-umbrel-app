@@ -57,6 +57,17 @@
   docker exec -i <container> <command> | tr -d '\r'
   ```
 
+### 5. Dual-Store Container Naming & Project-Aware Discovery
+- **The Problem**: Both Community (`tunnelsats-community`) and Official (`tunnelsats`) define Compose services `tunnelsats-web` and `tunnelsats-daemon`. Hardcoding bare `container_name: tunnelsats-web` in `tunnelsats-community/docker-compose.yml` breaks umbrelOS `lan-ingress` target resolution and hijacks Official Store proxy traffic.
+- **The Pattern**:
+  - Omit `container_name` in Umbrel compose files so umbrelOS injects `tunnelsats-community_tunnelsats-web_1` / `tunnelsats-community_tunnelsats-daemon_1` (or `tunnelsats_tunnelsats-*_1` for Official).
+  - Never hardcode bare `tunnelsats-web` or `tunnelsats-daemon` in `docker cp`/`docker exec`/`docker restart` commands. Resolve containers by Compose project + service label:
+    ```bash
+    APP_ID="${APP_ID:-tunnelsats-community}"
+    WEB_CID=$(docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-web" | head -n 1)
+    DAEMON_CID=$(docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-daemon" | head -n 1)
+    ```
+
 ---
 
 ## Deployment & Development Sync
@@ -69,22 +80,27 @@ Use the project's maintained synchronization workflow (`scripts/sync.sh node`), 
 export UMBREL_PASSWORD="your_node_password"
 export UMBREL_HOST="umbrel.local"
 
-# Run automated hot-patching workflow
+# Run automated hot-patching workflow (defaults to tunnelsats-community; set APP_ID=tunnelsats for Official)
 ./scripts/sync.sh node
 ```
 
-For manual emergency fallback without the script:
+For manual emergency fallback without the script (using project-aware container lookup instead of hardcoded container names):
 ```bash
 export SSHPASS="$UMBREL_PASSWORD"
+export APP_ID="${APP_ID:-tunnelsats-community}"
+
 # 1. Compile Tailwind CSS bundle and sync source directory to Umbrel host
 npm ci --ignore-scripts && npm run build:css
 sshpass -e rsync -avz --exclude "node_modules" --exclude ".venv" ./ "umbrel@$UMBREL_HOST:dev-patch/"
 
-# 2. Copy updated server and web files into the split containers
-sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/server/. tunnelsats-daemon:/app/server/"
-sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/server/. tunnelsats-web:/app/server/"
-sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker cp /home/umbrel/dev-patch/web/. tunnelsats-web:/app/web/"
-
-# 3. Restart both containers
-sshpass -e ssh "umbrel@$UMBREL_HOST" "sudo docker restart tunnelsats-web tunnelsats-daemon"
+# 2. Resolve target containers by Compose project + service labels, copy updated files, and restart
+sshpass -e ssh "umbrel@$UMBREL_HOST" "APP_ID='$APP_ID' bash -s" <<'EOF'
+set -euo pipefail
+WEB_CID=$(sudo docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-web" | head -n 1)
+DAEMON_CID=$(sudo docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-daemon" | head -n 1)
+sudo docker cp /home/umbrel/dev-patch/server/. "${DAEMON_CID}:/app/server/"
+sudo docker cp /home/umbrel/dev-patch/server/. "${WEB_CID}:/app/server/"
+sudo docker cp /home/umbrel/dev-patch/web/. "${WEB_CID}:/app/web/"
+sudo docker restart "${WEB_CID}" "${DAEMON_CID}"
+EOF
 ```

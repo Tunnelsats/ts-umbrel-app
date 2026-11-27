@@ -5,8 +5,8 @@ import yaml
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-MANIFEST_PATH = os.path.join(REPO_ROOT, "tunnelsats", "umbrel-app.yml")
-COMPOSE_PATH = os.path.join(REPO_ROOT, "tunnelsats", "docker-compose.yml")
+MANIFEST_PATH = os.path.join(REPO_ROOT, "tunnelsats-community", "umbrel-app.yml")
+COMPOSE_PATH = os.path.join(REPO_ROOT, "tunnelsats-community", "docker-compose.yml")
 APP_PY_PATH = os.path.join(REPO_ROOT, "server", "app.py")
 INDEX_HTML_PATH = os.path.join(REPO_ROOT, "web", "index.html")
 DEPLOYMENT_K3S_PATH = os.path.join(REPO_ROOT, "k3s", "deployment.yaml")

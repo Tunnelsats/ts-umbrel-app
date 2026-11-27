@@ -3062,3 +3062,93 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(help.querySelector('.ts-diag-text').textContent).not.toContain('\u2014');
     });
 });
+
+describe('Cross-grade recovery banner (Community -> Official Secure Mode safety net)', () => {
+    function mockStatus(payload) {
+        global.fetch = csrfFetchMock((url) => {
+            if (url === '/api/local/status') {
+                return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
+            }
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        });
+    }
+
+    beforeEach(() => {
+        setupDOM();
+        mockStatus({ vpn_active: false, secure_mode: true, cross_grade_detected: false, notices: { banners: [] } });
+        evalScript();
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    test('banner stays hidden when cross_grade_detected is false or absent', async () => {
+        mockStatus({ vpn_active: false, secure_mode: true, cross_grade_detected: false, notices: { banners: [] } });
+        await window.fetchStatus();
+
+        const banner = document.getElementById('cross-grade-recovery-banner');
+        expect(banner).not.toBeNull();
+        expect(banner.getAttribute('role')).toBe('alert');
+        expect(banner.classList.contains('hidden')).toBe(true);
+    });
+
+    test('banner renders prominently with both recovery options when cross_grade_detected is true', async () => {
+        mockStatus({
+            vpn_active: false,
+            secure_mode: true,
+            cross_grade_detected: true,
+            cross_grade_evidence: ['ip_rule:10.9.9.0/25', 'wg_interface:tunnelsatsv2'],
+            notices: {
+                cross_grade_detected: true,
+                banners: [{
+                    id: 'community_cross_grade_recovery',
+                    kind: 'cross_grade',
+                    severity: 'critical',
+                    title: 'Community Edition Config Detected (Official Secure Mode Active)',
+                    message: 'Your WireGuard config is still safe in app-data/tunnelsats-data/.',
+                    action_type: 'cross_grade_recovery'
+                }]
+            }
+        });
+        await window.fetchStatus();
+
+        const banner = document.getElementById('cross-grade-recovery-banner');
+        expect(banner).not.toBeNull();
+        expect(banner.classList.contains('hidden')).toBe(false);
+        expect(banner.textContent).toContain('app-data/tunnelsats-data/');
+        expect(banner.textContent).toContain('TunnelSats (Community)');
+        expect(banner.textContent).toContain('skip');
+        expect(banner.textContent).toContain('tunnelsats.conf');
+        expect(banner.textContent).toContain('reboot Umbrel');
+
+        // Must not duplicate as a generic renewal banner inside #notice-region
+        const region = document.getElementById('notice-region');
+        expect(region.querySelector('[data-notice-id="community_cross_grade_recovery"]')).toBeNull();
+
+        // Clicking Option 2 import shortcut switches to the Import Config view
+        const importBtn = document.getElementById('btn-cross-grade-import');
+        expect(importBtn).not.toBeNull();
+        importBtn.click();
+        expect(document.getElementById('view-import').classList.contains('hidden')).toBe(false);
+    });
+
+    test('banner also triggers from notices.banners entry alone and hides once resolved', async () => {
+        window.renderNotices({
+            notices: {
+                banners: [{
+                    id: 'community_cross_grade_recovery',
+                    severity: 'critical',
+                    title: 'Community Edition Config Detected',
+                    message: 'Your WireGuard config is still safe in app-data/tunnelsats-data/.',
+                    action_type: 'cross_grade_recovery'
+                }]
+            }
+        });
+        const banner = document.getElementById('cross-grade-recovery-banner');
+        expect(banner.classList.contains('hidden')).toBe(false);
+
+        window.renderNotices({ cross_grade_detected: false, notices: { banners: [] } });
+        expect(banner.classList.contains('hidden')).toBe(true);
+    });
+});

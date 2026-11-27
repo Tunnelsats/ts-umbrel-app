@@ -1,0 +1,80 @@
+manifestVersion: 1.1
+id: tunnelsats-community
+category: bitcoin
+name: TunnelSats (Community)
+version: "3.6.3"
+tagline: Run your Lightning node on clearnet without exposing your home IP
+description: >-
+  ⚠️ TunnelSats is a paid service. You buy and renew a subscription with Lightning inside the app. On the Community App Store, TunnelSats can configure your Lightning Node or Core Lightning automatically (or show manual steps if you enable Secure Mode).
+
+
+  ⚠️ Once you activate or import a WireGuard subscription, TunnelSats enables a fail-closed kill switch for your Lightning node's clearnet traffic so your home IP cannot leak if the tunnel drops. Before you activate a subscription, your node's networking is not touched. Tor connections always keep working.
+
+
+  ⚠️ Before uninstalling an active setup, open Uninstall in the app and follow its steps. They undo your node config changes and lift the kill switch. If you skip them after activating a subscription, your node stays off clearnet until you restart your Umbrel. On the Community App Store, your WireGuard config is kept in persistent storage (tunnelsats-data) across uninstalls; download a backup in the app if you plan to move to the Official Umbrel App Store or another node.
+
+
+  ⚠️ Migrating from legacy Community TunnelSats: (1) download a .conf backup in the app as a precaution, (2) uninstall the old TunnelSats app in Umbrel App Store (skip the in-app Restore step so your subscription and kill switch stay intact), (3) install TunnelSats (Community) — your WireGuard subscription restores automatically from tunnelsats-data — and re-add any Home Screen widgets. Do not run Official TunnelSats and TunnelSats (Community) simultaneously.
+
+
+  TunnelSats connects your Umbrel to a TunnelSats server over WireGuard and sends only your Lightning node's traffic through it. Other nodes reach you on the server's public IP address, so you get the speed and reliability of clearnet without revealing your home IP. The rest of your Umbrel's traffic is not touched.
+
+
+  It works with Lightning Node (LND) and Core Lightning, and is useful if you have a dynamic home IP, are behind CGNAT, or want clearnet peering without the latency of Tor. If the tunnel goes down, your node's traffic is blocked instead of falling back to your home connection.
+
+
+  - Buy and renew in the app with Lightning, or renew automatically with Nostr Wallet Connect
+
+  - Choose from exit servers around the world
+
+  - Home screen widgets for tunnel status, data used and days left
+releaseNotes: "Add non-conflicting TunnelSats (Community) app package (tunnelsats-community, port 9741) for uninterrupted Community App Store push updates alongside the Official Umbrel App Store, add an in-app recovery banner if a Community install accidentally cross-grades to Official Secure Mode, and keep Official Store promotion pinned to id: tunnelsats (port 9739)."
+developer: TunnelSats Team
+website: https://tunnelsats.com
+dependencies: []
+repo: https://github.com/Tunnelsats/ts-umbrel-app
+support: https://tunnelsats.com/join-telegram
+port: 9741
+icon: https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/icon.svg
+gallery:
+  - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/1.png
+  - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/2.png
+  - https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/3.png
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+widgets:
+  - id: "status"
+    type: "four-stats"
+    refresh: "15s"
+    endpoint: "tunnelsats-web:9740/api/local/widgets/status"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "LND Shield"
+          text: "🟢 Active"
+          subtext: ""
+        - title: "Exit Node"
+          text: "🇺🇸 us3"
+          subtext: ""
+        - title: "Data Used"
+          text: "14.2"
+          subtext: "GB"
+        - title: "Expires ⚡"
+          text: "28"
+          subtext: "days"
+  - id: "overview"
+    type: "text-with-progress"
+    refresh: "15s"
+    endpoint: "tunnelsats-web:9740/api/local/widgets/overview"
+    link: ""
+    example:
+      type: "text-with-progress"
+      link: ""
+      title: "🟢 Active · LND · 🇺🇸 us3"
+      text: "28 days"
+      subtext: "left · ⚡ Auto"
+      progressLabel: "14.2 / 100 GB (14%)"
+      progress: 0.14

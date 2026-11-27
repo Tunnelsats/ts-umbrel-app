@@ -42,9 +42,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(grep "^version: " tunnelsats/umbrel-app.yml | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)
+          VERSION=$(grep "^version: " tunnelsats-community/umbrel-app.yml | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not extract version from tunnelsats/umbrel-app.yml"
+            echo "::error::Could not extract version from tunnelsats-community/umbrel-app.yml"
             exit 1
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT

@@ -4,9 +4,9 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-COMPOSE_PATH = REPO_ROOT / "tunnelsats" / "docker-compose.yml"
+COMPOSE_PATH = REPO_ROOT / "tunnelsats-community" / "docker-compose.yml"
 CI_COMPOSE_PATH = REPO_ROOT / "docker-compose.ci.yml"
-MANIFEST_PATH = REPO_ROOT / "tunnelsats" / "umbrel-app.yml"
+MANIFEST_PATH = REPO_ROOT / "tunnelsats-community" / "umbrel-app.yml"
 APP_PATH = REPO_ROOT / "server" / "app.py"
 SECURITY_PATH = REPO_ROOT / "server" / "security.py"
 TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "test.yml"
@@ -37,13 +37,14 @@ def test_split_runtime_compose_and_proxy_contract():
     proxy = compose["services"]["app_proxy"]
     proxy_env = environment_map(proxy)
     assert "network_mode" not in proxy
-    assert proxy_env["APP_HOST"] == "tunnelsats-web"
+    assert proxy_env["APP_HOST"] == "tunnelsats-community_tunnelsats-web_1"
     assert int(proxy_env["APP_PORT"]) == 9740
     assert proxy_env["PROXY_AUTH_ADD"] == "true"
     assert "PROXY_AUTH_WHITELIST" not in proxy_env
 
     web = compose["services"]["tunnelsats-web"]
     web_env = environment_map(web)
+    assert "container_name" not in web
     assert web.get("network_mode") != "host"
     assert "network_mode" not in web
     assert str(web["user"]) != "0"
@@ -51,6 +52,7 @@ def test_split_runtime_compose_and_proxy_contract():
     assert "cap_add" not in web
     assert "no-new-privileges:true" in web["security_opt"]
     assert web_env["TUNNELSATS_ROLE"] == "web"
+    assert web_env["UMBREL_APP_ID"] == "tunnelsats-community"
     assert web_env["DASHBOARD_BIND_HOST"] == "0.0.0.0"
     assert int(web_env["DASHBOARD_BIND_PORT"]) == 9740
     assert web_env["MANAGEMENT_BROWSER_SECURITY_ENABLED"] == "true"
@@ -62,8 +64,10 @@ def test_split_runtime_compose_and_proxy_contract():
 
     daemon = compose["services"]["tunnelsats-daemon"]
     daemon_env = environment_map(daemon)
+    assert "container_name" not in daemon
     assert daemon["network_mode"] == "host"
     assert daemon_env["TUNNELSATS_ROLE"] == "daemon"
+    assert daemon_env["UMBREL_APP_ID"] == "tunnelsats-community"
     assert set(daemon["cap_add"]) == {"NET_ADMIN", "NET_RAW"}
     assert "ports" not in daemon
 
@@ -80,7 +84,8 @@ def test_split_runtime_compose_and_proxy_contract():
     ):
         assert "SECURE_MODE" not in str(web_env[name])
 
-    assert manifest["port"] == 9739
+    assert manifest["id"] == "tunnelsats-community"
+    assert manifest["port"] == 9741
     assert manifest["defaultUsername"] == ""
     assert manifest["defaultPassword"] == ""
 

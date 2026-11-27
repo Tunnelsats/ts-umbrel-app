@@ -151,6 +151,7 @@ def test_dockerfile_compiles_tailwind_css_in_multistage_build_and_git_ignores_di
         "COPY --from=css-builder /build/web/dist/tailwind.css /app/web/dist/tailwind.css"
         in dockerfile
     )
+    assert "COPY tunnelsats-community/umbrel-app.yml /app/" in dockerfile
     assert "chmod -R a+rX /app/web" in dockerfile
 
     assert DOCKERIGNORE_PATH.exists()
@@ -168,6 +169,11 @@ def test_dockerfile_compiles_tailwind_css_in_multistage_build_and_git_ignores_di
         if line.strip() and not line.strip().startswith("#")
     }
     assert "web/dist/" in gitignore_entries
+    assert "tunnelsats-community/gallery/source/*" in gitignore_entries
+    assert "tunnelsats/gallery/source/*" in gitignore_entries
+
+    docker_release_text = (WORKFLOWS_DIR / "docker-release.yml").read_text(encoding="utf-8")
+    assert "tunnelsats-community/umbrel-app.yml" in docker_release_text
 
     tracked = subprocess.run(
         ["git", "ls-files", "web/dist/"],

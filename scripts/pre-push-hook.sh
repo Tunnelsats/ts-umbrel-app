@@ -24,9 +24,9 @@ if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
             fi
             
             # Check for newly pinned digests
-            if ! git diff --quiet -- tunnelsats/docker-compose.yml; then
-                git add tunnelsats/docker-compose.yml
-                if ! git commit -m "chore(release): auto-pin SHA256 digest index via promote hook" -- tunnelsats/docker-compose.yml; then
+            if ! git diff --quiet -- tunnelsats-community/docker-compose.yml; then
+                git add tunnelsats-community/docker-compose.yml
+                if ! git commit -m "chore(release): auto-pin SHA256 digest index via promote hook" -- tunnelsats-community/docker-compose.yml; then
                     echo -e "\033[0;31m[ERROR]\033[0m Failed to commit digest changes (check GPG config, pre-commit hooks, or git identity)."
                     exit 1
                 fi

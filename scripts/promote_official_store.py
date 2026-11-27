@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Official Umbrel App Store promotion transformer for TunnelSats.
 
-Validates the canonical Community Store manifests under tunnelsats/ and emits
-deterministic, linter-compliant Official Umbrel App Store manifests matching
-getumbrel/umbrel-apps PR #6433 parity without brittle sed mutations.
+Validates the canonical Community Store manifests under tunnelsats-community/
+and emits deterministic, linter-compliant Official Umbrel App Store manifests
+for id: tunnelsats (port 9739, Secure Mode) matching getumbrel/umbrel-apps
+parity without brittle sed mutations.
 """
 
 from __future__ import annotations
@@ -19,6 +20,14 @@ from typing import Any
 
 import yaml
 
+
+COMMUNITY_APP_ID = "tunnelsats-community"
+OFFICIAL_APP_ID = "tunnelsats"
+OFFICIAL_APP_NAME = "TunnelSats"
+OFFICIAL_APP_PORT = 9739
+OFFICIAL_APP_HOST = "tunnelsats_tunnelsats-web_1"
+OFFICIAL_APP_PORT_INTERNAL = "9740"
+STRIPPED_OFFICIAL_ENV_KEYS = frozenset({"UMBREL_APP_ID"})
 
 DEFAULT_SUBMISSION_URL = "https://github.com/getumbrel/umbrel-apps/pull/4919"
 DEFAULT_SUBMITTER = "Tunnelsats"
@@ -39,6 +48,26 @@ COMMUNITY_UNINSTALL_STORAGE_SENTENCE = (
 OFFICIAL_UNINSTALL_STORAGE_SENTENCE = (
     "Uninstalling also deletes your WireGuard config, so download a backup in the app "
     "first if you want to restore your subscription later."
+)
+COMMUNITY_MIGRATION_PARAGRAPH = (
+    "⚠️ Migrating from legacy Community TunnelSats: (1) download a .conf backup in the app "
+    "as a precaution, (2) uninstall the old TunnelSats app in Umbrel App Store (skip the "
+    "in-app Restore step so your subscription and kill switch stay intact), (3) install "
+    "TunnelSats (Community) — your WireGuard subscription restores automatically from "
+    "tunnelsats-data — and re-add any Home Screen widgets. Do not run Official TunnelSats "
+    "and TunnelSats (Community) simultaneously."
+)
+OFFICIAL_COMMUNITY_MIGRATION_RELEASE_NOTICE = (
+    "Community Store users: Do NOT click Update here (switches to Official Secure Mode). "
+    "Uninstall TunnelSats (skip in-app Restore) and install TunnelSats (Community) — "
+    "your subscription restores automatically. Official Store users: update normally."
+)
+FORBIDDEN_OFFICIAL_DESCRIPTION_TOKENS = (
+    "tunnelsats-community",
+    "tunnelsats-data",
+    "tunnelsats (community)",
+    "community app store",
+    "migrating from legacy community",
 )
 IMAGE_REPO = "tunnelsats/ts-umbrel-app"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -289,8 +318,8 @@ def render_official_compose(source_compose: dict[str, Any], version: str, digest
         "services:",
         "  app_proxy:",
         "    environment:",
-        "      APP_HOST: tunnelsats_tunnelsats-web_1",
-        '      APP_PORT: "9740"',
+        f"      APP_HOST: {OFFICIAL_APP_HOST}",
+        f'      APP_PORT: "{OFFICIAL_APP_PORT_INTERNAL}"',
         "",
         "  tunnelsats-web:",
         f"    image: {pinned_image}",
@@ -302,6 +331,8 @@ def render_official_compose(source_compose: dict[str, Any], version: str, digest
         "    environment:",
     ]
     for key, value in web_env_items:
+        if key in STRIPPED_OFFICIAL_ENV_KEYS:
+            continue
         lines.append(_format_env_entry(key, value))
     lines.extend(
         [
@@ -321,6 +352,8 @@ def render_official_compose(source_compose: dict[str, Any], version: str, digest
         ]
     )
     for key, value in daemon_env_items:
+        if key in STRIPPED_OFFICIAL_ENV_KEYS:
+            continue
         if key == "SECURE_MODE":
             lines.append("      # Secure Mode never edits Lightning config or uses the Docker socket")
             lines.append("      - SECURE_MODE=true")
@@ -346,9 +379,21 @@ def render_official_compose(source_compose: dict[str, Any], version: str, digest
     if not isinstance(parsed, dict) or "version" in parsed:
         raise ValueError("Generated official docker-compose.yml failed structure verification")
     proxy_env = _environment_map(parsed["services"]["app_proxy"])
-    if proxy_env.get("APP_HOST") != "tunnelsats_tunnelsats-web_1" or "PROXY_AUTH_ADD" in proxy_env:
+    if (
+        proxy_env.get("APP_HOST") != OFFICIAL_APP_HOST
+        or str(proxy_env.get("APP_PORT")) != OFFICIAL_APP_PORT_INTERNAL
+        or "PROXY_AUTH_ADD" in proxy_env
+    ):
         raise ValueError("Generated app_proxy environment failed verification")
-    daemon_env = _environment_map(parsed["services"]["tunnelsats-daemon"])
+    web_service = parsed["services"]["tunnelsats-web"]
+    daemon_service = parsed["services"]["tunnelsats-daemon"]
+    if "container_name" in web_service or "container_name" in daemon_service:
+        raise ValueError("Generated official docker-compose.yml must not declare container_name")
+    web_env = _environment_map(web_service)
+    daemon_env = _environment_map(daemon_service)
+    for stripped_key in STRIPPED_OFFICIAL_ENV_KEYS:
+        if stripped_key in web_env or stripped_key in daemon_env:
+            raise ValueError(f"Generated official docker-compose.yml must strip {stripped_key}")
     if daemon_env.get("SECURE_MODE") != "true":
         raise ValueError("Generated tunnelsats-daemon SECURE_MODE must be hard-pinned to 'true'")
     return rendered
@@ -408,8 +453,10 @@ def validate_source_manifest(manifest: Any) -> dict[str, Any]:
     for field in required_fields:
         if field not in manifest:
             raise ValueError(f"Source umbrel-app.yml is missing required field '{field}'")
-    if manifest["id"] != "tunnelsats":
-        raise ValueError(f"Expected manifest id 'tunnelsats', found {manifest['id']!r}")
+    if manifest["id"] != COMMUNITY_APP_ID:
+        raise ValueError(
+            f"Expected source manifest id {COMMUNITY_APP_ID!r}, found {manifest['id']!r}"
+        )
     if not isinstance(manifest["description"], str) or not manifest["description"].strip():
         raise ValueError("Source umbrel-app.yml description must be a non-empty string")
     if not isinstance(manifest["dependencies"], list):
@@ -418,12 +465,36 @@ def validate_source_manifest(manifest: Any) -> dict[str, Any]:
 
 
 def adapt_description_for_official_store(description: str) -> str:
-    """Adapt Community Store storage and setup notices to Official Store Secure Mode semantics."""
-    adapted = description.replace(COMMUNITY_SETUP_SENTENCE, OFFICIAL_SETUP_SENTENCE)
+    """Adapt Community Store storage, setup, and migration notices to Official Store Secure Mode semantics."""
+    adapted = description.replace("\r\n", "\n").replace("\r", "\n")
+    adapted = adapted.replace(COMMUNITY_SETUP_SENTENCE, OFFICIAL_SETUP_SENTENCE)
     adapted = adapted.replace(
         COMMUNITY_UNINSTALL_STORAGE_SENTENCE, OFFICIAL_UNINSTALL_STORAGE_SENTENCE
     )
+    adapted = adapted.replace(COMMUNITY_MIGRATION_PARAGRAPH, "")
+    adapted = re.sub(r"\n{3,}", "\n\n", adapted).strip("\n")
+
+    lowered = adapted.lower()
+    for token in FORBIDDEN_OFFICIAL_DESCRIPTION_TOKENS:
+        if token in lowered:
+            raise ValueError(
+                f"Adapted official store description still contains forbidden community token {token!r}"
+            )
     return adapted
+
+
+def adapt_release_notes_for_official_store(
+    release_notes: str, *, include_community_notice: bool = True
+) -> str:
+    """Front-load the concise 3-line Community Store cross-grade warning in Official releaseNotes."""
+    cleaned = " ".join(release_notes.replace("\r\n", "\n").replace("\r", "\n").split())
+    if not include_community_notice:
+        return cleaned
+    if cleaned.startswith(OFFICIAL_COMMUNITY_MIGRATION_RELEASE_NOTICE):
+        return cleaned
+    if cleaned:
+        return f"{OFFICIAL_COMMUNITY_MIGRATION_RELEASE_NOTICE} {cleaned}"
+    return OFFICIAL_COMMUNITY_MIGRATION_RELEASE_NOTICE
 
 
 def render_official_manifest(
@@ -431,25 +502,39 @@ def render_official_manifest(
     version: str,
     submission_url: str,
     gallery: list[str],
+    *,
+    include_community_notice: bool = True,
 ) -> str:
     validate_source_manifest(source_manifest)
 
     tagline = str(source_manifest["tagline"]).strip().rstrip(".")
     description = adapt_description_for_official_store(str(source_manifest["description"]))
-    release_notes = str(source_manifest.get("releaseNotes", ""))
+    release_notes = adapt_release_notes_for_official_store(
+        str(source_manifest.get("releaseNotes", "")),
+        include_community_notice=include_community_notice,
+    )
     default_username = str(source_manifest.get("defaultUsername", ""))
     default_password = str(source_manifest.get("defaultPassword", ""))
     path_val = str(source_manifest.get("path", ""))
     dependencies = source_manifest["dependencies"]
     widgets = source_manifest.get("widgets")
+    if widgets is not None:
+        if not isinstance(widgets, list):
+            raise ValueError("Source umbrel-app.yml widgets must be a list")
+        for widget in widgets:
+            endpoint = str(widget.get("endpoint", "")) if isinstance(widget, dict) else ""
+            if not endpoint.startswith(f"tunnelsats-web:{OFFICIAL_APP_PORT_INTERNAL}/"):
+                raise ValueError(
+                    f"Official widget endpoint must target tunnelsats-web:{OFFICIAL_APP_PORT_INTERNAL}/..., found {endpoint!r}"
+                )
 
     lines: list[str] = [
         f"manifestVersion: {source_manifest['manifestVersion']}",
-        f"id: {source_manifest['id']}",
+        f"id: {OFFICIAL_APP_ID}",
         "storage:",
         "  dataRoot: data",
         f"category: {source_manifest['category']}",
-        f"name: {_yaml_scalar_line(source_manifest['name'])}",
+        f"name: {_yaml_scalar_line(OFFICIAL_APP_NAME)}",
         f"version: {json.dumps(version, ensure_ascii=False)}",
         f"tagline: {_yaml_scalar_line(tagline)}",
         _format_folded_description(description),
@@ -471,7 +556,7 @@ def render_official_manifest(
             f"repo: {source_manifest['repo']}",
             f"support: {source_manifest['support']}",
             "",
-            f"port: {source_manifest['port']}",
+            f"port: {OFFICIAL_APP_PORT}",
             "gallery:",
         ]
     )
@@ -505,6 +590,12 @@ def render_official_manifest(
     parsed = yaml.safe_load(rendered)
     if not isinstance(parsed, dict):
         raise ValueError("Generated official umbrel-app.yml failed YAML parsing")
+    if parsed.get("id") != OFFICIAL_APP_ID:
+        raise ValueError(f"Generated official umbrel-app.yml id must be {OFFICIAL_APP_ID!r}")
+    if parsed.get("name") != OFFICIAL_APP_NAME:
+        raise ValueError(f"Generated official umbrel-app.yml name must be {OFFICIAL_APP_NAME!r}")
+    if parsed.get("port") != OFFICIAL_APP_PORT:
+        raise ValueError(f"Generated official umbrel-app.yml port must be {OFFICIAL_APP_PORT}")
     if "icon" in parsed:
         raise ValueError("Generated official umbrel-app.yml must not include 'icon'")
     if parsed.get("storage") != {"dataRoot": "data"}:
@@ -545,6 +636,7 @@ def promote_official_store(
     digest: str,
     submission_url: str = DEFAULT_SUBMISSION_URL,
     existing_manifest: Path | None = None,
+    include_community_notice: bool = True,
 ) -> None:
     clean_version = normalize_version(version)
     clean_digest = validate_digest(digest)
@@ -567,6 +659,7 @@ def promote_official_store(
         clean_version,
         clean_submission_url,
         gallery,
+        include_community_notice=include_community_notice,
     )
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -578,11 +671,21 @@ def promote_official_store(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate Official Umbrel App Store manifests from tunnelsats/ source."
+        description="Generate Official Umbrel App Store (tunnelsats) manifests from tunnelsats-community/ source."
     )
-    parser.add_argument("--source-dir", required=True, type=Path, help="Source tunnelsats/ directory")
-    parser.add_argument("--target-dir", required=True, type=Path, help="Target official store tunnelsats/ directory")
-    parser.add_argument("--version", required=True, help="Release SemVer (for example 3.6.1)")
+    parser.add_argument(
+        "--source-dir",
+        required=True,
+        type=Path,
+        help="Source tunnelsats-community/ directory",
+    )
+    parser.add_argument(
+        "--target-dir",
+        required=True,
+        type=Path,
+        help="Target official store tunnelsats/ directory",
+    )
+    parser.add_argument("--version", required=True, help="Release SemVer (for example 3.6.3)")
     parser.add_argument("--digest", required=True, help="Multi-arch image digest (sha256:...)")
     parser.add_argument(
         "--submission-url",
@@ -595,6 +698,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional existing official store umbrel-app.yml to preserve local gallery entries",
     )
+    parser.add_argument(
+        "--no-community-notice",
+        action="store_true",
+        help="Omit the front-loaded Community Store cross-grade warning from Official releaseNotes",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -605,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             digest=args.digest,
             submission_url=args.submission_url,
             existing_manifest=args.existing_manifest,
+            include_community_notice=not args.no_community_notice,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

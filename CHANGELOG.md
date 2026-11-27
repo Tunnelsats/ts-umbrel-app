@@ -47,3 +47,7 @@
 ## [3.6.2]
 
 - Remove obsolete iptables mangle CONNMARK dependency from Official App Store Secure Mode (fixing UmbrelOS 2.0 + Tailscale native nftables compatibility), add bounded Docker API timeouts, per-cycle reconcile watchdog, steady-state periodic verification without pref 32762 flapping, and fail-closed stale-heartbeat and live pref 32762 status detection
+
+## [3.6.3]
+
+- Add non-conflicting TunnelSats (Community) app package (tunnelsats-community, port 9741) for uninterrupted Community App Store push updates alongside the Official Umbrel App Store, add an in-app recovery banner if a Community install accidentally cross-grades to Official Secure Mode, and keep Official Store promotion pinned to id: tunnelsats (port 9739).

@@ -1,3 +1,6 @@
+# TEMPORARY CONFLICT-GUARD STUB — canonical Community package now lives in
+# tunnelsats-community/. Remove this entire tunnelsats/ directory immediately after
+# Official Store v3.6.3 merges into getumbrel/umbrel-apps.
 services:
   app_proxy:
     # Umbrel injects the authenticated proxy image and public port. Its target
@@ -9,7 +12,6 @@ services:
 
   tunnelsats-web:
     image: tunnelsats/ts-umbrel-app:3.6.2
-    container_name: tunnelsats-web
     restart: on-failure
     user: "1000:1000"
     cap_drop:
@@ -30,7 +32,6 @@ services:
   # the routing and firewall rules that send Lightning traffic through it
   tunnelsats-daemon:
     image: tunnelsats/ts-umbrel-app:3.6.2
-    container_name: tunnelsats-daemon
     restart: on-failure
     network_mode: "host"
     cap_add:

@@ -1,6 +1,6 @@
 #!/bin/bash
 # TunnelSats Node Diagnostic Utility (Development Wrapper)
-# Proxies to the bundled troubleshooting script in tunnelsats/scripts/
+# Proxies to the bundled troubleshooting script in tunnelsats-community/scripts/
 set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
@@ -10,7 +10,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGET_SCRIPT="${REPO_ROOT}/tunnelsats/scripts/verify.sh"
+TARGET_SCRIPT="${REPO_ROOT}/tunnelsats-community/scripts/verify.sh"
 
 if [ ! -f "$TARGET_SCRIPT" ]; then
     echo "[ERROR] Verification script not found at $TARGET_SCRIPT" >&2

@@ -64,7 +64,7 @@ app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.6.2"
+APP_VERSION = "v3.6.3"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -1110,8 +1110,33 @@ def audit_node_announcement_config(
 DEFAULT_LIGHTNING_PORT = 9735
 UMBREL_LND_CONTAINER = "lightning_lnd_1"
 UMBREL_CLN_CONTAINER = "core-lightning_lightningd_1"
-UMBREL_TUNNELSATS_COMPOSE = "/home/umbrel/umbrel/app-data/tunnelsats/docker-compose.yml"
+DEFAULT_UMBREL_APP_ID = "tunnelsats"
+_UMBREL_APP_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def resolve_umbrel_app_id(raw_value: Any = None) -> str:
+    """Return a sanitized Umbrel app ID (defaulting to ``tunnelsats``)."""
+    source = os.environ.get("UMBREL_APP_ID", "") if raw_value is None else raw_value
+    candidate = str(source or "").strip()
+    if candidate and _UMBREL_APP_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return DEFAULT_UMBREL_APP_ID
+
+
+def umbrel_tunnelsats_compose_path(app_id: Any = None) -> str:
+    """Return the Umbrel host docker-compose.yml path for the active TunnelSats edition."""
+    resolved = resolve_umbrel_app_id(app_id)
+    return f"/home/umbrel/umbrel/app-data/{resolved}/docker-compose.yml"
+
+
+UMBREL_APP_ID = resolve_umbrel_app_id()
+UMBREL_TUNNELSATS_COMPOSE = umbrel_tunnelsats_compose_path(UMBREL_APP_ID)
 TUNNELSATS_DOMAIN_SUFFIX = ".tunnelsats.com"
+CROSS_GRADE_NOTICE_ID = "community_cross_grade_recovery"
+_STANDARD_MODE_IP_REMNANT_RE = re.compile(
+    r"(?<![0-9.])(?:10\.9\.9\.0/25|10\.9\.9\.9(?:/32)?|10\.9\.9\.1(?:/\d+)?)(?![0-9.])"
+)
+_IP_LINK_UP_RE = re.compile(r"<[^>]*\bUP\b[^>]*>")
 DOCKER_CONTAINER_LOOKUP_COMMAND = (
     "sudo docker ps --format '{{.Names}}' | grep -iE 'lnd|lightning|tunnelsats'"
 )
@@ -1283,6 +1308,111 @@ def _detect_active_reconcile_kill_switch(
     # remaining blackhole rule (protected Docker subnet, target IP, or managed
     # endpoint) indicates the temporary reconciliation kill switch is still active.
     return True, parsed_sources
+
+
+def detect_community_cross_grade(
+    configs: Optional[List[str]] = None,
+    *,
+    secure_mode: Optional[bool] = None,
+    k3s_mode: Optional[bool] = None,
+    role: Optional[str] = None,
+    run_cmd: Optional[Callable[..., Any]] = None,
+) -> Tuple[bool, List[str]]:
+    """Detect an accidental Community -> Official Store cross-grade in Secure Mode.
+
+    Triggers only when:
+    - ``SECURE_MODE`` is True and ``K3S_MODE`` is False (and not ``web``-only role),
+    - ``/data`` has no ``tunnelsats*.conf`` WireGuard configuration, and
+    - Live host kernel state shows Community Standard Mode (``docker-full-parity``)
+      remnants: ``ip rule show`` or ``ip route show`` referencing ``10.9.9.0/25``,
+      ``10.9.9.9``, or ``10.9.9.1``.
+
+    An existing ``tunnelsatsv2`` WireGuard interface is recorded only as corroborating
+    evidence when Standard Mode ``10.9.9.*`` remnants are present — never as a
+    standalone trigger — so an Official-only reinstall (where skipping Restore leaves
+    ``tunnelsatsv2`` up while ``app-data/tunnelsats-data/`` never existed) does not
+    raise a false Community recovery warning.
+    """
+    is_secure = SECURE_MODE if secure_mode is None else bool(secure_mode)
+    is_k3s = K3S_MODE if k3s_mode is None else bool(k3s_mode)
+    effective_role = TUNNELSATS_ROLE if role is None else str(role).strip().lower()
+    if not is_secure or is_k3s or effective_role == "web":
+        return False, []
+
+    if configs is None:
+        config_list: List[str] = []
+        if os.path.isdir(DATA_DIR):
+            try:
+                config_list = [f for f in os.listdir(DATA_DIR) if f.endswith(".conf")]
+            except OSError:
+                config_list = []
+    else:
+        config_list = list(configs)
+
+    if any(
+        str(name).startswith("tunnelsats") and str(name).endswith(".conf")
+        for name in config_list
+    ):
+        return False, []
+
+    runner = run_cmd or subprocess.run
+    evidence: List[str] = []
+
+    def _safe_run(cmd: List[str]) -> Tuple[int, str]:
+        try:
+            res = runner(cmd, capture_output=True, text=True, timeout=2)
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            return 1, ""
+        rc = getattr(res, "returncode", 1)
+        out = getattr(res, "stdout", "")
+        return rc, out if isinstance(out, str) else ""
+
+    rc, rule_out = _safe_run(["ip", "rule", "show"])
+    if rc == 0 and rule_out:
+        match = _STANDARD_MODE_IP_REMNANT_RE.search(rule_out)
+        if match:
+            evidence.append(f"ip_rule:{match.group(0)}")
+
+    rc, route_out = _safe_run(["ip", "route", "show"])
+    if rc == 0 and route_out:
+        match = _STANDARD_MODE_IP_REMNANT_RE.search(route_out)
+        if match:
+            evidence.append(f"ip_route:{match.group(0)}")
+
+    if not evidence:
+        return False, []
+
+    wg_detected = False
+    rc, wg_out = _safe_run(["wg", "show", WG_INTERFACE_NAME])
+    if rc == 0 and f"interface: {WG_INTERFACE_NAME}" in wg_out:
+        wg_detected = True
+        evidence.append(f"wg_interface:{WG_INTERFACE_NAME}")
+
+    if not wg_detected:
+        rc, link_out = _safe_run(["ip", "link", "show", "dev", WG_INTERFACE_NAME])
+        if rc == 0 and WG_INTERFACE_NAME in link_out and _IP_LINK_UP_RE.search(link_out):
+            evidence.append(f"ip_link:{WG_INTERFACE_NAME}")
+
+    return True, evidence
+
+
+def _build_cross_grade_recovery_banner(evidence: List[str]) -> Dict[str, Any]:
+    return {
+        "id": CROSS_GRADE_NOTICE_ID,
+        "kind": "cross_grade",
+        "severity": "critical",
+        "title": "Community Edition Config Detected (Official Secure Mode Active)",
+        "message": (
+            "Your WireGuard config is still safe in app-data/tunnelsats-data/. "
+            "Option 1 (Return to Community Automatic Mode — zero re-import): "
+            "Uninstall TunnelSats in the Umbrel App Store (skip in-app Restore) and install "
+            "TunnelSats (Community) from the TunnelSats Community App Store — your subscription restores automatically. "
+            "Option 2 (Stay on Official Secure Mode): "
+            "Import tunnelsats.conf from app-data/tunnelsats-data/ and reboot Umbrel to clear the old Docker bridge route."
+        ),
+        "action_type": "cross_grade_recovery",
+        "evidence": list(evidence),
+    }
 
 
 def _normalize_host(host: Any) -> str:
@@ -1531,8 +1661,13 @@ def build_announcement_help(
             if config_path else None
         )
         # Compose service names work whether or not the store stripped container_name.
+        compose_path = (
+            umbrel_tunnelsats_compose_path(os.environ.get("UMBREL_APP_ID"))
+            if "UMBREL_APP_ID" in os.environ
+            else UMBREL_TUNNELSATS_COMPOSE
+        )
         logs_commands = [
-            f"sudo docker compose -f {UMBREL_TUNNELSATS_COMPOSE} logs --tail 100 {service}"
+            f"sudo docker compose -f {compose_path} logs --tail 100 {service}"
             for service in ("tunnelsats-daemon", "tunnelsats-web")
         ]
     return {
@@ -5407,11 +5542,13 @@ def _build_local_status_dict() -> Dict[str, Any]:
     else:
         active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))
 
-    # Probe live kernel pref 32762 blackhole rules before querying the WireGuard
-    # interface address so the final subprocess.run call remains ip -4 addr show.
+    # Probe live kernel pref 32762 blackhole rules and Community->Official cross-grade
+    # remnants before querying the WireGuard interface address so the final
+    # subprocess.run call remains ip -4 addr show.
     kill_switch_active, kill_switch_sources = _detect_active_reconcile_kill_switch(
         dataplane, active_target_impl, lnd_ip, cln_ip
     )
+    cross_grade_detected, cross_grade_evidence = detect_community_cross_grade(configs)
 
     # Dynamic Internal IP Recovery
     vpn_internal_ip = ""
@@ -5605,6 +5742,18 @@ def _build_local_status_dict() -> Dict[str, Any]:
     )
     telemetry = compute_bandwidth_telemetry(telemetry_src)
     notices = evaluate_subscription_notices(DATA_DIR, meta_data)
+    if cross_grade_detected:
+        existing_banners = list(notices.get("banners") or [])
+        notices = {
+            **notices,
+            "cross_grade_detected": True,
+            "banners": [_build_cross_grade_recovery_banner(cross_grade_evidence), *existing_banners],
+        }
+    else:
+        notices = {
+            **notices,
+            "cross_grade_detected": False,
+        }
     wallet_on_disk = load_nwc_wallet(DATA_DIR)
     nwc_connected = bool(meta_data.get("nwcConnected") and wallet_on_disk)
     nwc_state_dict = (
@@ -5712,6 +5861,8 @@ def _build_local_status_dict() -> Dict[str, Any]:
         "last_synced_at": telemetry["last_synced_at"],
         "nwc": nwc_info,
         "notices": notices,
+        "cross_grade_detected": bool(cross_grade_detected),
+        "cross_grade_evidence": cross_grade_evidence,
         "pending_order": _sanitize_pending_record(meta_data.get("pendingOrder")),
         "pending_renewal": _sanitize_pending_record(meta_data.get("pendingRenewal")),
         "pending_reset": _sanitize_pending_record(meta_data.get("pendingReset")),
