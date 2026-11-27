@@ -163,7 +163,7 @@ def test_manifest_declares_both_umbrel_widgets_and_survives_promotion(tmp_path):
     import yaml
 
     repo_root = Path(__file__).resolve().parents[2]
-    manifest_path = repo_root / "tunnelsats" / "umbrel-app.yml"
+    manifest_path = repo_root / "tunnelsats-community" / "umbrel-app.yml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
 
     assert isinstance(manifest.get("widgets"), list), "Expected `widgets` list in umbrel-app.yml"
@@ -194,7 +194,7 @@ def test_manifest_declares_both_umbrel_widgets_and_survives_promotion(tmp_path):
         repo_root / "scripts" / "promote_official_store.py",
         project / "scripts" / "promote_official_store.py",
     )
-    shutil.copytree(repo_root / "tunnelsats", project / "tunnelsats")
+    shutil.copytree(repo_root / "tunnelsats-community", project / "tunnelsats-community")
 
     store = tmp_path / "umbrel-apps"
     store.mkdir()

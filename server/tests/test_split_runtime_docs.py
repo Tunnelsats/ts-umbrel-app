@@ -5,9 +5,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_split_runtime_verify_script_and_docs_contract():
-    verify_source = (REPO_ROOT / "tunnelsats" / "scripts" / "verify.sh").read_text()
+    verify_source = (REPO_ROOT / "tunnelsats-community" / "scripts" / "verify.sh").read_text()
     assert "tunnelsats-web" in verify_source
     assert "tunnelsats-daemon" in verify_source
+    assert "com.docker.compose.project=" in verify_source
+    assert "tunnelsats-community" in verify_source
+    assert "app-data/tunnelsats-data" in verify_source
+    assert "app-data/tunnelsats-community" in verify_source
+    assert "app-data/tunnelsats/data" in verify_source
     assert "docker exec tunnelsats " not in verify_source
 
     readme = (REPO_ROOT / "README.md").read_text()

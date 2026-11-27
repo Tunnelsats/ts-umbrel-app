@@ -35,7 +35,7 @@ COPY scripts/ /app/scripts/
 COPY web/ /app/web/
 COPY --from=css-builder /build/web/dist/tailwind.css /app/web/dist/tailwind.css
 COPY server/ /app/server/
-COPY tunnelsats/umbrel-app.yml /app/
+COPY tunnelsats-community/umbrel-app.yml /app/
 RUN for f in /app/scripts/*.sh; do tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done \
     && chmod +x /app/scripts/*.sh \
     && chmod -R a+rX /app/web /app/server /app/umbrel-app.yml

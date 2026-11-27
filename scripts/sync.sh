@@ -1,7 +1,7 @@
 #!/bin/bash
 # TunnelSats Unified Synchronization & Workflow
-# Standardized RSync deployment for Umbrel 1.x
-# Canonical compose lives under tunnelsats/ for app-store parity.
+# Standardized RSync deployment for Umbrel 1.x/2.x
+# Canonical compose lives under tunnelsats-community/ for Community App Store parity.
 
 set -euo pipefail
 
@@ -53,13 +53,17 @@ usage() {
 # This is the dev inner loop: rsync to staging → docker cp → restart.
 # Does NOT touch app-stores. The community store pulls from GitHub automatically.
 run_node() {
-    log_info "Hot-patching tunnelsats on ${UMBREL_HOST}..."
+    APP_ID="${APP_ID:-tunnelsats-community}"
+    if ! [[ "${APP_ID}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_error "Invalid APP_ID: ${APP_ID}"
+        exit 1
+    fi
+    log_info "Hot-patching ${APP_ID} on ${UMBREL_HOST}..."
 
     export SSHPASS="${UMBREL_PASSWORD:-}"
     SSH_PREFIX=""
     if [ -n "$SSHPASS" ]; then SSH_PREFIX="sshpass -e "; fi
 
-    APP_ID="tunnelsats"
     UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/${APP_ID}"
     UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
 
@@ -68,7 +72,7 @@ run_node() {
     HAS_APP=$(${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new umbrel@${UMBREL_HOST} \
         "test -d ${UMBREL_APP_DATA} && echo yes || echo no")
     if [ "$HAS_APP" = "no" ]; then
-        log_error "tunnelsats not installed. Run: umbreld client apps.install.mutate --appId tunnelsats"
+        log_error "${APP_ID} not installed. Run: umbreld client apps.install.mutate --appId ${APP_ID}"
         exit 1
     fi
 
@@ -95,14 +99,18 @@ run_node() {
     SECURE_MODE_VAL="${SECURE_MODE:-false}"
     (
         echo "SSHPASS=\"${SSHPASS}\""
+        echo "APP_ID=\"${APP_ID}\""
         echo "SECURE_MODE_VAL=\"${SECURE_MODE_VAL}\""
         cat << 'EOF'
 set -euo pipefail
-APP_ID="tunnelsats"
 WEB_CONTAINER=""
 DAEMON_CONTAINER=""
-UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/tunnelsats"
+UMBREL_APP_DATA="/home/umbrel/umbrel/app-data/${APP_ID}"
 UMBREL_COMPOSE="${UMBREL_APP_DATA}/docker-compose.yml"
+PROXY_PORT_VAL="9741"
+if [ "${APP_ID}" = "tunnelsats" ]; then
+    PROXY_PORT_VAL="9739"
+fi
 
 run_sudo() {
     if [ -n "${SSHPASS:-}" ]; then
@@ -115,8 +123,12 @@ run_sudo() {
 # Keep the installed app definition aligned with the code being hot-patched.
 # Only umbreld may restart this Compose model because it injects the complete
 # authenticated app_proxy service (image, auth secret, and public port).
-run_sudo cp /home/umbrel/dev-patch/tunnelsats/docker-compose.yml "${UMBREL_COMPOSE}"
-run_sudo cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+run_sudo cp /home/umbrel/dev-patch/tunnelsats-community/docker-compose.yml "${UMBREL_COMPOSE}"
+run_sudo cp /home/umbrel/dev-patch/tunnelsats-community/umbrel-app.yml "${UMBREL_APP_DATA}/umbrel-app.yml"
+run_sudo sed -i "s|APP_HOST: tunnelsats-community_tunnelsats-web_1|APP_HOST: ${APP_ID}_tunnelsats-web_1|g" "${UMBREL_COMPOSE}"
+run_sudo sed -i "s|UMBREL_APP_ID=tunnelsats-community|UMBREL_APP_ID=${APP_ID}|g" "${UMBREL_COMPOSE}"
+run_sudo sed -i "s|^id: tunnelsats-community$|id: ${APP_ID}|" "${UMBREL_APP_DATA}/umbrel-app.yml"
+run_sudo sed -i "s|^port: 9741$|port: ${PROXY_PORT_VAL}|" "${UMBREL_APP_DATA}/umbrel-app.yml"
 TARGET_IMAGE=$(run_sudo grep "image: tunnelsats/ts-umbrel-app:" "${UMBREL_COMPOSE}" | head -n 1 | awk '{print $2}')
 EXISTING_IMAGE=$(run_sudo docker images --format "{{.Repository}}:{{.Tag}}" | grep "^tunnelsats/ts-umbrel-app:" | head -n 1)
 if [ -n "${EXISTING_IMAGE}" ] && [ -n "${TARGET_IMAGE}" ]; then
@@ -126,27 +138,27 @@ if ! run_sudo grep -A 3 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "ima
     run_sudo sed -i '/app_proxy:/a \    image: getumbrel/app-proxy:1.7.0' "${UMBREL_COMPOSE}"
 fi
 if ! run_sudo grep -A 15 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "ports:"; then
-    run_sudo sed -i '/app_proxy:/a \    ports:\n      - "9739:9739"\n    volumes:\n      - '"${UMBREL_APP_DATA}"'/umbrel-app.yml:/extra/umbrel-app.yml:ro' "${UMBREL_COMPOSE}"
+    run_sudo sed -i '/app_proxy:/a \    ports:\n      - "'"${PROXY_PORT_VAL}:${PROXY_PORT_VAL}"'"\n    volumes:\n      - '"${UMBREL_APP_DATA}"'/umbrel-app.yml:/extra/umbrel-app.yml:ro' "${UMBREL_COMPOSE}"
 fi
-if ! run_sudo grep -A 10 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "UMBREL_AUTH_SECRET"; then
-    run_sudo sed -i 's|APP_PORT: "9740"|APP_PORT: "9740"\n      AUTH_SERVICE_PORT: "2000"\n      PROXY_PORT: "9739"\n      UMBREL_AUTH_SECRET: DEADBEEF\n      JWT_SECRET: 10e3158d95b3fc002b2b8873f741488887c72e439bd248835cbb1f5fed63f31e\n      MANAGER_IP: tunnelsats-web\n      MANAGER_PORT: "9740"|' "${UMBREL_COMPOSE}"
+if ! run_sudo grep -A 20 "app_proxy:" "${UMBREL_COMPOSE}" | run_sudo grep -q "UMBREL_AUTH_SECRET"; then
+    run_sudo sed -i 's|APP_PORT: "9740"|APP_PORT: "9740"\n      AUTH_SERVICE_PORT: "2000"\n      PROXY_PORT: "'"${PROXY_PORT_VAL}"'"\n      UMBREL_AUTH_SECRET: DEADBEEF\n      JWT_SECRET: 10e3158d95b3fc002b2b8873f741488887c72e439bd248835cbb1f5fed63f31e\n      MANAGER_IP: '"${APP_ID}"'_tunnelsats-web_1\n      MANAGER_PORT: "9740"|' "${UMBREL_COMPOSE}"
 fi
 run_sudo sed -i "s|SECURE_MODE=\${SECURE_MODE:-false}|SECURE_MODE=${SECURE_MODE_VAL}|" "${UMBREL_COMPOSE}"
 if [ "${SECURE_MODE_VAL}" = "true" ]; then
-    if ! run_sudo grep -A 10 "tunnelsats-web:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
+    if ! run_sudo grep -A 20 "tunnelsats-web:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
         run_sudo sed -i 's|MANAGEMENT_TRUSTED_PROXY_HOST=app_proxy|MANAGEMENT_TRUSTED_PROXY_HOST=app_proxy\n      - SECURE_MODE=true|' "${UMBREL_COMPOSE}"
     fi
-    if ! run_sudo grep -A 10 "tunnelsats-daemon:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
+    if ! run_sudo grep -A 20 "tunnelsats-daemon:" "${UMBREL_COMPOSE}" | run_sudo grep -q "SECURE_MODE=true"; then
         run_sudo sed -i 's|MANAGEMENT_BROWSER_SECURITY_ENABLED=false|MANAGEMENT_BROWSER_SECURITY_ENABLED=false\n      - SECURE_MODE=true|' "${UMBREL_COMPOSE}"
     fi
 fi
 if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
-    run_sudo sed -i 's|${APP_DATA_DIR}/runtime:/run/tunnelsats|${APP_DATA_DIR}/runtime:/run/tunnelsats\n      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml:/app/umbrel-app.yml:ro|g' "${UMBREL_COMPOSE}"
+    run_sudo sed -i 's|${APP_DATA_DIR}/runtime:/run/tunnelsats|${APP_DATA_DIR}/runtime:/run/tunnelsats\n      - /home/umbrel/dev-patch/scripts/entrypoint.sh:/app/scripts/entrypoint.sh:ro\n      - /home/umbrel/dev-patch/server:/app/server:ro\n      - /home/umbrel/dev-patch/web:/app/web:ro\n      - /home/umbrel/dev-patch/scripts:/app/scripts:ro\n      - /home/umbrel/dev-patch/tunnelsats-community/umbrel-app.yml:/app/umbrel-app.yml:ro|g' "${UMBREL_COMPOSE}"
 fi
 run_sudo umbreld client apps.restart.mutate --appId "${APP_ID}"
 for i in $(seq 1 10); do
-    WEB_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-web | head -n 1)"
-    DAEMON_CONTAINER="$(run_sudo docker ps -q --filter label=com.docker.compose.service=tunnelsats-daemon | head -n 1)"
+    WEB_CONTAINER="$(run_sudo docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-web" | head -n 1)"
+    DAEMON_CONTAINER="$(run_sudo docker ps -q --filter "label=com.docker.compose.project=${APP_ID}" --filter "label=com.docker.compose.service=tunnelsats-daemon" | head -n 1)"
     if [ -z "${WEB_CONTAINER}" ] || [ -z "${DAEMON_CONTAINER}" ]; then
         sleep 1
         continue
@@ -168,8 +180,8 @@ if ! run_sudo grep -q "/home/umbrel/dev-patch/server" "${UMBREL_COMPOSE}"; then
     run_sudo docker cp /home/umbrel/dev-patch/web/. "${WEB_CONTAINER}":/app/web/
     run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${WEB_CONTAINER}":/app/scripts/
     run_sudo docker cp /home/umbrel/dev-patch/scripts/. "${DAEMON_CONTAINER}":/app/scripts/
-    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${WEB_CONTAINER}":/app/umbrel-app.yml
-    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats/umbrel-app.yml "${DAEMON_CONTAINER}":/app/umbrel-app.yml
+    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats-community/umbrel-app.yml "${WEB_CONTAINER}":/app/umbrel-app.yml
+    run_sudo docker cp /home/umbrel/dev-patch/tunnelsats-community/umbrel-app.yml "${DAEMON_CONTAINER}":/app/umbrel-app.yml
     run_sudo docker exec --user 0 "${WEB_CONTAINER}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null || true
     run_sudo docker exec --user 0 "${DAEMON_CONTAINER}" chmod +x /app/scripts/entrypoint.sh /app/scripts/sync.sh 2>/dev/null || true
 fi
@@ -177,7 +189,7 @@ run_sudo docker restart "${WEB_CONTAINER}" "${DAEMON_CONTAINER}" >/dev/null
 EOF
     ) | ${SSH_PREFIX}ssh -o StrictHostKeyChecking=accept-new -T umbrel@${UMBREL_HOST} bash
 
-    log_info "Deploy successful! tunnelsats hot-patched on ${UMBREL_HOST}."
+    log_info "Deploy successful! ${APP_ID} hot-patched on ${UMBREL_HOST}."
 }
 
 run_monorepo() {
@@ -319,7 +331,7 @@ run_promote() {
         log_info "[DRY RUN] Previewing changes without writing to target..."
     fi
 
-    VERSION="${VERSION:-$(grep "^version: " "${REPO_ROOT}/tunnelsats/umbrel-app.yml" | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)}"
+    VERSION="${VERSION:-$(grep "^version: " "${REPO_ROOT}/tunnelsats-community/umbrel-app.yml" | sed -E 's/version: "?([^" ]+)"?.*/\1/' | head -1)}"
     if [ -z "$VERSION" ]; then log_error "Could not extract version"; return 1; fi
     log_info "Promoting version: ${VERSION}"
 
@@ -357,7 +369,7 @@ run_promote() {
     local promote_status=0
     if [ -f "${existing_manifest}" ]; then
         python3 "${REPO_ROOT}/scripts/promote_official_store.py" \
-            --source-dir "${REPO_ROOT}/tunnelsats" \
+            --source-dir "${REPO_ROOT}/tunnelsats-community" \
             --target-dir "${stage_dir}" \
             --version "${VERSION#v}" \
             --digest "${DIGEST}" \
@@ -365,7 +377,7 @@ run_promote() {
             --existing-manifest "${existing_manifest}" || promote_status=$?
     else
         python3 "${REPO_ROOT}/scripts/promote_official_store.py" \
-            --source-dir "${REPO_ROOT}/tunnelsats" \
+            --source-dir "${REPO_ROOT}/tunnelsats-community" \
             --target-dir "${stage_dir}" \
             --version "${VERSION#v}" \
             --digest "${DIGEST}" \

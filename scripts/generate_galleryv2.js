@@ -59,9 +59,9 @@ async function processGallery() {
     for (const slide of slides) {
         console.log(`Processing ${slide.output}...`);
 
-        // Target: tunnelsats/gallery/ relative to project root
+        // Target: tunnelsats-community/gallery/ relative to project root
         // Since we're in scripts/, we go up one level
-        const galleryDir = path.join(__dirname, '..', 'tunnelsats', 'gallery');
+        const galleryDir = path.join(__dirname, '..', 'tunnelsats-community', 'gallery');
         const sourceDir = path.join(galleryDir, 'source');
         
         const inputPath = path.join(sourceDir, slide.input);

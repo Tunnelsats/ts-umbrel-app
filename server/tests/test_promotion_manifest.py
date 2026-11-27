@@ -26,7 +26,7 @@ def setup_promotion_project(tmp_path):
     promote_script = REPO_ROOT / "scripts" / "promote_official_store.py"
     if promote_script.exists():
         shutil.copy2(promote_script, project / "scripts" / "promote_official_store.py")
-    shutil.copytree(REPO_ROOT / "tunnelsats", project / "tunnelsats")
+    shutil.copytree(REPO_ROOT / "tunnelsats-community", project / "tunnelsats-community")
     return project
 
 
@@ -44,25 +44,55 @@ def make_fake_docker_bin(tmp_path, digest_hex_char="a"):
 
 
 def test_canonical_community_source_manifest_and_gitkeep_parity():
-    data_gitkeep = REPO_ROOT / "tunnelsats" / "data" / ".gitkeep"
-    runtime_gitkeep = REPO_ROOT / "tunnelsats" / "runtime" / ".gitkeep"
+    root_compose = REPO_ROOT / "docker-compose.yml"
+    assert root_compose.is_symlink()
+    assert os.readlink(root_compose) == "tunnelsats-community/docker-compose.yml"
+
+    data_gitkeep = REPO_ROOT / "tunnelsats-community" / "data" / ".gitkeep"
+    runtime_gitkeep = REPO_ROOT / "tunnelsats-community" / "runtime" / ".gitkeep"
     assert data_gitkeep.exists() and data_gitkeep.stat().st_size == 0
     assert runtime_gitkeep.exists() and runtime_gitkeep.stat().st_size == 0
 
-    compose = yaml.safe_load((REPO_ROOT / "tunnelsats" / "docker-compose.yml").read_text(encoding="utf-8"))
+    compose = yaml.safe_load((REPO_ROOT / "tunnelsats-community" / "docker-compose.yml").read_text(encoding="utf-8"))
     assert "version" not in compose
+    assert "container_name" not in compose["services"]["tunnelsats-web"]
+    assert "container_name" not in compose["services"]["tunnelsats-daemon"]
+    proxy_env = environment_map(compose["services"]["app_proxy"])
+    assert proxy_env["APP_HOST"] == "tunnelsats-community_tunnelsats-web_1"
+    assert str(proxy_env["APP_PORT"]) == "9740"
+    assert environment_map(compose["services"]["tunnelsats-web"])["UMBREL_APP_ID"] == "tunnelsats-community"
+    assert environment_map(compose["services"]["tunnelsats-daemon"])["UMBREL_APP_ID"] == "tunnelsats-community"
     daemon_volumes = [str(v) for v in compose["services"]["tunnelsats-daemon"]["volumes"]]
     data_idx = daemon_volumes.index("${APP_DATA_DIR}/../tunnelsats-data:/data")
     assert daemon_volumes[data_idx + 1] == "${APP_DATA_DIR}/runtime:/run/tunnelsats"
 
-    manifest = yaml.safe_load((REPO_ROOT / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8"))
-    assert manifest["name"] == "TunnelSats"
+    manifest = yaml.safe_load((REPO_ROOT / "tunnelsats-community" / "umbrel-app.yml").read_text(encoding="utf-8"))
+    assert manifest["id"] == "tunnelsats-community"
+    assert manifest["name"] == "TunnelSats (Community)"
+    assert manifest["port"] == 9741
     assert manifest["tagline"] == "Run your Lightning node on clearnet without exposing your home IP"
+    assert manifest["icon"] == "https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/icon.svg"
+    assert manifest["gallery"] == [
+        "https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/1.png",
+        "https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/2.png",
+        "https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/master/tunnelsats-community/gallery/3.png",
+    ]
     assert "storage" not in manifest
     assert "even before you subscribe" not in manifest["description"]
     assert "Before you activate a subscription, your node's networking is not touched." in manifest["description"]
+    assert "Migrating from legacy Community TunnelSats:" in manifest["description"]
+    assert "Do not run Official TunnelSats and TunnelSats (Community) simultaneously." in manifest["description"]
+    assert manifest["widgets"][0]["endpoint"] == "tunnelsats-web:9740/api/local/widgets/status"
+    assert manifest["widgets"][1]["endpoint"] == "tunnelsats-web:9740/api/local/widgets/overview"
     assert manifest["widgets"][1]["example"]["progressLabel"] == "14.2 / 100 GB (14%)"
     assert manifest["widgets"][1]["example"]["progress"] == 0.14
+
+    # Temporary conflict-guard stub stays valid and free of hardcoded container_name until Official v3.6.3 merges
+    stub_manifest = yaml.safe_load((REPO_ROOT / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8"))
+    stub_compose = yaml.safe_load((REPO_ROOT / "tunnelsats" / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert stub_manifest["id"] == "tunnelsats"
+    assert "container_name" not in stub_compose["services"]["tunnelsats-web"]
+    assert "container_name" not in stub_compose["services"]["tunnelsats-daemon"]
 
 
 def test_promotion_generates_linter_compatible_split_manifest(tmp_path):
@@ -123,7 +153,10 @@ def test_promotion_generates_linter_compatible_split_manifest(tmp_path):
     assert services["tunnelsats-daemon"]["cap_add"] == ["NET_ADMIN"]
     assert "security_opt" not in services["tunnelsats-daemon"]
 
+    web_environment = environment_map(services["tunnelsats-web"])
+    assert "UMBREL_APP_ID" not in web_environment
     daemon_environment = environment_map(services["tunnelsats-daemon"])
+    assert "UMBREL_APP_ID" not in daemon_environment
     assert daemon_environment["SECURE_MODE"] == "true"
     daemon_volumes = [str(volume) for volume in services["tunnelsats-daemon"]["volumes"]]
     assert daemon_volumes == [
@@ -133,17 +166,25 @@ def test_promotion_generates_linter_compatible_split_manifest(tmp_path):
         "${APP_DATA_DIR}/../core-lightning/data/lightningd:/lightning-data/cln:ro",
     ]
 
-    source_manifest = yaml.safe_load((project / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8"))
+    source_manifest = yaml.safe_load((project / "tunnelsats-community" / "umbrel-app.yml").read_text(encoding="utf-8"))
     promoted_manifest = yaml.safe_load((target_dir / "umbrel-app.yml").read_text(encoding="utf-8"))
+    assert promoted_manifest["id"] == "tunnelsats"
     assert promoted_manifest["storage"] == {"dataRoot": "data"}
     assert promoted_manifest["name"] == "TunnelSats"
+    assert promoted_manifest["port"] == 9739
     assert promoted_manifest["version"] == source_manifest["version"]
     assert promoted_manifest["tagline"] == source_manifest["tagline"]
     assert "After you activate it, the app shows the settings" in promoted_manifest["description"]
     assert "Uninstalling also deletes your WireGuard config" in promoted_manifest["description"]
     assert "tunnelsats-data" not in promoted_manifest["description"]
-    assert promoted_manifest["releaseNotes"] == source_manifest["releaseNotes"]
-    assert len(promoted_manifest["releaseNotes"]) > 0
+    assert "tunnelsats-community" not in promoted_manifest["description"]
+    assert "TunnelSats (Community)" not in promoted_manifest["description"]
+    assert "Migrating from legacy Community" not in promoted_manifest["description"]
+    assert promoted_manifest["releaseNotes"].startswith(
+        "Community Store users: Do NOT click Update here (switches to Official Secure Mode)."
+    )
+    assert source_manifest["releaseNotes"] in promoted_manifest["releaseNotes"]
+    assert "\n" not in promoted_manifest["releaseNotes"]
     assert "icon" not in promoted_manifest
     assert promoted_manifest["gallery"] == OFFICIAL_DEFAULT_GALLERY
     assert promoted_manifest["widgets"] == source_manifest["widgets"]
@@ -268,7 +309,7 @@ def test_promotion_dry_run_previews_diff_without_modifying_target(tmp_path):
 
 def test_promotion_fails_closed_on_source_compose_drift_without_modifying_target(tmp_path):
     project = setup_promotion_project(tmp_path)
-    compose_path = project / "tunnelsats" / "docker-compose.yml"
+    compose_path = project / "tunnelsats-community" / "docker-compose.yml"
     compose_data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     compose_data["services"]["tunnelsats-web"]["user"] = "0:0"
     compose_path.write_text(yaml.safe_dump(compose_data), encoding="utf-8")
@@ -396,7 +437,7 @@ def test_community_and_official_descriptions_match_respective_uninstall_storage_
     tmp_path,
 ):
     source_manifest = yaml.safe_load(
-        (REPO_ROOT / "tunnelsats" / "umbrel-app.yml").read_text(encoding="utf-8")
+        (REPO_ROOT / "tunnelsats-community" / "umbrel-app.yml").read_text(encoding="utf-8")
     )
     community_desc = source_manifest["description"]
     assert "tunnelsats-data" in community_desc
@@ -430,5 +471,97 @@ def test_community_and_official_descriptions_match_respective_uninstall_storage_
     assert "Uninstalling also deletes your WireGuard config" in official_desc
     assert "After you activate it, the app shows the settings" in official_desc
     assert "tunnelsats-data" not in official_desc
+    assert "tunnelsats-community" not in official_desc
+    assert "TunnelSats (Community)" not in official_desc
     assert "On the Community App Store" not in official_desc
+    assert "Migrating from legacy Community" not in official_desc
+
+
+def test_promotion_rejects_legacy_tunnelsats_stub_and_community_description_leaks(tmp_path):
+    promote_script = REPO_ROOT / "scripts" / "promote_official_store.py"
+    target = tmp_path / "out"
+    digest = "sha256:" + ("9" * 64)
+
+    # Attempting to promote the temporary legacy tunnelsats/ stub must fail closed
+    stub_res = subprocess.run(
+        [
+            "python3",
+            str(promote_script),
+            "--source-dir",
+            str(REPO_ROOT / "tunnelsats"),
+            "--target-dir",
+            str(target),
+            "--version",
+            "3.6.3",
+            "--digest",
+            digest,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert stub_res.returncode != 0
+    assert "tunnelsats-community" in stub_res.stderr
+    assert not target.exists()
+
+    # Stray community-only text in description must fail closed
+    bad_source = tmp_path / "bad-source"
+    shutil.copytree(REPO_ROOT / "tunnelsats-community", bad_source)
+    manifest_path = bad_source / "umbrel-app.yml"
+    manifest_data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["description"] += "\n\nExtra stray mention of tunnelsats-community."
+    manifest_path.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    leak_res = subprocess.run(
+        [
+            "python3",
+            str(promote_script),
+            "--source-dir",
+            str(bad_source),
+            "--target-dir",
+            str(target),
+            "--version",
+            "3.6.3",
+            "--digest",
+            digest,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert leak_res.returncode != 0
+    assert "forbidden community token" in leak_res.stderr
+    assert not target.exists()
+
+
+def test_promotion_no_community_notice_flag_omits_migration_prefix(tmp_path):
+    promote_script = REPO_ROOT / "scripts" / "promote_official_store.py"
+    target = tmp_path / "out"
+    digest = "sha256:" + ("7" * 64)
+    source_manifest = yaml.safe_load(
+        (REPO_ROOT / "tunnelsats-community" / "umbrel-app.yml").read_text(encoding="utf-8")
+    )
+
+    res = subprocess.run(
+        [
+            "python3",
+            str(promote_script),
+            "--source-dir",
+            str(REPO_ROOT / "tunnelsats-community"),
+            "--target-dir",
+            str(target),
+            "--version",
+            "3.6.3",
+            "--digest",
+            digest,
+            "--no-community-notice",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    promoted = yaml.safe_load((target / "umbrel-app.yml").read_text(encoding="utf-8"))
+    assert promoted["releaseNotes"] == source_manifest["releaseNotes"]
+    assert "Community Store users: Do NOT click Update here" not in promoted["releaseNotes"]
 

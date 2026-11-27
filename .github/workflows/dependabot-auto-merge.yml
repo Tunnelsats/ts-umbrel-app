@@ -1,7 +1,7 @@
 # Auto-approve and enable native auto-merge for Dependabot minor/patch updates.
 #
 # Note: In ts-umbrel-app, merging to master updates Docker images (latest) and tests,
-# but does NOT create a GitHub release (v*) unless tunnelsats/umbrel-app.yml version is bumped.
+# but does NOT create a GitHub release (v*) unless tunnelsats-community/umbrel-app.yml version is bumped.
 # Auto-merges enabled by this workflow are performed with GITHUB_TOKEN, which does not trigger
 # other workflows, so Dependabot merges build and publish nothing. This is intended: users only
 # receive new images through versioned releases.

@@ -1,3 +1,9 @@
+# TEMPORARY CONFLICT-GUARD STUB — DO NOT EDIT FOR NEW RELEASES (canonical Community
+# package now lives in tunnelsats-community/). Keeping id: tunnelsats here holds it in
+# UmbrelOS ambiguousAppIds so existing Community users cannot accidentally cross-grade
+# to Official Store 3.6.0 before Official Store v3.6.3 (with the releaseNotes warning
+# and in-app cross-grade recovery banner) merges into getumbrel/umbrel-apps.
+# Remove this entire tunnelsats/ directory immediately after Official v3.6.3 merges.
 manifestVersion: 1.1
 id: tunnelsats
 category: bitcoin

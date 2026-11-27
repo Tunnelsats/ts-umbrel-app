@@ -22,8 +22,8 @@ def bump_module():
 @pytest.fixture
 def version_workspace(tmp_path, bump_module, monkeypatch):
     relative_paths = (
-        "tunnelsats/umbrel-app.yml",
-        "tunnelsats/docker-compose.yml",
+        "tunnelsats-community/umbrel-app.yml",
+        "tunnelsats-community/docker-compose.yml",
         "server/app.py",
         "web/index.html",
         "k3s/deployment.yaml",
@@ -39,10 +39,10 @@ def version_workspace(tmp_path, bump_module, monkeypatch):
 
     monkeypatch.setattr(bump_module, "REPO_ROOT", str(tmp_path))
     monkeypatch.setattr(
-        bump_module, "MANIFEST_PATH", str(tmp_path / "tunnelsats/umbrel-app.yml")
+        bump_module, "MANIFEST_PATH", str(tmp_path / "tunnelsats-community/umbrel-app.yml")
     )
     monkeypatch.setattr(
-        bump_module, "COMPOSE_PATH", str(tmp_path / "tunnelsats/docker-compose.yml")
+        bump_module, "COMPOSE_PATH", str(tmp_path / "tunnelsats-community/docker-compose.yml")
     )
     monkeypatch.setattr(bump_module, "APP_PY_PATH", str(tmp_path / "server/app.py"))
     monkeypatch.setattr(
@@ -118,7 +118,7 @@ def test_multiline_release_notes_are_rejected_without_writes(
 def test_preflight_failure_does_not_partially_update_files(
     bump_module, version_workspace
 ):
-    manifest = yaml.safe_load((version_workspace / "tunnelsats/umbrel-app.yml").read_text())
+    manifest = yaml.safe_load((version_workspace / "tunnelsats-community/umbrel-app.yml").read_text())
     current_ver = manifest["version"]
     deployment = version_workspace / "k3s/deployment.yaml"
     deployment.write_text(
@@ -182,7 +182,7 @@ def test_interruption_rolls_back_all_files(
 def test_failed_rollback_preserves_original_recovery_copy(
     bump_module, version_workspace, monkeypatch
 ):
-    manifest_path = version_workspace / "tunnelsats/umbrel-app.yml"
+    manifest_path = version_workspace / "tunnelsats-community/umbrel-app.yml"
     original_manifest = manifest_path.read_text()
     real_replace = os.replace
     replace_calls = 0
@@ -214,11 +214,11 @@ def test_valid_version_and_release_notes_are_written_safely(
     bump_module.bump_version("v4.0.0-rc.1", notes)
 
     manifest = yaml.safe_load(
-        (version_workspace / "tunnelsats/umbrel-app.yml").read_text()
+        (version_workspace / "tunnelsats-community/umbrel-app.yml").read_text()
     )
     assert manifest["version"] == "4.0.0-rc.1"
     assert manifest["releaseNotes"] == notes
-    assert (version_workspace / "tunnelsats/docker-compose.yml").read_text().count(
+    assert (version_workspace / "tunnelsats-community/docker-compose.yml").read_text().count(
         "tunnelsats/ts-umbrel-app:4.0.0-rc.1"
     ) == 2
 
@@ -231,7 +231,7 @@ def test_existing_version_updates_its_changelog_section(
     bump_module.bump_version("3.3.4", notes)
 
     manifest = yaml.safe_load(
-        (version_workspace / "tunnelsats/umbrel-app.yml").read_text()
+        (version_workspace / "tunnelsats-community/umbrel-app.yml").read_text()
     )
     changelog = (version_workspace / "CHANGELOG.md").read_text()
     assert manifest["releaseNotes"] == notes
@@ -258,9 +258,9 @@ def test_sync_version_command_delegates_to_canonical_bump_tool(version_workspace
     assert result.returncode == 0, result.stderr
     assert (
         'version: "4.1.0"'
-        in (version_workspace / "tunnelsats/umbrel-app.yml").read_text()
+        in (version_workspace / "tunnelsats-community/umbrel-app.yml").read_text()
     )
-    assert (version_workspace / "tunnelsats/docker-compose.yml").read_text().count(
+    assert (version_workspace / "tunnelsats-community/docker-compose.yml").read_text().count(
         "tunnelsats/ts-umbrel-app:4.1.0"
     ) == 2
     assert (
