@@ -8286,6 +8286,175 @@ reconcile_once "periodic"
     assert result.returncode == 0, result.stderr
 
 
+def test_watchdog_timeout_and_sigterm_reload_disk_state_during_decommissioned_reactivation():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+RECONCILE_CYCLE_TIMEOUT=1
+
+# Seed parent with cached decommissioned=true and armed=false (pre-reactivation)
+DECOMMISSIONED="true"
+persist_decommissioned_state
+DECOMMISSION_STATE_LOADED="true"
+KILL_SWITCH_ARMED="false"
+KILL_SWITCH_ARMED_PERSISTED="false"
+KILL_SWITCH_ARMED_STATE_LOADED="true"
+DOCKER_POLICY_STATE_LOADED="true"
+MANAGED_DOCKER_IPV4_ENDPOINTS=()
+
+KS_CALLED_DECOMM_FILE="${POLICY_TEST_STATE_FILE}.ks_decomm"
+BLACKHOLED_SOURCES_FILE="${POLICY_TEST_STATE_FILE}.blackholed"
+: > "${BLACKHOLED_SOURCES_FILE}"
+
+ensure_source_blackhole_rule() {
+    printf '%s|%s\n' "$1" "$2" >> "${BLACKHOLED_SOURCES_FILE}"
+    return 0
+}
+ensure_expected_docker_fallback_blackhole() { return 0; }
+cleanup_dataplane() { return 0; }
+
+reconcile_once() {
+    # Simulate manual reactivation persisting new disk state before hanging.
+    DECOMMISSIONED="false"
+    persist_decommissioned_state
+    KILL_SWITCH_ARMED="true"
+    persist_kill_switch_armed_state
+    MANAGED_DOCKER_IPV4_ENDPOINTS=("10.21.0.99|10.21.0.0/16|10.21.0.1|0|0")
+    persist_managed_docker_policy_state
+    sleep 30
+}
+
+# 1. Watchdog timeout during reactivation must reload disk state, blackhole newly
+#    persisted Docker endpoints, keep DECOMMISSIONED=false in STATE_FILE, and preserve timeout error.
+if run_reconcile_with_watchdog "manual" "req-reactivate-timeout"; then
+    exit 1
+fi
+
+[[ "${DECOMMISSIONED}" == "false" ]]
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+[[ "${LAST_ERROR}" == "Reconciliation timed out after 1s" ]]
+jq -e '.decommissioned == false and .rules_synced == false' "${STATE_FILE}" >/dev/null
+grep -Fq "10.21.0.99|${KILL_SWITCH_PREF}" "${BLACKHOLED_SOURCES_FILE}"
+
+# 2. SIGTERM in cleanup() while a worker is mid-reactivation must reload disk state
+#    and call preserve_fail_closed_dataplane instead of tearing down via cleanup_dataplane.
+CLEANUP_MARKER="${POLICY_TEST_STATE_FILE}.cleanup_path"
+(
+    DECOMMISSIONED="true"
+    persist_decommissioned_state
+    DECOMMISSION_STATE_LOADED="true"
+    KILL_SWITCH_ARMED="false"
+    KILL_SWITCH_ARMED_PERSISTED="false"
+    KILL_SWITCH_ARMED_STATE_LOADED="true"
+
+    stop_k3s_pod_watcher() { return 0; }
+    stop_k3s_dns_proxy() { return 0; }
+    cleanup_dataplane() { printf 'cleanup_dataplane\n' > "${CLEANUP_MARKER}"; return 0; }
+    preserve_fail_closed_dataplane() { printf 'preserve_fail_closed\n' > "${CLEANUP_MARKER}"; return 0; }
+
+    # Worker persists reactivation to disk, then hangs while SIGTERM triggers cleanup().
+    (
+        DECOMMISSIONED="false"
+        persist_decommissioned_state
+        KILL_SWITCH_ARMED="true"
+        persist_kill_switch_armed_state
+        sleep 30
+    ) &
+    ACTIVE_RECONCILE_WORKER_PID=$!
+    # Wait until worker has written decommissioned=false to disk.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if jq -e '.decommissioned == false' "${DECOMMISSION_STATE_FILE}" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
+
+    cleanup
+)
+[[ "$(cat "${CLEANUP_MARKER}")" == "preserve_fail_closed" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_watchdog_persists_k3s_guard_globals_and_reloads_k3s_policy_state_on_timeout():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="true"
+SECURE_MODE="false"
+K3S_ENABLE_BACKGROUND_WATCHER="false"
+RECONCILE_CYCLE_TIMEOUT=10
+
+# 1. Normal completion propagates all k3s guard globals back to parent.
+reconcile_once() {
+    K3S_CANDIDATE_PODS_GUARDED="false"
+    K3S_UNSEEN_REPLACEMENT_PENDING="true"
+    K3S_WATCH_RESOURCE_VERSION="rv-42"
+    K3S_WATCH_SCOPE="ns-lnd:app=lnd"
+    return 0
+}
+
+run_reconcile_with_watchdog "periodic"
+[[ "${K3S_CANDIDATE_PODS_GUARDED}" == "false" ]]
+[[ "${K3S_UNSEEN_REPLACEMENT_PENDING}" == "true" ]]
+[[ "${K3S_WATCH_RESOURCE_VERSION}" == "rv-42" ]]
+[[ "${K3S_WATCH_SCOPE}" == "ns-lnd:app=lnd" ]]
+
+# 2. Timeout reloads newly persisted K3S_POLICY_STATE_FILE (10.42.0.9) instead of stale 10.42.0.5
+#    and reloads pod watch state before fail_reconcile_closed.
+RECONCILE_CYCLE_TIMEOUT=1
+DECOMMISSIONED="false"
+persist_decommissioned_state
+DECOMMISSION_STATE_LOADED="true"
+MANAGED_K3S_TARGET_IP="10.42.0.5"
+DOCKER_TARGET_IP="10.42.0.5"
+MANAGED_K3S_TARGET_IMPL="lnd"
+MANAGED_K3S_POD_NAME="lnd-old"
+MANAGED_K3S_POD_NAMESPACE="default"
+MANAGED_K3S_POD_SELECTOR="app=lnd"
+K3S_POLICY_STATE_LOADED="true"
+persist_managed_k3s_policy_state
+
+WATCH_RELOAD_FILE="${POLICY_TEST_STATE_FILE}.watch_reloaded"
+FAIL_CLOSED_IP_FILE="${POLICY_TEST_STATE_FILE}.fail_closed_ip"
+
+load_k3s_pod_watch_state() {
+    printf 'reloaded\n' > "${WATCH_RELOAD_FILE}"
+    return 0
+}
+fail_reconcile_closed() {
+    printf '%s|%s\n' "${DOCKER_TARGET_IP}" "${MANAGED_K3S_TARGET_IP}" > "${FAIL_CLOSED_IP_FILE}"
+    return 1
+}
+
+reconcile_once() {
+    MANAGED_K3S_TARGET_IP="10.42.0.9"
+    DOCKER_TARGET_IP="10.42.0.9"
+    MANAGED_K3S_POD_NAME="lnd-new"
+    persist_managed_k3s_policy_state
+    sleep 30
+}
+
+if run_reconcile_with_watchdog "periodic" "req-k3s-timeout"; then
+    exit 1
+fi
+
+[[ "$(cat "${WATCH_RELOAD_FILE}" 2>/dev/null || true)" == "reloaded" ]]
+[[ "$(cat "${FAIL_CLOSED_IP_FILE}" 2>/dev/null || true)" == "10.42.0.9|10.42.0.9" ]]
+[[ "${MANAGED_K3S_TARGET_IP}" == "10.42.0.9" ]]
+[[ "${DOCKER_TARGET_IP}" == "10.42.0.9" ]]
+[[ "${LAST_ERROR}" == "Reconciliation timed out after 1s" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
 
 
 

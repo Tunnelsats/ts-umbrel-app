@@ -10331,6 +10331,10 @@ RECONCILE_PERSISTED_GLOBALS=(
     K3S_KNOWN_NON_TARGET_POD_IPS
     K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES
     K3S_KNOWN_NON_TARGET_POD_V6_PEERS
+    K3S_CANDIDATE_PODS_GUARDED
+    K3S_UNSEEN_REPLACEMENT_PENDING
+    K3S_WATCH_RESOURCE_VERSION
+    K3S_WATCH_SCOPE
     K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC
     ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC
 )
@@ -10485,6 +10489,39 @@ terminate_process_tree() {
     return 0
 }
 
+invalidate_cached_disk_state_after_worker_abort() {
+    DECOMMISSION_STATE_LOADED="false"
+    KILL_SWITCH_ARMED_STATE_LOADED="false"
+    DOCKER_POLICY_STATE_LOADED="false"
+    PROTECTED_TARGET_STATE_LOADED="false"
+    IPV6_POLICY_STATE_LOADED="false"
+    K3S_POLICY_STATE_LOADED="false"
+    if [[ "${K3S_MODE}" == "true" ]] && [ -e "${K3S_POLICY_STATE_FILE}" ]; then
+        DOCKER_TARGET_IP=""
+        K3S_TARGET_POD_NAME=""
+        K3S_TARGET_POD_NAMESPACE=""
+        K3S_TARGET_POD_SELECTOR=""
+        TARGET_IPV6_ADDRESSES=()
+    fi
+}
+
+blackhole_managed_docker_endpoints() {
+    [[ "${K3S_MODE}" != "true" ]] && [[ "${SECURE_MODE}" != "true" ]] || return 0
+    load_managed_docker_policy_state || true
+    local managed_ep ep_src failed=false
+    for managed_ep in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+        ep_src=""
+        IFS='|' read -r ep_src _ <<< "${managed_ep}"
+        if [ -n "${ep_src}" ]; then
+            if ! ensure_source_blackhole_rule "${ep_src}" "${KILL_SWITCH_PREF}" \
+                "Failed to install reconciliation kill switch for persisted source ${ep_src}"; then
+                failed=true
+            fi
+        fi
+    done
+    [ "${failed}" = false ]
+}
+
 run_reconcile_with_watchdog() {
     local reason="$1"
     local request_id="${2:-}"
@@ -10568,7 +10605,6 @@ run_reconcile_with_watchdog() {
         ACTIVE_RECONCILE_STATE_DUMP=""
         ACTIVE_RECONCILE_TIMEOUT_FLAG=""
         log ERROR "reconcile_timeout reason=${reason} timeout=${timeout_sec}s"
-        LAST_ERROR="Reconciliation timed out after ${timeout_sec}s"
         RULES_SYNCED="false"
         IPV4_RULES_SYNCED="false"
         IPV6_RULES_SYNCED="false"
@@ -10576,6 +10612,29 @@ run_reconcile_with_watchdog() {
         ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
         LAST_SYNCED_WG_CFG_SIG=""
         LAST_RECONCILE_EPOCH="$(date +%s)"
+        # The worker subshell was terminated before dumping globals back to the
+        # parent, so invalidate cached *_STATE_LOADED flags and reload disk state
+        # written by the worker (e.g. manual reactivation, armed kill switch, or
+        # newly discovered k3s/Docker target state) before fail-closed recovery.
+        invalidate_cached_disk_state_after_worker_abort
+        if ! load_decommissioned_state; then
+            DECOMMISSIONED="false"
+        fi
+        load_managed_ipv6_policy_state || true
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            if [ -e "${K3S_POLICY_STATE_FILE}" ]; then
+                load_managed_k3s_policy_state || true
+            fi
+            load_k3s_pod_watch_state || true
+        elif [[ "${SECURE_MODE}" != "true" ]]; then
+            local timeout_arm_rc=0
+            evaluate_kill_switch_arming >/dev/null 2>&1 || timeout_arm_rc=$?
+            if [ "${DECOMMISSIONED:-false}" != "true" ] && \
+               { [ "${timeout_arm_rc}" -ne 0 ] || [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; }; then
+                blackhole_managed_docker_endpoints || true
+            fi
+        fi
+        LAST_ERROR="Reconciliation timed out after ${timeout_sec}s"
         fail_reconcile_closed "${request_id}" || true
         return 1
     fi
@@ -11066,8 +11125,12 @@ preserve_fail_closed_dataplane() {
     fi
     local kill_switch_ok=true
     ensure_reconcile_kill_switch || true
+    blackhole_managed_docker_endpoints || true
     cleanup_dataplane "--keep-tunnel"
     if ! ensure_reconcile_kill_switch; then
+        kill_switch_ok=false
+    fi
+    if ! blackhole_managed_docker_endpoints; then
         kill_switch_ok=false
     fi
     if [ "${kill_switch_ok}" = false ]; then
@@ -11434,6 +11497,7 @@ cleanup() {
         terminate_process_tree "${ACTIVE_RECONCILE_WORKER_PID}" "${cleanup_exclude_pid}"
         wait "${ACTIVE_RECONCILE_WORKER_PID}" 2>/dev/null || true
         ACTIVE_RECONCILE_WORKER_PID=""
+        invalidate_cached_disk_state_after_worker_abort
     fi
     if [ -n "${ACTIVE_RECONCILE_STATE_DUMP:-}" ]; then
         rm -f "${ACTIVE_RECONCILE_STATE_DUMP}" "${ACTIVE_RECONCILE_STATE_DUMP}.tmp" 2>/dev/null || true
