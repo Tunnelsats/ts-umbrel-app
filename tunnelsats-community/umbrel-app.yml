@@ -2,7 +2,7 @@ manifestVersion: 1.1
 id: tunnelsats-community
 category: bitcoin
 name: TunnelSats (Community)
-version: "3.6.2"
+version: "3.6.3"
 tagline: Run your Lightning node on clearnet without exposing your home IP
 description: >-
   ⚠️ TunnelSats is a paid service. You buy and renew a subscription with Lightning inside the app. On the Community App Store, TunnelSats can configure your Lightning Node or Core Lightning automatically (or show manual steps if you enable Secure Mode).
@@ -28,7 +28,7 @@ description: >-
   - Choose from exit servers around the world
 
   - Home screen widgets for tunnel status, data used and days left
-releaseNotes: "Remove obsolete iptables mangle CONNMARK dependency from Official App Store Secure Mode (fixing UmbrelOS 2.0 + Tailscale native nftables compatibility), add bounded Docker API timeouts, per-cycle reconcile watchdog, steady-state periodic verification without pref 32762 flapping, and fail-closed stale-heartbeat and live pref 32762 status detection"
+releaseNotes: "Add non-conflicting TunnelSats (Community) app package (tunnelsats-community, port 9741) for uninterrupted Community App Store push updates alongside the Official Umbrel App Store, add an in-app recovery banner if a Community install accidentally cross-grades to Official Secure Mode, and keep Official Store promotion pinned to id: tunnelsats (port 9739)."
 developer: TunnelSats Team
 website: https://tunnelsats.com
 dependencies: []
