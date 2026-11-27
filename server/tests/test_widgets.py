@@ -760,3 +760,81 @@ def test_widget_status_cache_singleflights_concurrent_cold_polls(env_setup, monk
         release_build.set()
         app.config.pop("WIDGET_STATUS_CACHE_TTL", None)
         app_module._invalidate_widget_status_cache()
+
+
+def test_widgets_report_blocked_on_stale_reconcile_heartbeat_and_active_kill_switch(client, env_setup, monkeypatch):
+    """Issue #202: widgets must never report Active when heartbeat is stale or pref 32762 is active."""
+    from unittest.mock import MagicMock
+
+    _seed_healthy_state(env_setup, node_type="lnd", nwc=True, days=28, used_gb=14.2, limit_gb=90.0)
+    monkeypatch.setattr(app_module, "SECURE_MODE", False)
+    monkeypatch.setattr(app_module, "K3S_MODE", False)
+    containers = [
+        {"Id": "abc", "Names": ["/lightning_lnd_1"], "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}}}
+    ]
+
+    def _ip_mock(pref_stdout=""):
+        def _run(cmd, *args, **kwargs):
+            if cmd == ["ip", "rule", "show", "pref", "32762"]:
+                return MagicMock(returncode=0, stdout=pref_stdout)
+            if cmd == ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"]:
+                return MagicMock(returncode=0, stdout="inet 10.9.0.2/32\n")
+            return MagicMock(returncode=1, stdout="")
+        return _run
+
+    # 1. Stale last_reconcile_at (> RECONCILE_HEARTBEAT_MAX_AGE_SECONDS) while rules_synced=True
+    stale_ts = (
+        datetime.now(timezone.utc) - timedelta(seconds=app_module.RECONCILE_HEARTBEAT_MAX_AGE_SECONDS + 90)
+    ).isoformat().replace("+00:00", "Z")
+    dataplane_stale = {
+        "dataplane_mode": "docker-full-parity",
+        "target_container": "lightning_lnd_1",
+        "target_ip": "10.21.21.9",
+        "target_impl": "lnd",
+        "docker_network": {"name": "docker-tunnelsats", "subnet": "10.9.9.0/25", "bridge": "br-ts"},
+        "forwarding_port": 36789,
+        "rules_synced": True,
+        "ipv4_rules_synced": True,
+        "ipv6_rules_synced": True,
+        "dns_protected": True,
+        "decommissioned": False,
+        "last_reconcile_at": stale_ts,
+        "last_error": None,
+    }
+    with (
+        patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+        patch.object(app_module, "_trigger_lazy_subscription_sync"),
+        patch.object(app_module, "read_dataplane_state", return_value=dataplane_stale),
+        patch.object(app_module, "list_containers", return_value=containers),
+        patch.object(app_module.subprocess, "run", side_effect=_ip_mock("")),
+    ):
+        s_stale = client.get("/api/local/widgets/status").get_json()
+        o_stale = client.get("/api/local/widgets/overview").get_json()
+
+    assert s_stale["items"][0] == {"title": "LND Shield", "text": "🟠 Blocked", "subtext": ""}
+    assert "Active" not in s_stale["items"][0]["text"]
+    assert o_stale["title"] == "🟠 Blocked · LND · 🇺🇸 us3"
+    assert "Active" not in o_stale["title"]
+
+    # 2. Active pref 32762 blackhole (both with fresh heartbeat and empty initial heartbeat) -> 🟠 Blocked
+    for ts_value in (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), ""):
+        dataplane_ks = {**dataplane_stale, "last_reconcile_at": ts_value}
+        with (
+            patch.object(app_module, "_get_wireguard_state", return_value=("Connected", "pub123")),
+            patch.object(app_module, "_trigger_lazy_subscription_sync"),
+            patch.object(app_module, "read_dataplane_state", return_value=dataplane_ks),
+            patch.object(app_module, "list_containers", return_value=containers),
+            patch.object(
+                app_module.subprocess,
+                "run",
+                side_effect=_ip_mock("32762:\tfrom 10.9.9.0/25 blackhole\n"),
+            ),
+        ):
+            s_ks = client.get("/api/local/widgets/status").get_json()
+            o_ks = client.get("/api/local/widgets/overview").get_json()
+
+        assert s_ks["items"][0] == {"title": "LND Shield", "text": "🟠 Blocked", "subtext": ""}
+        assert "Active" not in s_ks["items"][0]["text"]
+        assert o_ks["title"] == "🟠 Blocked · LND · 🇺🇸 us3"
+        assert "Active" not in o_ks["title"]
+

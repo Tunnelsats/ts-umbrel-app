@@ -42,6 +42,9 @@ K3S_NON_TARGET_FWMARK="0xca6d"
 K3S_NON_TARGET_FWMARK_MASK="0xffffffff"
 LN_TARGET_PORT="9735" # Default to LND, will be updated in detect_lightning_container
 RECONCILE_INTERVAL=30
+RECONCILE_CYCLE_TIMEOUT="${RECONCILE_CYCLE_TIMEOUT:-55}"
+DOCKER_API_CONNECT_TIMEOUT="${DOCKER_API_CONNECT_TIMEOUT:-5}"
+DOCKER_API_MAX_TIME="${DOCKER_API_MAX_TIME:-10}"
 KILL_SWITCH_PREF=32762
 WG_HANDSHAKE_MAX_AGE=180
 
@@ -303,6 +306,13 @@ K3S_KNOWN_NON_TARGET_POD_IPS=""
 K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES=""
 K3S_KNOWN_NON_TARGET_POD_V6_PEERS=""
 K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
+ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+LAST_SYNCED_WG_CFG_SIG=""
+LEGACY_MANGLE_RULES_REMOVED="0"
+ACTIVE_RECONCILE_WORKER_PID=""
+ACTIVE_RECONCILE_TIMER_PID=""
+ACTIVE_RECONCILE_STATE_DUMP=""
+ACTIVE_RECONCILE_TIMEOUT_FLAG=""
 
 log() {
     local level="$1"
@@ -444,12 +454,18 @@ docker_api() {
     fi
 
     if [ -n "${data}" ]; then
-        curl -sS --fail --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --fail --noproxy "*" \
+            --connect-timeout "${DOCKER_API_CONNECT_TIMEOUT}" \
+            --max-time "${DOCKER_API_MAX_TIME}" \
+            --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             -H "Content-Type: application/json" \
             -d "${data}" \
             "http://localhost${path}"
     else
-        curl -sS --fail --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --fail --noproxy "*" \
+            --connect-timeout "${DOCKER_API_CONNECT_TIMEOUT}" \
+            --max-time "${DOCKER_API_MAX_TIME}" \
+            --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             "http://localhost${path}"
     fi
 }
@@ -459,14 +475,25 @@ docker_api_with_code() {
     local path="$2"
     local data="${3:-}"
 
+    if [ ! -S "${DOCKER_SOCK}" ]; then
+        printf 'HTTPSTATUS:000'
+        return 1
+    fi
+
     if [ -n "${data}" ]; then
-        curl -sS --noproxy "*" --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --noproxy "*" \
+            --connect-timeout "${DOCKER_API_CONNECT_TIMEOUT}" \
+            --max-time "${DOCKER_API_MAX_TIME}" \
+            --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             -H "Content-Type: application/json" \
             -d "${data}" \
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     else
-        curl -sS --noproxy "*" --unix-socket "${DOCKER_SOCK}" -X "${method}" \
+        curl -sS --noproxy "*" \
+            --connect-timeout "${DOCKER_API_CONNECT_TIMEOUT}" \
+            --max-time "${DOCKER_API_MAX_TIME}" \
+            --unix-socket "${DOCKER_SOCK}" -X "${method}" \
             -w "HTTPSTATUS:%{http_code}" \
             "http://localhost${path}"
     fi
@@ -2168,6 +2195,20 @@ read_wg_config_path() {
     echo "${files[0]:-}"
 }
 
+compute_wg_config_signature() {
+    local cfg_path
+    cfg_path="$(read_wg_config_path 2>/dev/null || true)"
+    [ -n "${cfg_path}" ] && [ -f "${cfg_path}" ] && [ -r "${cfg_path}" ] || return 0
+    local digest=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(sha256sum "${cfg_path}" 2>/dev/null | awk '{print $1}' || true)"
+    elif command -v shasum >/dev/null 2>&1; then
+        digest="$(shasum -a 256 "${cfg_path}" 2>/dev/null | awk '{print $1}' || true)"
+    fi
+    [ -n "${digest}" ] || return 0
+    printf '%s|%s\n' "${cfg_path}" "${digest}"
+}
+
 ensure_runtime_wireguard_keepalive() {
     local config_path="$1"
     local config_tmp
@@ -2235,9 +2276,13 @@ extract_forwarding_port() {
 resolve_svc_ip() {
     local fqdn="$1" name="$2"
     local out rc
+    local -a cmd=(getent hosts)
+    if command -v timeout >/dev/null 2>&1; then
+        cmd=(timeout 5 getent hosts)
+    fi
 
-    out=$(getent hosts "${fqdn}" 2>&1)
-    rc=$?
+    rc=0
+    out=$("${cmd[@]}" "${fqdn}" 2>&1) || rc=$?
     if [ "${rc}" -eq 0 ]; then
         echo "${out}" | awk '{print $1}' | head -n1
         return 0
@@ -2245,8 +2290,8 @@ resolve_svc_ip() {
         log WARN "k3s: getent failed for ${fqdn} (rc=${rc}): ${out}"
     fi
 
-    out=$(getent hosts "${name}" 2>&1)
-    rc=$?
+    rc=0
+    out=$("${cmd[@]}" "${name}" 2>&1) || rc=$?
     if [ "${rc}" -eq 0 ]; then
         echo "${out}" | awk '{print $1}' | head -n1
         return 0
@@ -3720,7 +3765,7 @@ remove_tagged_iptables_rules() {
 
     IPTABLES_RULES_REMOVED="0"
     local rules
-    rules=$(iptables -t "${table}" -S "${chain}" | grep "${marker}" || true)
+    rules=$(iptables -t "${table}" -S "${chain}" 2>/dev/null | grep "${marker}" || true)
     if [ -z "${rules}" ]; then
         return 0
     fi
@@ -3734,6 +3779,17 @@ remove_tagged_iptables_rules() {
     done <<EOF_RULES
 ${rules}
 EOF_RULES
+}
+
+cleanup_legacy_connmark_mangle_rules() {
+    LEGACY_MANGLE_RULES_REMOVED="0"
+    remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
+    [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && LEGACY_MANGLE_RULES_REMOVED="1"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+    [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && LEGACY_MANGLE_RULES_REMOVED="1"
+    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
+    [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && LEGACY_MANGLE_RULES_REMOVED="1"
+    return 0
 }
 
 ensure_k3s_egress_guard_additive() {
@@ -6032,6 +6088,59 @@ remove_reconcile_kill_switch() {
         fi
     done
     [ "${failed}" = false ]
+}
+
+reconcile_kill_switch_matches_source() {
+    local ks_rules="$1"
+    local source_prefix="$2"
+    [ -n "${source_prefix}" ] || return 1
+    local escaped_source="${source_prefix//./\\.}"
+    local displayed_source="${escaped_source}"
+    [[ "${source_prefix}" == */* ]] || displayed_source+="(/32)?"
+    grep -qE "^${KILL_SWITCH_PREF}:[[:space:]]+from[[:space:]]+${displayed_source}[[:space:]]+blackhole[[:space:]]*$" <<< "${ks_rules}"
+}
+
+reconcile_kill_switch_is_clear() {
+    [[ "${K3S_MODE}" == "true" ]] && return 0
+
+    local ks_rules
+    ks_rules="$(ip rule show pref "${KILL_SWITCH_PREF}" 2>/dev/null || true)"
+    [ -n "${ks_rules}" ] || return 0
+
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        if [ -n "${DOCKER_TARGET_IP:-}" ] && \
+           reconcile_kill_switch_matches_source "${ks_rules}" "${DOCKER_TARGET_IP}"; then
+            log WARN "rules_are_synced: reconciliation kill switch (pref ${KILL_SWITCH_PREF}) still active for ${DOCKER_TARGET_IP}"
+            return 1
+        fi
+        return 0
+    fi
+
+    local candidate entry source
+    for candidate in "${DOCKER_NETWORK_SUBNET:-}" "${DOCKER_TARGET_IP:-}"; do
+        if [ -n "${candidate}" ] && reconcile_kill_switch_matches_source "${ks_rules}" "${candidate}"; then
+            log WARN "rules_are_synced: reconciliation kill switch (pref ${KILL_SWITCH_PREF}) still active for ${candidate}"
+            return 1
+        fi
+    done
+
+    for entry in "${TARGET_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source _ <<< "${entry}"
+        if [ -n "${source}" ] && reconcile_kill_switch_matches_source "${ks_rules}" "${source}"; then
+            log WARN "rules_are_synced: reconciliation kill switch (pref ${KILL_SWITCH_PREF}) still active for ${source}"
+            return 1
+        fi
+    done
+
+    for entry in "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}"; do
+        IFS='|' read -r source _ <<< "${entry}"
+        if [ -n "${source}" ] && reconcile_kill_switch_matches_source "${ks_rules}" "${source}"; then
+            log WARN "rules_are_synced: reconciliation kill switch (pref ${KILL_SWITCH_PREF}) still active for ${source}"
+            return 1
+        fi
+    done
+
+    return 0
 }
 
 wireguard_handshake_is_fresh() {
@@ -8611,51 +8720,19 @@ ensure_nat_forward_rules() {
             changed=1
         fi
 
-        if [[ "${K3S_MODE}" == "true" ]]; then
-            # Source routing supersedes the old reply-only CONNMARK design.
-            # Remove all tagged remnants during migration.
-            local legacy_mangle_removed=0
-            remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-            [ "${IPTABLES_RULES_REMOVED:-0}" = "1" ] && legacy_mangle_removed=1
-            if [ "${legacy_mangle_removed}" = "1" ]; then
-                changed=1
-            fi
+        # Source-IP policy routing supersedes the legacy reply-only CONNMARK design
+        # in both k3s and Secure Mode. Remove any tagged remnants during migration
+        # without requiring a writable iptables mangle table.
+        cleanup_legacy_connmark_mangle_rules
+        if [ "${LEGACY_MANGLE_RULES_REMOVED:-0}" = "1" ]; then
+            changed=1
+        fi
 
+        if [[ "${K3S_MODE}" == "true" ]]; then
             if ! ensure_k3s_dns_protection "${DOCKER_TARGET_IP}"; then
                 return 1
             fi
             if [ "${K3S_DNS_CHANGED:-0}" = "1" ]; then
-                changed=1
-            fi
-        else
-            # Secure Mode still uses conntrack marks for reply routing.
-            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK restore rule"
-                remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-                if ! iptables -t mangle -A PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                    -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c; then
-                    LAST_ERROR="Failed to add CONNMARK restore-mark rule"
-                    return 1
-                fi
-                changed=1
-            fi
-
-            remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-
-            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-                log INFO "Syncing mangle CONNMARK set-mark rule"
-                remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
-                if ! iptables -t mangle -A FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                    -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c; then
-                    LAST_ERROR="Failed to add CONNMARK set-mark rule"
-                    return 1
-                fi
                 changed=1
             fi
         fi
@@ -9057,6 +9134,11 @@ ipv4_rules_are_synced() {
                 log WARN "rules_are_synced: SecureMode policy routing rule FAIL"
                 return 1
             fi
+            if [ "${ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC:-false}" != "true" ]; then
+                if ! reconcile_kill_switch_is_clear; then
+                    return 1
+                fi
+            fi
         else
             if ! normalize_k3s_bypass_cidrs; then
                 log WARN "rules_are_synced: ${LAST_ERROR}"
@@ -9156,20 +9238,6 @@ ipv4_rules_are_synced() {
             fi
         fi
 
-        if [[ "${SECURE_MODE}" == "true" ]]; then
-            if ! iptables -t mangle -C PREROUTING ! -i "${WG_IFACE}" -s "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-restore" -j CONNMARK --restore-mark --mask 0xca6c 2>/dev/null; then
-                log WARN "rules_are_synced: mangle conn-restore FAIL (missing or wrong form)"
-                return 1
-            fi
-
-            if ! iptables -t mangle -C FORWARD -i "${WG_IFACE}" -d "${DOCKER_TARGET_IP}" \
-                -m comment --comment "tunnelsats-conn-save" -j CONNMARK --set-mark 0xca6c/0xca6c 2>/dev/null; then
-                log WARN "rules_are_synced: mangle conn-save FAIL (missing or wrong form)"
-                return 1
-            fi
-        fi
-
         # 2. NAT PREROUTING check (DNAT)
         if ! iptables -t nat -C PREROUTING -i "${WG_IFACE}" -p tcp --dport "${internal_match_port}" \
             -m comment --comment "tunnelsats-dnat" -j DNAT --to-destination "${DOCKER_TARGET_IP}:${LN_TARGET_PORT}" 2>/dev/null; then
@@ -9212,6 +9280,12 @@ ipv4_rules_are_synced() {
 
     if ! docker_source_policy_rules_are_synced; then
         return 1
+    fi
+
+    if [ "${ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC:-false}" != "true" ]; then
+        if ! reconcile_kill_switch_is_clear; then
+            return 1
+        fi
     fi
 
     if ! verify_docker_target_routes; then
@@ -9426,9 +9500,7 @@ cleanup_dataplane() {
     if [ "${keep_tunnel}" = false ]; then
         remove_tagged_iptables_rules filter FORWARD "tunnelsats-k3s-egress-guard"
     fi
-    remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore"
-    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-wg-mark"
-    remove_tagged_iptables_rules mangle FORWARD "tunnelsats-conn-save"
+    cleanup_legacy_connmark_mangle_rules
 
     local max_attempts=10
     local attempt=0
@@ -9587,6 +9659,7 @@ fail_reconcile_closed() {
     local request_id="${1:-}"
     local failure_error="${LAST_ERROR:-Reconciliation failed}"
     local pre_cleanup_guard_error=""
+    LAST_SYNCED_WG_CFG_SIG=""
 
     # k3s owns a separate layered isolation and recovery lifecycle. Preserve
     # that state instead of applying the Docker/Secure Mode cleanup below.
@@ -9636,6 +9709,104 @@ fail_reconcile_closed() {
     if [ -n "${request_id}" ]; then
         write_reconcile_result "${request_id}" false
     fi
+    return 1
+}
+
+reconcile_steady_state_is_synced() {
+    local saved_target_container_id="${TARGET_CONTAINER_ID:-}"
+    local saved_target_container_name="${TARGET_CONTAINER_NAME:-}"
+    local saved_target_impl="${TARGET_IMPL:-}"
+    local saved_target_ip="${DOCKER_TARGET_IP:-}"
+    local saved_ln_target_port="${LN_TARGET_PORT:-}"
+    local saved_docker_expected_impl="${DOCKER_EXPECTED_IMPL:-}"
+    local saved_docker_expected_container="${DOCKER_EXPECTED_CONTAINER:-}"
+    local saved_resolved_expected_impl="${RESOLVED_EXPECTED_DOCKER_IMPL:-}"
+    local saved_resolved_expected_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP:-}"
+    local -a saved_target_ipv4_endpoints=("${TARGET_IPV4_ENDPOINTS[@]}")
+    local -a saved_target_ipv6_addresses=("${TARGET_IPV6_ADDRESSES[@]}")
+    local -a saved_target_ipv6_macs=("${TARGET_IPV6_MACS[@]}")
+    local saved_target_has_ipv6_default_route="${TARGET_HAS_IPV6_DEFAULT_ROUTE:-false}"
+    local saved_last_error="${LAST_ERROR:-}"
+    local saved_ipv4_rules_synced="${IPV4_RULES_SYNCED:-false}"
+    local saved_ipv6_rules_synced="${IPV6_RULES_SYNCED:-false}"
+
+    local ok=true
+    local current_sig=""
+    current_sig="$(compute_wg_config_signature || true)"
+    if [ -z "${current_sig}" ] || [ "${current_sig}" != "${LAST_SYNCED_WG_CFG_SIG}" ]; then
+        ok=false
+    fi
+
+    if [ "${ok}" = true ]; then
+        if ! wg show "${WG_IFACE}" >/dev/null 2>&1 || ! wireguard_handshake_is_fresh; then
+            ok=false
+        fi
+    fi
+
+    if [ "${ok}" = true ]; then
+        if ! detect_lightning_container; then
+            ok=false
+        elif [ "${TARGET_IMPL}" != "${saved_target_impl}" ] || \
+             [ "${DOCKER_TARGET_IP}" != "${saved_target_ip}" ] || \
+             [ "${TARGET_CONTAINER_NAME}" != "${saved_target_container_name}" ] || \
+             [ "${LN_TARGET_PORT}" != "${saved_ln_target_port}" ]; then
+            ok=false
+        elif [[ "${SECURE_MODE}" != "true" ]] && [ "${TARGET_CONTAINER_ID}" != "${saved_target_container_id}" ]; then
+            ok=false
+        fi
+    fi
+
+    if [ "${ok}" = true ] && [[ "${SECURE_MODE}" != "true" ]]; then
+        local net_json="" net_bridge_id="" target_attached_ip="" foreign_count=""
+        if ! net_json="$(docker_api "GET" "/networks/${DOCKER_NETWORK_NAME}" 2>/dev/null)"; then
+            ok=false
+        else
+            net_bridge_id="$(printf '%s' "${net_json}" | jq -r '.Id // empty' 2>/dev/null | cut -c1-12 || true)"
+            if [ -z "${net_bridge_id}" ] || [ "br-${net_bridge_id}" != "${BRIDGE_NAME}" ]; then
+                ok=false
+            else
+                target_attached_ip="$(printf '%s' "${net_json}" | jq -r --arg target "${TARGET_CONTAINER_ID}" \
+                    '(.Containers[$target].IPv4Address // "") | sub("/.*$"; "")' 2>/dev/null || true)"
+                if [ "${target_attached_ip}" != "${DOCKER_TARGET_IP}" ]; then
+                    ok=false
+                fi
+                if ! foreign_count="$(printf '%s' "${net_json}" | jq -er --arg target "${TARGET_CONTAINER_ID}" \
+                    '[(.Containers // {}) | keys[] | select(. != $target)] | length' 2>/dev/null)"; then
+                    ok=false
+                elif [ "${foreign_count}" != "0" ]; then
+                    ok=false
+                fi
+            fi
+        fi
+    fi
+
+    if [ "${ok}" = true ]; then
+        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+        if ! rules_are_synced; then
+            ok=false
+        fi
+    fi
+
+    if [ "${ok}" = true ]; then
+        return 0
+    fi
+
+    TARGET_CONTAINER_ID="${saved_target_container_id}"
+    TARGET_CONTAINER_NAME="${saved_target_container_name}"
+    TARGET_IMPL="${saved_target_impl}"
+    DOCKER_TARGET_IP="${saved_target_ip}"
+    LN_TARGET_PORT="${saved_ln_target_port}"
+    DOCKER_EXPECTED_IMPL="${saved_docker_expected_impl}"
+    DOCKER_EXPECTED_CONTAINER="${saved_docker_expected_container}"
+    RESOLVED_EXPECTED_DOCKER_IMPL="${saved_resolved_expected_impl}"
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP="${saved_resolved_expected_ip}"
+    TARGET_IPV4_ENDPOINTS=("${saved_target_ipv4_endpoints[@]}")
+    TARGET_IPV6_ADDRESSES=("${saved_target_ipv6_addresses[@]}")
+    TARGET_IPV6_MACS=("${saved_target_ipv6_macs[@]}")
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="${saved_target_has_ipv6_default_route}"
+    LAST_ERROR="${saved_last_error}"
+    IPV4_RULES_SYNCED="${saved_ipv4_rules_synced}"
+    IPV6_RULES_SYNCED="${saved_ipv6_rules_synced}"
     return 1
 }
 
@@ -9717,6 +9888,7 @@ reconcile_once() {
 
     if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
         LAST_ERROR="No WireGuard config found in /data"
+        LAST_SYNCED_WG_CFG_SIG=""
         RULES_SYNCED="false"
         IPV4_RULES_SYNCED="false"
         IPV6_RULES_SYNCED="false"
@@ -9728,6 +9900,31 @@ reconcile_once() {
         LAST_RECONCILE_EPOCH="$(date +%s)"
         log INFO "reconcile_standby reason=${reason} kill_switch_armed=false"
         return 0
+    fi
+
+    if [ "${reason}" = "periodic" ] && \
+       [[ "${K3S_MODE}" != "true" ]] && \
+       [ "${RULES_SYNCED:-false}" = "true" ] && \
+       [ "${DECOMMISSIONED:-false}" != "true" ] && \
+       [ "${KILL_SWITCH_ARMED:-false}" = "true" ] && \
+       [ -n "${LAST_SYNCED_WG_CFG_SIG:-}" ] && \
+       [ -n "${TARGET_IMPL:-}" ] && \
+       [ -n "${DOCKER_TARGET_IP:-}" ] && \
+       [ -n "${FORWARDING_PORT:-}" ] && \
+       { [[ "${SECURE_MODE}" == "true" ]] || { [ -S "${DOCKER_SOCK}" ] && [ -n "${TARGET_CONTAINER_ID:-}" ] && [ -n "${BRIDGE_NAME:-}" ]; }; }; then
+        if reconcile_steady_state_is_synced; then
+            LAST_ERROR=""
+            RULES_SYNCED="true"
+            IPV4_RULES_SYNCED="true"
+            IPV6_RULES_SYNCED="true"
+            write_state
+            if [ -n "${request_id}" ]; then
+                write_reconcile_result "${request_id}" false
+            fi
+            LAST_RECONCILE_EPOCH="$(date +%s)"
+            log INFO "reconcile_steady reason=${reason} target=${TARGET_CONTAINER_NAME} port=${FORWARDING_PORT} synced=true"
+            return 0
+        fi
     fi
 
     if [[ "${K3S_MODE}" == "true" ]] && [ "${K3S_ENABLE_BACKGROUND_WATCHER:-false}" = "true" ]; then
@@ -9944,11 +10141,16 @@ reconcile_once() {
             return 1
         fi
         RULES_SYNCED="true"
-    elif ! rules_are_synced; then
-        LAST_ERROR="Dataplane rules are not fully synced"
-        fail_reconcile_closed "${request_id}"
-        return 1
     else
+        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="true"
+        if ! rules_are_synced; then
+            ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+            LAST_ERROR="Dataplane rules are not fully synced"
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+
         # The emergency guard remains active while the complete dataplane and
         # handshake are verified. Only then can target traffic use table 51820.
         if ! wireguard_handshake_is_fresh; then
@@ -9959,7 +10161,8 @@ reconcile_once() {
             fail_reconcile_closed "${request_id}"
             return 1
         fi
-        # Defense in depth against route-table drift during activation.
+        # Defense in depth against route-table drift or a lingering pref 32762
+        # blackhole rule during activation.
         if ! rules_are_synced; then
             LAST_ERROR="Dataplane rules failed verification after kill-switch release"
             fail_reconcile_closed "${request_id}"
@@ -9968,6 +10171,7 @@ reconcile_once() {
         RULES_SYNCED="true"
     fi
 
+    LAST_SYNCED_WG_CFG_SIG="$(compute_wg_config_signature || true)"
     record_protected_target
     write_state
 
@@ -9983,6 +10187,280 @@ reconcile_once() {
     LAST_RECONCILE_EPOCH="$(date +%s)"
 
     return 0
+}
+
+RECONCILE_PERSISTED_GLOBALS=(
+    LAST_RECONCILE_EPOCH
+    RULES_SYNCED
+    IPV4_RULES_SYNCED
+    IPV6_RULES_SYNCED
+    DNS_PROTECTED
+    LAST_ERROR
+    DECOMMISSIONED
+    DECOMMISSION_STATE_LOADED
+    KILL_SWITCH_ARMED
+    KILL_SWITCH_ARMED_STATE_LOADED
+    KILL_SWITCH_ARMED_PERSISTED
+    LAST_SYNCED_WG_CFG_SIG
+    DOCKER_TARGET_IP
+    TARGET_CONTAINER_ID
+    TARGET_CONTAINER_NAME
+    TARGET_IMPL
+    LN_TARGET_PORT
+    FORWARDING_PORT
+    BRIDGE_NAME
+    DOCKER_EXPECTED_IMPL
+    DOCKER_EXPECTED_CONTAINER
+    RESOLVED_EXPECTED_DOCKER_IMPL
+    RESOLVED_EXPECTED_DOCKER_STATIC_IP
+    DOCKER_GW_PRIORITY_SUPPORTED
+    DOCKER_POLICY_STATE_LOADED
+    PROTECTED_TARGET_IMPL
+    PROTECTED_TARGET_CONTAINER
+    PROTECTED_TARGET_STATE_LOADED
+    PROTECTED_TARGET_PERSISTED
+    TARGET_IPV4_ENDPOINTS
+    MANAGED_DOCKER_IPV4_ENDPOINTS
+    IPV6_POLICY_STATE_LOADED
+    IPV6_POLICY_TABLE_MANAGED
+    TARGET_HAS_IPV6_DEFAULT_ROUTE
+    TARGET_IPV6_ADDRESSES
+    TARGET_IPV6_MACS
+    MANAGED_TARGET_IPV6_ADDRESSES
+    K3S_POLICY_STATE_LOADED
+    K3S_TARGET_POD_NAME
+    K3S_TARGET_POD_NAMESPACE
+    K3S_TARGET_POD_SELECTOR
+    MANAGED_K3S_TARGET_IP
+    MANAGED_K3S_TARGET_IMPL
+    MANAGED_K3S_POD_NAME
+    MANAGED_K3S_POD_NAMESPACE
+    MANAGED_K3S_POD_SELECTOR
+    MANAGED_K3S_TARGET_IPV6_ADDRESSES
+    K3S_BYPASS_CIDRS_NORMALIZED
+    K3S_QUARANTINE_CIDR
+    K3S_IPV6_QUARANTINE_CIDR
+    K3S_LEGACY_RULE_PROTOCOL
+    K3S_POD_API_QUERY_OK
+    K3S_CANDIDATE_POD_IPS
+    K3S_CANDIDATE_POD_IPV6_ADDRESSES
+    K3S_ALL_MATCHING_LOCAL_POD_IPS
+    K3S_WATCHED_CANDIDATE_POD_IPS
+    K3S_WATCHED_CANDIDATE_POD_IPV6_ADDRESSES
+    K3S_KNOWN_NON_TARGET_POD_IPS
+    K3S_KNOWN_NON_TARGET_POD_IPV6_ADDRESSES
+    K3S_KNOWN_NON_TARGET_POD_V6_PEERS
+    K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC
+    ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC
+)
+
+dump_reconcile_globals() {
+    local out_file="$1"
+    local var decl rest flags
+    : > "${out_file}"
+    for var in "${RECONCILE_PERSISTED_GLOBALS[@]}"; do
+        if decl="$(declare -p "${var}" 2>/dev/null)"; then
+            if [[ "${decl}" == "declare -- "* ]]; then
+                decl="declare -g -- ${decl#declare -- }"
+            elif [[ "${decl}" == "declare -"* ]]; then
+                rest="${decl#declare -}"
+                flags="${rest%% *}"
+                if [[ "${flags}" =~ ^[a-zA-Z]+$ ]]; then
+                    decl="declare -g${flags} ${rest#* }"
+                fi
+            fi
+            printf '%s\n' "${decl}" >> "${out_file}"
+        fi
+    done
+}
+
+pid_is_live() {
+    local pid="$1"
+    [ -n "${pid}" ] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    local stat
+    stat="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    [ -n "${stat}" ] && [[ "${stat}" != Z* ]]
+}
+
+collect_descendant_pids() {
+    local root_pid="$1"
+    local exclude_pid="${2:-}"
+    local ps_out
+    ps_out="$(ps -eo pid=,ppid= 2>/dev/null || true)"
+    [ -n "${ps_out}" ] || return 0
+    awk -v root="${root_pid}" -v excl="${exclude_pid}" '
+        {
+            pid = $1 + 0
+            ppid = $2 + 0
+            if (pid > 0 && ppid > 0) {
+                children[ppid] = children[ppid] " " pid
+            }
+        }
+        function walk(p,    n, arr, i, c) {
+            n = split(children[p], arr, " ")
+            for (i = 1; i <= n; i++) {
+                c = arr[i] + 0
+                if (c <= 0 || seen[c]) continue
+                if (excl != "" && c == excl + 0) continue
+                seen[c] = 1
+                walk(c)
+                print c
+            }
+        }
+        END {
+            seen[root + 0] = 1
+            walk(root + 0)
+        }
+    ' <<< "${ps_out}"
+}
+
+terminate_process_tree() {
+    local root_pid="$1"
+    local exclude_pid="${2:-}"
+    [ -n "${root_pid}" ] || return 0
+    [[ "${root_pid}" =~ ^[0-9]+$ ]] || return 0
+
+    local -a descendants=()
+    local pid
+    mapfile -t descendants < <(collect_descendant_pids "${root_pid}" "${exclude_pid}")
+
+    for pid in "${descendants[@]}"; do
+        [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && kill -TERM "${pid}" 2>/dev/null || true
+    done
+    if [ "${root_pid}" != "${exclude_pid}" ]; then
+        kill -TERM "${root_pid}" 2>/dev/null || true
+    fi
+
+    local attempt=0
+    while [ "${attempt}" -lt 5 ]; do
+        local still_alive=false
+        if [ "${root_pid}" != "${exclude_pid}" ] && pid_is_live "${root_pid}"; then
+            still_alive=true
+        else
+            for pid in "${descendants[@]}"; do
+                if [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && pid_is_live "${pid}"; then
+                    still_alive=true
+                    break
+                fi
+            done
+        fi
+        [ "${still_alive}" = false ] && return 0
+        sleep 0.1 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    mapfile -t descendants < <(collect_descendant_pids "${root_pid}" "${exclude_pid}")
+    for pid in "${descendants[@]}"; do
+        [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && kill -KILL "${pid}" 2>/dev/null || true
+    done
+    if [ "${root_pid}" != "${exclude_pid}" ]; then
+        kill -KILL "${root_pid}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+run_reconcile_with_watchdog() {
+    local reason="$1"
+    local request_id="${2:-}"
+    local timeout_sec="${RECONCILE_CYCLE_TIMEOUT:-55}"
+    local state_dump=""
+    local timeout_flag=""
+    local worker_pid=""
+    local timer_pid=""
+    local worker_rc=0
+    local saved_k3s_watcher_enabled="${K3S_ENABLE_BACKGROUND_WATCHER:-false}"
+
+    if [[ ! "${timeout_sec}" =~ ^[0-9]+$ ]] || [ "${timeout_sec}" -lt 1 ]; then
+        timeout_sec=55
+    fi
+
+    state_dump="$(mktemp "/tmp/tunnelsats_reconcile_state.XXXXXX")" || return 1
+    timeout_flag="$(mktemp "/tmp/tunnelsats_reconcile_timeout.XXXXXX")" || {
+        rm -f "${state_dump}"
+        return 1
+    }
+    rm -f "${timeout_flag}"
+    ACTIVE_RECONCILE_STATE_DUMP="${state_dump}"
+    ACTIVE_RECONCILE_TIMEOUT_FLAG="${timeout_flag}"
+
+    (
+        # Keep K3S_WATCHER_PID owned by the parent supervisor shell.
+        K3S_ENABLE_BACKGROUND_WATCHER="false"
+        inner_rc=0
+        reconcile_once "${reason}" "${request_id}" || inner_rc=$?
+        dump_reconcile_globals "${state_dump}.tmp" || true
+        mv -f "${state_dump}.tmp" "${state_dump}" 2>/dev/null || true
+        exit "${inner_rc}"
+    ) &
+    worker_pid=$!
+    ACTIVE_RECONCILE_WORKER_PID="${worker_pid}"
+
+    (
+        sleep_pid=""
+        trap '[ -n "${sleep_pid}" ] && kill "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT
+        sleep "${timeout_sec}" &
+        sleep_pid=$!
+        wait "${sleep_pid}" || exit 0
+        if pid_is_live "${worker_pid}"; then
+            printf 'timeout\n' > "${timeout_flag}" 2>/dev/null || true
+            exclude_pid=""
+            if [ -n "${K3S_DNS_PROXY_PID_FILE:-}" ] && [ -f "${K3S_DNS_PROXY_PID_FILE}" ]; then
+                exclude_pid="$(cat "${K3S_DNS_PROXY_PID_FILE}" 2>/dev/null | tr -d '[:space:]' || true)"
+                [[ "${exclude_pid}" =~ ^[0-9]+$ ]] || exclude_pid=""
+            fi
+            terminate_process_tree "${worker_pid}" "${exclude_pid}"
+        fi
+    ) &
+    timer_pid=$!
+    ACTIVE_RECONCILE_TIMER_PID="${timer_pid}"
+
+    wait "${worker_pid}" || worker_rc=$?
+    ACTIVE_RECONCILE_WORKER_PID=""
+
+    local -a timer_children=()
+    local tpid
+    mapfile -t timer_children < <(collect_descendant_pids "${timer_pid}")
+    kill -TERM "${timer_pid}" 2>/dev/null || true
+    for tpid in "${timer_children[@]}"; do
+        [ -n "${tpid}" ] && kill -TERM "${tpid}" 2>/dev/null || true
+    done
+    wait "${timer_pid}" 2>/dev/null || true
+    ACTIVE_RECONCILE_TIMER_PID=""
+
+    if [ -f "${timeout_flag}" ]; then
+        rm -f "${timeout_flag}" "${state_dump}" "${state_dump}.tmp"
+        ACTIVE_RECONCILE_STATE_DUMP=""
+        ACTIVE_RECONCILE_TIMEOUT_FLAG=""
+        log ERROR "reconcile_timeout reason=${reason} timeout=${timeout_sec}s"
+        LAST_ERROR="Reconciliation timed out after ${timeout_sec}s"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        DNS_PROTECTED="false"
+        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+        LAST_SYNCED_WG_CFG_SIG=""
+        LAST_RECONCILE_EPOCH="$(date +%s)"
+        fail_reconcile_closed "${request_id}" || true
+        return 1
+    fi
+
+    if [ -s "${state_dump}" ]; then
+        # shellcheck disable=SC1090
+        source "${state_dump}" || true
+    fi
+    rm -f "${timeout_flag}" "${state_dump}" "${state_dump}.tmp"
+    ACTIVE_RECONCILE_STATE_DUMP=""
+    ACTIVE_RECONCILE_TIMEOUT_FLAG=""
+
+    if [[ "${K3S_MODE}" == "true" ]] && \
+       [ "${KILL_SWITCH_ARMED:-false}" = "true" ] && \
+       [ "${DECOMMISSIONED:-false}" != "true" ] && \
+       [ "${saved_k3s_watcher_enabled}" = "true" ]; then
+        ensure_k3s_pod_watcher_running
+    fi
+
+    return "${worker_rc}"
 }
 
 ensure_k3s_selector_context() {
@@ -10754,6 +11232,7 @@ decommission_dataplane() {
     IPV4_RULES_SYNCED="false"
     IPV6_RULES_SYNCED="false"
     DNS_PROTECTED="false"
+    LAST_SYNCED_WG_CFG_SIG=""
     LAST_ERROR=""
     write_state
     discard_pending_activation_triggers
@@ -10806,6 +11285,29 @@ process_decommission_triggers() {
 cleanup() {
     local rc=0
     log INFO "Received SIGTERM. Stopping ${APP_NAME}."
+    if [ -n "${ACTIVE_RECONCILE_TIMER_PID:-}" ]; then
+        terminate_process_tree "${ACTIVE_RECONCILE_TIMER_PID}" ""
+        wait "${ACTIVE_RECONCILE_TIMER_PID}" 2>/dev/null || true
+        ACTIVE_RECONCILE_TIMER_PID=""
+    fi
+    if [ -n "${ACTIVE_RECONCILE_WORKER_PID:-}" ]; then
+        local cleanup_exclude_pid=""
+        if [ -n "${K3S_DNS_PROXY_PID_FILE:-}" ] && [ -f "${K3S_DNS_PROXY_PID_FILE}" ]; then
+            cleanup_exclude_pid="$(cat "${K3S_DNS_PROXY_PID_FILE}" 2>/dev/null | tr -d '[:space:]' || true)"
+            [[ "${cleanup_exclude_pid}" =~ ^[0-9]+$ ]] || cleanup_exclude_pid=""
+        fi
+        terminate_process_tree "${ACTIVE_RECONCILE_WORKER_PID}" "${cleanup_exclude_pid}"
+        wait "${ACTIVE_RECONCILE_WORKER_PID}" 2>/dev/null || true
+        ACTIVE_RECONCILE_WORKER_PID=""
+    fi
+    if [ -n "${ACTIVE_RECONCILE_STATE_DUMP:-}" ]; then
+        rm -f "${ACTIVE_RECONCILE_STATE_DUMP}" "${ACTIVE_RECONCILE_STATE_DUMP}.tmp" 2>/dev/null || true
+        ACTIVE_RECONCILE_STATE_DUMP=""
+    fi
+    if [ -n "${ACTIVE_RECONCILE_TIMEOUT_FLAG:-}" ]; then
+        rm -f "${ACTIVE_RECONCILE_TIMEOUT_FLAG}" 2>/dev/null || true
+        ACTIVE_RECONCILE_TIMEOUT_FLAG=""
+    fi
     stop_k3s_pod_watcher
     stop_k3s_dns_proxy
     if [ -n "${API_PID}" ]; then
@@ -10861,7 +11363,7 @@ handle_restart_trigger() {
         return 1
     fi
     if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
-        reconcile_once "restart" || true
+        run_reconcile_with_watchdog "restart" || true
         return 0
     fi
     LAST_ERROR="Restart requested; dataplane remains fail-closed"
@@ -10875,7 +11377,7 @@ handle_restart_trigger() {
             || ip link del dev "${WG_IFACE}" >/dev/null 2>&1 \
             || true
     fi
-    reconcile_once "restart" || true
+    run_reconcile_with_watchdog "restart" || true
 }
 
 main_loop() {
@@ -10917,7 +11419,7 @@ main_loop() {
             legacy_req=$(cat "${RECONCILE_TRIGGER_LEGACY}" 2>/dev/null || true)
             rm -f "${RECONCILE_TRIGGER_LEGACY}"
             if is_valid_request_id "${legacy_req}"; then
-                reconcile_once "manual" "${legacy_req}" || true
+                run_reconcile_with_watchdog "manual" "${legacy_req}" || true
             else
                 log WARN "Ignoring legacy reconcile trigger with invalid request id"
             fi
@@ -10930,7 +11432,7 @@ main_loop() {
             req="$(basename "${trigger_path}" .trigger)"
             rm -f "${trigger_path}"
             if is_valid_request_id "${req}"; then
-                reconcile_once "manual" "${req}" || true
+                run_reconcile_with_watchdog "manual" "${req}" || true
             else
                 log WARN "Ignoring reconcile trigger with invalid request id: ${req}"
             fi
@@ -10939,7 +11441,7 @@ main_loop() {
         local now
         now=$(date +%s)
         if [ $((now - LAST_RECONCILE_EPOCH)) -ge ${RECONCILE_INTERVAL} ]; then
-            reconcile_once "periodic" || true
+            run_reconcile_with_watchdog "periodic" || true
         fi
 
         if [[ "${K3S_MODE}" == "true" ]]; then
@@ -11024,7 +11526,7 @@ rm -f "$(k3s_watch_state_file_path)" 2>/dev/null || true
 K3S_ENABLE_BACKGROUND_WATCHER="true"
 ensure_k3s_pod_watcher_running
 
-reconcile_once "startup" || true
+run_reconcile_with_watchdog "startup" || true
 
 echo "Tunnelsats ${TUNNELSATS_ROLE} container running."
 main_loop

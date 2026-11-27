@@ -2,7 +2,7 @@ manifestVersion: 1.1
 id: tunnelsats
 category: bitcoin
 name: TunnelSats
-version: "3.6.1"
+version: "3.6.2"
 tagline: Run your Lightning node on clearnet without exposing your home IP
 description: >-
   ⚠️ TunnelSats is a paid service. You buy and renew a subscription with Lightning inside the app. On the Community App Store, TunnelSats can configure your Lightning Node or Core Lightning automatically (or show manual steps if you enable Secure Mode).
@@ -25,7 +25,7 @@ description: >-
   - Choose from exit servers around the world
 
   - Home screen widgets for tunnel status, data used and days left
-releaseNotes: "Arm the fail-closed kill switch only after a WireGuard subscription or TunnelSats node config is present (keeping fresh installs in non-blocking standby), and align Official Umbrel App Store promotion tooling with PR #6433"
+releaseNotes: "Remove obsolete iptables mangle CONNMARK dependency from Official App Store Secure Mode (fixing UmbrelOS 2.0 + Tailscale native nftables compatibility), add bounded Docker API timeouts, per-cycle reconcile watchdog, steady-state periodic verification without pref 32762 flapping, and fail-closed stale-heartbeat and live pref 32762 status detection"
 developer: TunnelSats Team
 website: https://tunnelsats.com
 dependencies: []

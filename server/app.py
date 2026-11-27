@@ -64,7 +64,7 @@ app.config["MAX_CONTENT_LENGTH"] = DEFAULT_MAX_REQUEST_BYTES
 # Umbrel uses a reverse proxy. Parse X-Forwarded-* headers before IP restrictions.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-APP_VERSION = "v3.6.1"
+APP_VERSION = "v3.6.2"
 APP_MANIFEST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "umbrel-app.yml"))
 
 class SecurityHeadersMiddleware:
@@ -161,8 +161,21 @@ ANNOUNCEMENT_VERIFICATION_ERROR = (
     "Lightning node gossip announcements have not been verified free of conflicting clearnet addresses."
 )
 TARGET_SWITCH_PENDING_ERROR = "Lightning target switch is pending dataplane reconciliation."
+def _parse_int_env(name: str, default: int, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(minimum, int(raw.strip()))
+    except ValueError:
+        return default
+
+
 RECONCILE_WAIT_TIMEOUT_SECONDS = 60.0
 RECONCILE_WAIT_POLL_SECONDS = 0.1
+RECONCILE_HEARTBEAT_MAX_AGE_SECONDS = _parse_int_env(
+    "RECONCILE_HEARTBEAT_MAX_AGE_SECONDS", default=150, minimum=30
+)
 K8S_POD_TERMINATION_TIMEOUT_SECONDS = 30.0
 DAEMON_RESTORE_TIMEOUT_SECONDS = (
     RECONCILE_WAIT_TIMEOUT_SECONDS + (2 * K8S_POD_TERMINATION_TIMEOUT_SECONDS) + 30.0
@@ -1115,6 +1128,8 @@ STATUS_ERROR_K3S_DNS_UNPROTECTED = "k3s_dns_unprotected"
 STATUS_ERROR_NO_WIREGUARD_CONFIG = "no_wireguard_config"
 STATUS_ERROR_NO_LIGHTNING_NODE = "no_lightning_node"
 STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING = "protected_node_not_running"
+STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE = "reconcile_kill_switch_active"
+STATUS_ERROR_RECONCILE_STALE = "reconcile_stale"
 STATUS_ERROR_DATAPLANE = "dataplane_error"
 _DATAPLANE_ERROR_CODE_PREFIXES = (
     ("No WireGuard config found", STATUS_ERROR_NO_WIREGUARD_CONFIG),
@@ -1122,6 +1137,12 @@ _DATAPLANE_ERROR_CODE_PREFIXES = (
     # Standard Mode keeps the protected node blocked while it is not running
     # instead of switching to the other implementation (issue #173).
     ("Waiting for the protected node to start", STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING),
+    ("Temporary reconciliation kill switch", STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE),
+    ("Reconciliation timed out", STATUS_ERROR_RECONCILE_STALE),
+    ("Reconciliation heartbeat is stale", STATUS_ERROR_RECONCILE_STALE),
+)
+_RECONCILE_KILL_SWITCH_RULE_RE = re.compile(
+    r"^32762:\s+from\s+(\S+)\s+blackhole\s*$"
 )
 
 _SERVER_IP_CACHE_TTL_SECONDS = 60.0
@@ -1147,6 +1168,121 @@ def dataplane_error_code(error: Any) -> Optional[str]:
         if text.startswith(prefix):
             return code
     return STATUS_ERROR_DATAPLANE
+
+
+def _evaluate_reconcile_freshness(
+    last_reconcile_at: Any,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, Optional[int]]:
+    """Return ``(is_stale, age_seconds)`` for ``dataplane['last_reconcile_at']``.
+
+    - Missing or empty values return ``(False, None)`` (not yet recorded / unmeasured).
+    - Malformed, timezone-naive, or non-string values fail closed as ``(True, None)``.
+    - Valid ISO-8601 UTC timestamps are stale when ``age_seconds > RECONCILE_HEARTBEAT_MAX_AGE_SECONDS``.
+    """
+    if last_reconcile_at is None:
+        return False, None
+    if isinstance(last_reconcile_at, str):
+        raw = last_reconcile_at.strip()
+        if not raw:
+            return False, None
+    else:
+        return True, None
+
+    normalized = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return True, None
+    if parsed.tzinfo is None:
+        return True, None
+
+    parsed_utc = parsed.astimezone(timezone.utc)
+    if now is not None:
+        current_utc = (
+            now.astimezone(timezone.utc)
+            if now.tzinfo is not None
+            else now.replace(tzinfo=timezone.utc)
+        )
+    else:
+        current_utc = datetime.now(timezone.utc)
+    age_seconds = max(0, int((current_utc - parsed_utc).total_seconds()))
+    return age_seconds > RECONCILE_HEARTBEAT_MAX_AGE_SECONDS, age_seconds
+
+
+def _strip_host_cidr(source: Any) -> str:
+    cleaned = str(source or "").strip()
+    if cleaned.endswith("/32"):
+        return cleaned[:-3]
+    return cleaned
+
+
+def _detect_active_reconcile_kill_switch(
+    dataplane: Dict[str, Any],
+    active_target_impl: Optional[str],
+    lnd_ip: Optional[str],
+    cln_ip: Optional[str],
+) -> Tuple[bool, List[str]]:
+    """Probe the live kernel routing policy table for stuck ``pref 32762`` blackholes.
+
+    In Secure Mode, only active target IPs are flagged so the intentionally
+    blackholed inactive candidate IP never triggers a false positive.
+    """
+    if (
+        TUNNELSATS_ROLE == "web"
+        or K3S_MODE
+        or dataplane.get("dataplane_mode") == "k3s"
+    ):
+        return False, []
+
+    try:
+        res = subprocess.run(
+            ["ip", "rule", "show", "pref", "32762"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False, []
+
+    if res.returncode != 0 or not isinstance(res.stdout, str) or not res.stdout:
+        return False, []
+
+    parsed_sources: List[str] = []
+    seen_sources = set()
+    for line in res.stdout.splitlines():
+        match = _RECONCILE_KILL_SWITCH_RULE_RE.match(line.strip())
+        if match:
+            src = match.group(1)
+            if src not in seen_sources:
+                seen_sources.add(src)
+                parsed_sources.append(src)
+
+    if not parsed_sources:
+        return False, []
+
+    is_secure = bool(SECURE_MODE or dataplane.get("dataplane_mode") == "secure-mode")
+    if is_secure:
+        active_targets = set()
+        target_ip = _strip_host_cidr(dataplane.get("target_ip"))
+        if target_ip:
+            active_targets.add(target_ip)
+        if active_target_impl == "lnd":
+            candidate = _strip_host_cidr(lnd_ip)
+            if candidate:
+                active_targets.add(candidate)
+        elif active_target_impl == "cln":
+            candidate = _strip_host_cidr(cln_ip)
+            if candidate:
+                active_targets.add(candidate)
+
+        matched = [src for src in parsed_sources if _strip_host_cidr(src) in active_targets]
+        return bool(matched), matched
+
+    # Standard Mode clears all pref 32762 blackhole rules upon release, so any
+    # remaining blackhole rule (protected Docker subnet, target IP, or managed
+    # endpoint) indicates the temporary reconciliation kill switch is still active.
+    return True, parsed_sources
 
 
 def _normalize_host(host: Any) -> str:
@@ -5213,20 +5349,6 @@ def _build_local_status_dict() -> Dict[str, Any]:
         except (IOError, OSError) as exc:
             app.logger.warning(f"Failed to read CLN config for routing detection: {exc}")
 
-    # Dynamic Internal IP Recovery
-    vpn_internal_ip = ""
-    try:
-        # Source of Truth: the live interface state. 
-        # check=False in subprocess.run is more robust than check_output if "ip" is missing.
-        res = subprocess.run(["ip", "-4", "addr", "show", "dev", WG_INTERFACE_NAME], 
-                             capture_output=True, text=True, timeout=2)
-        if res.returncode == 0:
-            if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout):
-                vpn_internal_ip = match.group(1)
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        # Handle cases where "ip" is missing or dev doesn't exist gracefully
-        pass
-
     server_domain = ""
     expires_at = ""
     vpn_port = ""
@@ -5284,6 +5406,26 @@ def _build_local_status_dict() -> Dict[str, Any]:
         active_target_impl = requested_node_type
     else:
         active_target_impl = "cln" if (cln_detected and not lnd_detected) else ("lnd" if lnd_detected else (dataplane_target or "lnd"))
+
+    # Probe live kernel pref 32762 blackhole rules before querying the WireGuard
+    # interface address so the final subprocess.run call remains ip -4 addr show.
+    kill_switch_active, kill_switch_sources = _detect_active_reconcile_kill_switch(
+        dataplane, active_target_impl, lnd_ip, cln_ip
+    )
+
+    # Dynamic Internal IP Recovery
+    vpn_internal_ip = ""
+    try:
+        # Source of Truth: the live interface state.
+        # check=False in subprocess.run is more robust than check_output if "ip" is missing.
+        res = subprocess.run(["ip", "-4", "addr", "show", "dev", WG_INTERFACE_NAME],
+                             capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            if match := re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout):
+                vpn_internal_ip = match.group(1)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        # Handle cases where "ip" is missing or dev doesn't exist gracefully
+        pass
 
     requested_target_impl = requested_node_type if requested_node_type in ("lnd", "cln") else None
     target_switch_pending = bool(
@@ -5392,8 +5534,12 @@ def _build_local_status_dict() -> Dict[str, Any]:
 
     dns_protected = bool(dataplane.get("dns_protected", False))
     effective_rules_synced = bool(dataplane["rules_synced"])
+    effective_ipv4_rules_synced = bool(dataplane.get("ipv4_rules_synced", False))
     effective_error = dataplane["last_error"]
     last_error_code: Optional[str] = None
+    reconcile_stale, reconcile_age_seconds = _evaluate_reconcile_freshness(
+        dataplane.get("last_reconcile_at")
+    )
     if target_switch_pending:
         effective_rules_synced = False
         effective_error = TARGET_SWITCH_PENDING_ERROR
@@ -5411,6 +5557,32 @@ def _build_local_status_dict() -> Dict[str, Any]:
         if not effective_error:
             effective_error = "k3s: External DNS protection is not active"
             last_error_code = STATUS_ERROR_K3S_DNS_UNPROTECTED
+    if not dataplane.get("decommissioned") and (effective_rules_synced or vpn_active):
+        if kill_switch_active:
+            was_rules_synced = effective_rules_synced
+            effective_rules_synced = False
+            effective_ipv4_rules_synced = False
+            existing_code = last_error_code or dataplane_error_code(effective_error)
+            if was_rules_synced or existing_code in (
+                None,
+                STATUS_ERROR_RECONCILE_STALE,
+                STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE,
+            ):
+                effective_error = (
+                    f"Temporary reconciliation kill switch (pref 32762) is still blocking "
+                    f"{', '.join(kill_switch_sources)}"
+                )
+                last_error_code = STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE
+        elif effective_rules_synced and reconcile_stale:
+            effective_rules_synced = False
+            if reconcile_age_seconds is not None:
+                effective_error = (
+                    f"Reconciliation heartbeat is stale "
+                    f"({reconcile_age_seconds}s old; max {RECONCILE_HEARTBEAT_MAX_AGE_SECONDS}s)"
+                )
+            else:
+                effective_error = "Reconciliation heartbeat is stale (unreadable timestamp)"
+            last_error_code = STATUS_ERROR_RECONCILE_STALE
     if last_error_code is None:
         last_error_code = dataplane_error_code(effective_error)
 
@@ -5507,15 +5679,18 @@ def _build_local_status_dict() -> Dict[str, Any]:
         "forwarding_port": dataplane["forwarding_port"],
         "k3s_bypass_cidrs": dataplane.get("k3s_bypass_cidrs", []),
         "rules_synced": effective_rules_synced,
-        "ipv4_rules_synced": dataplane.get("ipv4_rules_synced", False),
+        "ipv4_rules_synced": effective_ipv4_rules_synced,
         "ipv6_rules_synced": dataplane.get("ipv6_rules_synced", False),
         "dns_protected": dns_protected,
         "decommissioned": dataplane.get("decommissioned", False),
         "kill_switch_armed": bool(dataplane.get("kill_switch_armed", False)),
+        "kill_switch_active": bool(kill_switch_active),
         "ipv6_policy": dataplane.get("ipv6_policy", "deny"),
         "target_ipv6_addresses": dataplane.get("target_ipv6_addresses", []),
         "target_ipv6_default_route": dataplane.get("target_ipv6_default_route", False),
         "last_reconcile_at": dataplane["last_reconcile_at"],
+        "reconcile_stale": bool(reconcile_stale),
+        "reconcile_age_seconds": reconcile_age_seconds,
         "last_error": effective_error,
         "last_error_code": last_error_code,
         "announcement_conflicts": announcement_conflicts,

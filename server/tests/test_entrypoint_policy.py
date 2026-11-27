@@ -3604,26 +3604,28 @@ K3S_MODE="true"
 SECURE_MODE="false"
 DOCKER_TARGET_IP="10.42.1.7"
 DECOMMISSIONED="true"
-EVENTS=""
+EVENTS_FILE="${POLICY_TEST_STATE_FILE}.events"
+: > "${EVENTS_FILE}"
+record_event() { printf '%s' "$1" >> "${EVENTS_FILE}"; }
 
 ensure_k3s_egress_guard() {
-    EVENTS+="guard:$1;"
+    record_event "guard:$1;"
     return 0
 }
 ensure_fallback_blackhole_rule() {
-    EVENTS+="blackhole:$1;"
+    record_event "blackhole:$1;"
     return 0
 }
 ensure_k3s_subnet_quarantine() {
-    EVENTS+="quarantine:$1;"
+    record_event "quarantine:$1;"
     return 0
 }
 ensure_k3s_emergency_network_policy() {
-    EVENTS+="netpol;"
+    record_event "netpol;"
     return 0
 }
 cleanup_dataplane() {
-    EVENTS+="cleanup:${1:-full};"
+    record_event "cleanup:${1:-full};"
     return 0
 }
 wg() {
@@ -3633,45 +3635,45 @@ wg() {
     return 1
 }
 wg-quick() {
-    EVENTS+="wg-quick:$1:$2;"
+    record_event "wg-quick:$1:$2;"
     return 0
 }
 reconcile_once() {
-    EVENTS+="reconcile:$1;"
+    record_event "reconcile:$1;"
     return 0
 }
 
 handle_restart_trigger
 [[ ! -f "${RESTART_TRIGGER}" ]]
 [[ "${DECOMMISSIONED}" == "false" ]]
-[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+[[ "$(cat "${EVENTS_FILE}")" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
 
 # When emergency NetworkPolicy fails during restart (e.g. conflicting allow policy)
 # but verified pod-CIDR quarantine is in place to protect replacement pods,
 # handle_restart_trigger proceeds with WireGuard restart.
-EVENTS=""
+: > "${EVENTS_FILE}"
 K3S_SHUTDOWN_NETPOL_ATTEMPTS=1
 ensure_k3s_emergency_network_policy() {
-    EVENTS+="netpol:fail;"
+    record_event "netpol:fail;"
     return 1
 }
 delete_k3s_target_pod() {
-    EVENTS+="delete;"
+    record_event "delete;"
     return 0
 }
 handle_restart_trigger
-[[ "${EVENTS}" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol:fail;quarantine:10.42.1.7;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
+[[ "$(cat "${EVENTS_FILE}")" == "guard:10.42.1.7;blackhole:10.42.1.7;netpol:fail;quarantine:10.42.1.7;cleanup:--keep-tunnel;wg-quick:down:${WG_CONF_PATH};reconcile:restart;" ]]
 
 # If replacement-pod protection (both NetworkPolicy and pod-CIDR quarantine) fails
 # during restart, handle_restart_trigger must return 1 and must NOT bring down WireGuard
 # even when current-IP guards succeed.
-EVENTS=""
+: > "${EVENTS_FILE}"
 ensure_k3s_subnet_quarantine() { return 1; }
 if handle_restart_trigger; then
     exit 1
 fi
-[[ "${EVENTS}" != *"wg-quick:down"* ]]
-[[ "${EVENTS}" != *"reconcile:restart"* ]]
+[[ "$(cat "${EVENTS_FILE}")" != *"wg-quick:down"* ]]
+[[ "$(cat "${EVENTS_FILE}")" != *"reconcile:restart"* ]]
 '''
     )
 
@@ -7273,6 +7275,686 @@ preserve_fail_closed_dataplane "api-crash"
         armed=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_remove_tagged_iptables_rules_suppresses_stderr_on_nftables_mangle_error():
+    result = run_bash(
+        r'''
+source "$1"
+
+iptables() {
+    if [[ "$1 $2 $3" == "-t mangle -S" ]]; then
+        printf "iptables v1.8.11 (nf_tables): table 'mangle' is incompatible, use 'nft' tool.\n" >&2
+        return 4
+    fi
+    return 0
+}
+
+err_file="${POLICY_TEST_STATE_FILE}.stderr"
+remove_tagged_iptables_rules mangle PREROUTING "tunnelsats-conn-restore" 2>"${err_file}"
+[[ "${IPTABLES_RULES_REMOVED}" == "0" ]]
+[[ ! -s "${err_file}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_secure_mode_nat_reconcile_and_sync_succeed_without_mangle_table_and_clean_legacy_rules():
+    result = run_bash(
+        r'''
+source "$1"
+
+# 1. Native nftables mangle incompatibility in SECURE_MODE=true must not fail
+#    ensure_nat_forward_rules or ipv4_rules_are_synced and must produce zero stderr noise.
+K3S_MODE="false"
+SECURE_MODE="true"
+DOCKER_TARGET_IP="10.21.21.9"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+WG_IFACE="tunnelsatsv2"
+MANGLE_MUTATIONS=0
+K3S_DNS_CALLS=0
+
+ensure_k3s_dns_protection() { K3S_DNS_CALLS=$((K3S_DNS_CALLS + 1)); return 0; }
+fail_closed_policy_prerequisites_are_synced() { return 0; }
+get_target_subnet() { printf '10.21.21.0/24\n'; }
+ip() {
+    if [[ "$*" == "rule show pref 32762" ]]; then
+        printf '32762:\tfrom 10.21.21.96 blackhole\n'
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '32500:\tfrom 10.21.21.9 to 10.21.21.0/24 lookup main\n'
+        printf '32764:\tfrom 10.21.21.9 lookup 51820\n'
+        return 0
+    fi
+    return 0
+}
+iptables() {
+    if [[ "$1 $2" == "-t mangle" ]]; then
+        if [[ "$3" == "-S" ]]; then
+            printf "iptables v1.8.11 (nf_tables): table 'mangle' is incompatible, use 'nft' tool.\n" >&2
+            return 4
+        fi
+        MANGLE_MUTATIONS=$((MANGLE_MUTATIONS + 1))
+        return 99
+    fi
+    if [[ "$*" == "-t nat -S PREROUTING" ]]; then
+        printf '%s\n' \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 19735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.21.21.9:9735" \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 9735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.21.21.9:9735"
+        return 0
+    fi
+    if [[ "$*" == "-t nat -S POSTROUTING" ]]; then
+        printf '%s\n' "-A POSTROUTING -s 10.21.21.9 -o tunnelsatsv2 -m comment --comment tunnelsats-masq -j MASQUERADE"
+        return 0
+    fi
+    return 0
+}
+
+err_file="${POLICY_TEST_STATE_FILE}.secure.stderr"
+ensure_nat_forward_rules 2>"${err_file}"
+[[ "$(cat "${err_file}")" != *"incompatible"* ]]
+[[ "$(cat "${err_file}")" != *"nf_tables"* ]]
+[[ "${MANGLE_MUTATIONS}" == "0" ]]
+[[ "${K3S_DNS_CALLS}" == "0" ]]
+
+ipv4_rules_are_synced 2>"${err_file}"
+[[ ! -s "${err_file}" ]]
+[[ "${MANGLE_MUTATIONS}" == "0" ]]
+
+# 2. Legacy CONNMARK mangle rules present during upgrade in SECURE_MODE=true are cleaned up
+#    while leaving k3s non-target 0xca6d mangle rules untouched.
+DELETED_MANGLE=""
+iptables() {
+    if [[ "$*" == "-t mangle -S PREROUTING" ]]; then
+        printf '%s\n' \
+            "-A PREROUTING ! -i tunnelsatsv2 -s 10.21.21.9 -m comment --comment tunnelsats-conn-restore -j CONNMARK --restore-mark --mask 0xca6c" \
+            "-A PREROUTING -s 10.42.0.5 -m comment --comment tunnelsats-k3s-non-target -j MARK --set-xmark 0xca6d/0xffffffff"
+        return 0
+    fi
+    if [[ "$*" == "-t mangle -S FORWARD" ]]; then
+        printf '%s\n' \
+            "-A FORWARD -i tunnelsatsv2 -d 10.21.21.9 -m comment --comment tunnelsats-conn-save -j CONNMARK --set-mark 0xca6c/0xca6c" \
+            "-A FORWARD -i tunnelsatsv2 -d 10.21.21.9 -m comment --comment tunnelsats-wg-mark -j MARK --set-mark 0xca6c"
+        return 0
+    fi
+    if [[ "$1 $2 $3" == "-t mangle -D" ]]; then
+        DELETED_MANGLE+="$*"$'\n'
+        return 0
+    fi
+    if [[ "$1 $2" == "-t mangle" ]]; then
+        MANGLE_MUTATIONS=$((MANGLE_MUTATIONS + 1))
+        return 99
+    fi
+    if [[ "$*" == "-t nat -S PREROUTING" ]]; then
+        printf '%s\n' \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 19735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.21.21.9:9735" \
+            "-A PREROUTING -i tunnelsatsv2 -p tcp --dport 9735 -m comment --comment tunnelsats-dnat -j DNAT --to-destination 10.21.21.9:9735"
+        return 0
+    fi
+    if [[ "$*" == "-t nat -S POSTROUTING" ]]; then
+        printf '%s\n' "-A POSTROUTING -s 10.21.21.9 -o tunnelsatsv2 -m comment --comment tunnelsats-masq -j MASQUERADE"
+        return 0
+    fi
+    return 0
+}
+
+ensure_nat_forward_rules
+[[ "${NAT_CHANGED}" == "1" ]]
+[[ "${MANGLE_MUTATIONS}" == "0" ]]
+[[ "${DELETED_MANGLE}" == *"tunnelsats-conn-restore"* ]]
+[[ "${DELETED_MANGLE}" == *"tunnelsats-conn-save"* ]]
+[[ "${DELETED_MANGLE}" == *"tunnelsats-wg-mark"* ]]
+[[ "${DELETED_MANGLE}" != *"tunnelsats-k3s-non-target"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_docker_api_applies_bounded_timeouts_noproxy_and_socket_fast_fail():
+    result = run_bash(
+        r'''
+source "$1"
+
+[[ "${DOCKER_API_CONNECT_TIMEOUT}" == "5" ]]
+[[ "${DOCKER_API_MAX_TIME}" == "10" ]]
+
+CURL_CALLS_FILE="${POLICY_TEST_STATE_FILE}.curl_calls"
+: > "${CURL_CALLS_FILE}"
+curl() {
+    printf '%s\n' "$*" >> "${CURL_CALLS_FILE}"
+    printf 'HTTPSTATUS:200'
+    return 0
+}
+
+# 1. Missing socket fast-fails without invoking curl
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.missing.sock"
+if docker_api GET /version; then exit 1; fi
+out=""
+rc=0
+out="$(docker_api_with_code GET /version)" || rc=$?
+[[ "${rc}" -ne 0 ]]
+[[ "${out}" == "HTTPSTATUS:000" ]]
+[[ ! -s "${CURL_CALLS_FILE}" ]]
+
+# 2. Existing socket passes --noproxy *, --connect-timeout, and --max-time
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.live.sock"
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+DOCKER_API_CONNECT_TIMEOUT=3
+DOCKER_API_MAX_TIME=7
+docker_api GET /version >/dev/null
+docker_api POST /networks/create '{"Name":"test"}' >/dev/null
+docker_api_with_code GET /networks/docker-tunnelsats >/dev/null
+docker_api_with_code POST /networks/docker-tunnelsats/disconnect '{"Container":"abc"}' >/dev/null
+
+line_count="$(wc -l < "${CURL_CALLS_FILE}")"
+[[ "${line_count}" == "4" ]]
+while IFS= read -r line; do
+    [[ "${line}" == *"--noproxy *"* ]]
+    [[ "${line}" == *"--connect-timeout 3"* ]]
+    [[ "${line}" == *"--max-time 7"* ]]
+done < "${CURL_CALLS_FILE}"
+
+# 3. resolve_svc_ip uses timeout 5 getent hosts when timeout is available
+TIMEOUT_CALLS_FILE="${POLICY_TEST_STATE_FILE}.timeout_calls"
+: > "${TIMEOUT_CALLS_FILE}"
+timeout() {
+    printf '%s\n' "$*" >> "${TIMEOUT_CALLS_FILE}"
+    printf '10.43.0.10 lnd.default.svc.cluster.local\n'
+    return 0
+}
+ip_out="$(resolve_svc_ip "lnd.default.svc.cluster.local" "lnd")"
+[[ "${ip_out}" == "10.43.0.10" ]]
+[[ "$(cat "${TIMEOUT_CALLS_FILE}")" == *"5 getent hosts lnd.default.svc.cluster.local"* ]]
+
+# 4. resolve_svc_ip falls back gracefully when timeout is unavailable
+unset -f timeout
+command() {
+    if [[ "$1" == "-v" && "$2" == "timeout" ]]; then
+        return 1
+    fi
+    builtin command "$@"
+}
+getent() {
+    [[ "$1" == "hosts" ]]
+    printf '10.43.0.11 lnd.default.svc.cluster.local\n'
+    return 0
+}
+ip_out="$(resolve_svc_ip "lnd.default.svc.cluster.local" "lnd")"
+[[ "${ip_out}" == "10.43.0.11" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_reconcile_kill_switch_is_clear_enforced_after_release_and_mode_aware():
+    result = run_bash(
+        r'''
+source "$1"
+
+[[ "${ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC}" == "false" ]]
+
+# 1. Secure Mode: inactive candidate at pref 32762 is allowed; active target at pref 32762 fails.
+K3S_MODE="false"
+SECURE_MODE="true"
+DOCKER_TARGET_IP="10.21.21.9"
+UMBREL_LND_IP="10.21.21.9"
+UMBREL_CLN_IP="10.21.21.96"
+FORWARDING_PORT="19735"
+LN_TARGET_PORT="9735"
+KS_RULES=$'32762:\tfrom 10.21.21.96 blackhole'
+
+fail_closed_policy_prerequisites_are_synced() { return 0; }
+get_target_subnet() { printf '10.21.21.0/24\n'; }
+iptables() { return 0; }
+ip() {
+    if [[ "$*" == "rule show pref 32762" ]]; then
+        printf '%s\n' "${KS_RULES}"
+        return 0
+    fi
+    if [[ "$*" == "rule show" ]]; then
+        printf '32500:\tfrom 10.21.21.9 to 10.21.21.0/24 lookup main\n'
+        printf '32764:\tfrom 10.21.21.9 lookup 51820\n'
+        return 0
+    fi
+    return 0
+}
+
+reconcile_kill_switch_is_clear
+ipv4_rules_are_synced
+
+KS_RULES=$'32762:\tfrom 10.21.21.9 blackhole\n32762:\tfrom 10.21.21.96 blackhole'
+if reconcile_kill_switch_is_clear; then exit 1; fi
+if ipv4_rules_are_synced; then exit 1; fi
+
+ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="true"
+ipv4_rules_are_synced
+ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+
+# 2. Standard Mode: checks subnet, target IP, TARGET_IPV4_ENDPOINTS, MANAGED_DOCKER_IPV4_ENDPOINTS
+SECURE_MODE="false"
+DOCKER_NETWORK_SUBNET="10.9.9.0/25"
+DOCKER_TARGET_IP="10.9.9.9"
+TARGET_IPV4_ENDPOINTS=("10.9.9.9|10.9.9.0/25|10.9.9.1|1|100" "10.21.0.9|10.21.0.0/16|10.21.0.1|0|0")
+MANAGED_DOCKER_IPV4_ENDPOINTS=("10.22.0.9|10.22.0.0/16|10.22.0.1|0|0")
+
+KS_RULES=""
+reconcile_kill_switch_is_clear
+
+KS_RULES=$'32762:\tfrom 10.9.9.0/25 blackhole'
+if reconcile_kill_switch_is_clear; then exit 1; fi
+
+KS_RULES=$'32762:\tfrom 10.9.9.9 blackhole'
+if reconcile_kill_switch_is_clear; then exit 1; fi
+
+KS_RULES=$'32762:\tfrom 10.21.0.9 blackhole'
+if reconcile_kill_switch_is_clear; then exit 1; fi
+
+KS_RULES=$'32762:\tfrom 10.22.0.9 blackhole'
+if reconcile_kill_switch_is_clear; then exit 1; fi
+
+# 3. k3s mode ignores pref 32762
+K3S_MODE="true"
+reconcile_kill_switch_is_clear
+
+# 4. reconcile_once wraps ONLY pre-release rules_are_synced with ALLOW=true,
+#    and fails closed if pref 32762 remains after remove_reconcile_kill_switch.
+K3S_MODE="false"
+SECURE_MODE="true"
+DOCKER_TARGET_IP="10.21.21.9"
+ALLOW_FLAGS=""
+VERIFY_SEQ=0
+
+ensure_source_blackhole_rule() { return 0; }
+detect_lightning_container() {
+    DOCKER_TARGET_IP="10.21.21.9"
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_IMPL="lnd"
+    LN_TARGET_PORT="9735"
+    return 0
+}
+ensure_ipv6_containment() { return 0; }
+ipv6_containment_is_synced() { return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { return 0; }
+ensure_wg_up() { FORWARDING_PORT="19735"; return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED="0"; return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED="0"; return 0; }
+remove_reconcile_kill_switch() { return 0; }
+cleanup_dataplane() { return 0; }
+write_state() { return 0; }
+
+KS_RULES=$'32762:\tfrom 10.21.21.9 blackhole'
+rules_are_synced() {
+    VERIFY_SEQ=$((VERIFY_SEQ + 1))
+    ALLOW_FLAGS+="${ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC};"
+    ipv4_rules_are_synced
+}
+
+if reconcile_once "manual"; then exit 1; fi
+[[ "${VERIFY_SEQ}" == "2" ]]
+[[ "${ALLOW_FLAGS}" == "true;false;" ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+[[ "${LAST_ERROR}" == *"failed verification after kill-switch release"* ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_reconcile_with_watchdog_propagates_globals_and_kills_hung_worker_without_collateral_damage():
+    result = run_bash(
+        r'''
+source "$1"
+
+# 1. Normal completion propagates scalar and array globals and leaves no orphan sleep timer.
+K3S_MODE="false"
+SECURE_MODE="false"
+RECONCILE_CYCLE_TIMEOUT=30
+
+reconcile_once() {
+    RULES_SYNCED="true"
+    IPV4_RULES_SYNCED="true"
+    IPV6_RULES_SYNCED="true"
+    LAST_RECONCILE_EPOCH=1700000123
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_CONTAINER_ID="cid-123"
+    TARGET_IMPL="lnd"
+    FORWARDING_PORT="19735"
+    BRIDGE_NAME="br-abcdef012345"
+    LAST_SYNCED_WG_CFG_SIG="/data/tunnelsats.conf|deadbeef"
+    TARGET_IPV4_ENDPOINTS=("10.9.9.9|10.9.9.0/25|10.9.9.1|1|100" "10.21.0.9|10.21.0.0/16|10.21.0.1|0|0")
+    TARGET_IPV6_ADDRESSES=("2001:db8::9")
+    LAST_ERROR=""
+    return 0
+}
+
+run_reconcile_with_watchdog "periodic"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ "${LAST_RECONCILE_EPOCH}" == "1700000123" ]]
+[[ "${TARGET_CONTAINER_NAME}" == "lightning_lnd_1" ]]
+[[ "${TARGET_CONTAINER_ID}" == "cid-123" ]]
+[[ "${LAST_SYNCED_WG_CFG_SIG}" == "/data/tunnelsats.conf|deadbeef" ]]
+[[ "${#TARGET_IPV4_ENDPOINTS[@]}" == "2" ]]
+[[ "${TARGET_IPV4_ENDPOINTS[1]}" == "10.21.0.9|10.21.0.0/16|10.21.0.1|0|0" ]]
+[[ "${#TARGET_IPV6_ADDRESSES[@]}" == "1" ]]
+[[ "${TARGET_IPV6_ADDRESSES[0]}" == "2001:db8::9" ]]
+[[ -z "${ACTIVE_RECONCILE_WORKER_PID}" ]]
+[[ -z "${ACTIVE_RECONCILE_TIMER_PID}" ]]
+
+# 2. Timeout kills hung worker and its grandchild while preserving sibling API_PID,
+#    K3S_WATCHER_PID, and K3S_DNS_PROXY_PID_FILE process.
+sleep 60 &
+SIBLING_API_PID=$!
+API_PID="${SIBLING_API_PID}"
+sleep 60 &
+SIBLING_WATCHER_PID=$!
+K3S_WATCHER_PID="${SIBLING_WATCHER_PID}"
+
+GRANDCHILD_PID_FILE="${POLICY_TEST_STATE_FILE}.grandchild.pid"
+DNS_PROXY_READY_FILE="${POLICY_TEST_STATE_FILE}.dnsproxy.ready"
+FAIL_CLOSED_FILE="${POLICY_TEST_STATE_FILE}.fail_closed"
+
+fail_reconcile_closed() {
+    printf '%s|%s\n' "${1:-}" "${LAST_ERROR}" > "${FAIL_CLOSED_FILE}"
+    return 1
+}
+
+reconcile_once() {
+    sleep 60 &
+    printf '%s\n' "$!" > "${GRANDCHILD_PID_FILE}"
+    sleep 60 &
+    printf '%s\n' "$!" > "${K3S_DNS_PROXY_PID_FILE}"
+    touch "${DNS_PROXY_READY_FILE}"
+    sleep 60
+}
+
+RECONCILE_CYCLE_TIMEOUT=1
+LAST_RECONCILE_EPOCH=0
+if run_reconcile_with_watchdog "periodic" "req-timeout-1"; then
+    kill "${SIBLING_API_PID}" "${SIBLING_WATCHER_PID}" 2>/dev/null || true
+    exit 1
+fi
+
+GRANDCHILD_PID="$(cat "${GRANDCHILD_PID_FILE}" 2>/dev/null || true)"
+DNS_PROXY_PID="$(cat "${K3S_DNS_PROXY_PID_FILE}" 2>/dev/null || true)"
+
+# Cleanup helper before assertions in case any assertion fails
+cleanup_test_procs() {
+    kill -KILL "${SIBLING_API_PID}" "${SIBLING_WATCHER_PID}" "${GRANDCHILD_PID:-}" "${DNS_PROXY_PID:-}" 2>/dev/null || true
+}
+trap cleanup_test_procs EXIT
+
+[[ "${LAST_ERROR}" == "Reconciliation timed out after 1s" ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+[[ "${IPV4_RULES_SYNCED}" == "false" ]]
+[[ "${IPV6_RULES_SYNCED}" == "false" ]]
+[[ "${DNS_PROTECTED}" == "false" ]]
+[[ "${LAST_RECONCILE_EPOCH}" -gt 0 ]]
+[[ "$(cat "${FAIL_CLOSED_FILE}")" == "req-timeout-1|Reconciliation timed out after 1s" ]]
+[[ -n "${GRANDCHILD_PID}" ]]
+! kill -0 "${GRANDCHILD_PID}" 2>/dev/null
+kill -0 "${SIBLING_API_PID}" 2>/dev/null
+kill -0 "${SIBLING_WATCHER_PID}" 2>/dev/null
+[[ -n "${DNS_PROXY_PID}" ]]
+kill -0 "${DNS_PROXY_PID}" 2>/dev/null
+
+# 3. k3s mode disables background watcher inside worker and starts it in parent on normal exit.
+K3S_MODE="true"
+K3S_ENABLE_BACKGROUND_WATCHER="true"
+KILL_SWITCH_ARMED="true"
+DECOMMISSIONED="false"
+RECONCILE_CYCLE_TIMEOUT=10
+WORKER_WATCHER_ENV_FILE="${POLICY_TEST_STATE_FILE}.worker_watcher_env"
+PARENT_WATCHER_CALLS=0
+
+ensure_k3s_pod_watcher_running() {
+    PARENT_WATCHER_CALLS=$((PARENT_WATCHER_CALLS + 1))
+    return 0
+}
+reconcile_once() {
+    printf '%s\n' "${K3S_ENABLE_BACKGROUND_WATCHER}" > "${WORKER_WATCHER_ENV_FILE}"
+    KILL_SWITCH_ARMED="true"
+    DECOMMISSIONED="false"
+    return 0
+}
+
+run_reconcile_with_watchdog "periodic"
+[[ "$(cat "${WORKER_WATCHER_ENV_FILE}")" == "false" ]]
+[[ "${PARENT_WATCHER_CALLS}" == "1" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_supervisor_routes_all_reconcile_sites_through_watchdog():
+    source = open(ENTRYPOINT_PATH, encoding="utf-8").read()
+    lines = source.splitlines()
+    direct_calls = [
+        (idx + 1, line.strip())
+        for idx, line in enumerate(lines)
+        if "reconcile_once" in line
+        and not line.strip().startswith("#")
+        and not line.strip().startswith("reconcile_once()")
+    ]
+    # Only the worker invocation inside run_reconcile_with_watchdog should call reconcile_once
+    assert len(direct_calls) == 1, f"Unexpected direct reconcile_once calls: {direct_calls}"
+    assert source.count("run_reconcile_with_watchdog ") >= 6
+
+
+def test_periodic_reconcile_steady_state_fast_path_avoids_kill_switch_and_falls_back_on_drift():
+    result = run_bash(
+        r'''
+source "$1"
+
+WG_CFG="${WG_DATA_DIR}/tunnelsatsv2.conf"
+printf '[Interface]\nPrivateKey = key-v1\n# VPNPort: 19735\n' > "${WG_CFG}"
+
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.docker.sock"
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+# 1. Standard Mode steady-state periodic fast path skips pref 32762 and repair
+K3S_MODE="false"
+SECURE_MODE="false"
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+NAT_CALLS=0
+WG_UP_CALLS=0
+HANDSHAKE_OK="true"
+RULES_OK="true"
+CURRENT_CID="cid-target-1"
+CURRENT_BRIDGE_ID="1234567890abcdef"
+EXTRA_CONTAINER=""
+
+ensure_reconcile_kill_switch() { KS_INSTALL_CALLS=$((KS_INSTALL_CALLS + 1)); return 0; }
+remove_reconcile_kill_switch() { return 0; }
+detect_lightning_container() {
+    TARGET_CONTAINER_ID="${CURRENT_CID}"
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.9.9.9"
+    LN_TARGET_PORT="9735"
+    return 0
+}
+ensure_ipv6_containment() { return 0; }
+ipv6_containment_is_synced() { return 0; }
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { BRIDGE_NAME="br-${CURRENT_BRIDGE_ID:0:12}"; return 0; }
+ensure_wg_up() { WG_UP_CALLS=$((WG_UP_CALLS + 1)); FORWARDING_PORT="19735"; return 0; }
+wg() {
+    if [[ "$1 $2" == "show tunnelsatsv2" ]]; then return 0; fi
+    return 0
+}
+wireguard_handshake_is_fresh() { [[ "${HANDSHAKE_OK}" == "true" ]]; }
+ensure_policy_routing() { POLICY_CALLS=$((POLICY_CALLS + 1)); POLICY_CHANGED="0"; return 0; }
+ensure_nat_forward_rules() { NAT_CALLS=$((NAT_CALLS + 1)); NAT_CHANGED="0"; return 0; }
+rules_are_synced() {
+    if [[ "${RULES_OK}" != "true" ]]; then return 1; fi
+    IPV4_RULES_SYNCED="true"
+    IPV6_RULES_SYNCED="true"
+    return 0
+}
+cleanup_dataplane() { return 0; }
+docker_api() {
+    if [[ "$1 $2" == "GET /networks/docker-tunnelsats" ]]; then
+        if [[ -n "${EXTRA_CONTAINER}" ]]; then
+            printf '{"Id":"%s","Containers":{"%s":{"Name":"lightning_lnd_1","IPv4Address":"10.9.9.9/25"},"%s":{"Name":"rogue","IPv4Address":"10.9.9.10/25"}}}\n' \
+                "${CURRENT_BRIDGE_ID}" "${CURRENT_CID}" "${EXTRA_CONTAINER}"
+        else
+            printf '{"Id":"%s","Containers":{"%s":{"Name":"lightning_lnd_1","IPv4Address":"10.9.9.9/25"}}}\n' \
+                "${CURRENT_BRIDGE_ID}" "${CURRENT_CID}"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+# Initial startup reconcile always runs full path and records LAST_SYNCED_WG_CFG_SIG
+reconcile_once "startup"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ -n "${LAST_SYNCED_WG_CFG_SIG}" ]]
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+
+# Healthy periodic reconcile takes steady-state fast path with ZERO kill-switch installs
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+NAT_CALLS=0
+WG_UP_CALLS=0
+steady_log="${POLICY_TEST_STATE_FILE}.steady.log"
+reconcile_once "periodic" "req-steady-1" >"${steady_log}" 2>&1
+log_out="$(cat "${steady_log}")"
+[[ "${log_out}" == *"reconcile_steady"* ]]
+[[ "${KS_INSTALL_CALLS}" == "0" ]]
+[[ "${POLICY_CALLS}" == "0" ]]
+[[ "${NAT_CALLS}" == "0" ]]
+[[ "${WG_UP_CALLS}" == "0" ]]
+[[ "${RULES_SYNCED}" == "true" ]]
+jq -e '.request_id == "req-steady-1" and .changed == false and .state.rules_synced == true' \
+    "${RECONCILE_RESULT_DIR}/req-steady-1.json" >/dev/null
+
+# Manual reconcile MUST NOT take steady-state fast path
+KS_INSTALL_CALLS=0
+reconcile_once "manual"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+
+# Drift 1: WireGuard config changed -> falls through to full reconcile
+KS_INSTALL_CALLS=0
+printf '[Interface]\nPrivateKey = key-v2\n# VPNPort: 19735\n' > "${WG_CFG}"
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${WG_UP_CALLS}" -ge 1 ]]
+
+# Drift 2: Foreign container attached to docker-tunnelsats -> falls through to full reconcile
+KS_INSTALL_CALLS=0
+EXTRA_CONTAINER="cid-rogue-2"
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+EXTRA_CONTAINER=""
+
+# Drift 3: Bridge changed -> falls through to full reconcile
+KS_INSTALL_CALLS=0
+CURRENT_BRIDGE_ID="fedcba0987654321"
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+
+# Drift 4: Target container recreated with new ID -> falls through to full reconcile
+KS_INSTALL_CALLS=0
+CURRENT_CID="cid-target-2"
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+
+# Drift 5: rules_are_synced fails -> falls through to full repair and fails closed
+KS_INSTALL_CALLS=0
+RULES_OK="false"
+if reconcile_once "periodic"; then exit 1; fi
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+[[ -z "${LAST_SYNCED_WG_CFG_SIG}" ]]
+
+# 2. Secure Mode steady-state periodic fast path also skips pref 32762
+SECURE_MODE="true"
+RULES_OK="true"
+HANDSHAKE_OK="true"
+BRIDGE_NAME=""
+TARGET_CONTAINER_ID=""
+detect_lightning_container() {
+    TARGET_CONTAINER_ID=""
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.21.21.9"
+    LN_TARGET_PORT="9735"
+    return 0
+}
+resolve_bridge_name() { BRIDGE_NAME=""; return 0; }
+
+reconcile_once "startup"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ -n "${LAST_SYNCED_WG_CFG_SIG}" ]]
+
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+NAT_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" == "0" ]]
+[[ "${POLICY_CALLS}" == "0" ]]
+[[ "${NAT_CALLS}" == "0" ]]
+[[ "${RULES_SYNCED}" == "true" ]]
+
+# Stale handshake in Secure Mode falls through to full fail-closed path
+KS_INSTALL_CALLS=0
+HANDSHAKE_OK="false"
+if reconcile_once "periodic"; then exit 1; fi
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${RULES_SYNCED}" == "false" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_cleanup_terminates_active_reconcile_worker_and_timer_trees():
+    result = run_bash(
+        r'''
+source "$1"
+
+WORKER_PID_FILE="${POLICY_TEST_STATE_FILE}.cleanup_worker.pid"
+TIMER_PID_FILE="${POLICY_TEST_STATE_FILE}.cleanup_timer.pid"
+STATE_TMP="${POLICY_TEST_STATE_FILE}.active_state"
+TIMEOUT_TMP="${POLICY_TEST_STATE_FILE}.active_timeout"
+touch "${STATE_TMP}" "${TIMEOUT_TMP}"
+
+(
+    preserve_fail_closed_dataplane() { return 0; }
+    stop_k3s_pod_watcher() { return 0; }
+    stop_k3s_dns_proxy() { return 0; }
+
+    sleep 60 &
+    ACTIVE_RECONCILE_WORKER_PID=$!
+    printf '%s\n' "${ACTIVE_RECONCILE_WORKER_PID}" > "${WORKER_PID_FILE}"
+
+    sleep 60 &
+    ACTIVE_RECONCILE_TIMER_PID=$!
+    printf '%s\n' "${ACTIVE_RECONCILE_TIMER_PID}" > "${TIMER_PID_FILE}"
+
+    ACTIVE_RECONCILE_STATE_DUMP="${STATE_TMP}"
+    ACTIVE_RECONCILE_TIMEOUT_FLAG="${TIMEOUT_TMP}"
+
+    cleanup
+)
+
+WORKER_PID="$(cat "${WORKER_PID_FILE}")"
+TIMER_PID="$(cat "${TIMER_PID_FILE}")"
+! kill -0 "${WORKER_PID}" 2>/dev/null
+! kill -0 "${TIMER_PID}" 2>/dev/null
+[[ ! -e "${STATE_TMP}" ]]
+[[ ! -e "${TIMEOUT_TMP}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
 
 
 

@@ -818,3 +818,21 @@ def test_faq_documents_container_lookup_logs_and_wrong_port():
         assert '--address_remove=' in source
         assert ':9735' in source
         assert 'without the' in source and 'pubkey' in source
+
+
+def test_dataplane_error_code_maps_reconcile_timeout_stale_and_kill_switch():
+    assert (
+        app_module.dataplane_error_code("Reconciliation timed out after 55s")
+        == app_module.STATUS_ERROR_RECONCILE_STALE
+    )
+    assert (
+        app_module.dataplane_error_code("Reconciliation heartbeat is stale (240s old; max 150s)")
+        == app_module.STATUS_ERROR_RECONCILE_STALE
+    )
+    assert (
+        app_module.dataplane_error_code(
+            "Temporary reconciliation kill switch (pref 32762) is still blocking 10.9.9.0/25"
+        )
+        == app_module.STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE
+    )
+

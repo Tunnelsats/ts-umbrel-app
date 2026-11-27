@@ -150,7 +150,12 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
         return ("setup", shield_title, "🟠 Setup", node_short)
 
     if vpn_active and active_routing and not rules_synced:
-        if not status_dict.get("last_reconcile_at"):
+        if (
+            not status_dict.get("last_reconcile_at")
+            and not status_dict.get("kill_switch_active")
+            and not status_dict.get("reconcile_stale")
+            and last_error_code not in ("reconcile_kill_switch_active", "reconcile_stale")
+        ):
             return ("syncing", shield_title, "🟡 Syncing", node_short)
         return ("blocked", shield_title, "🟠 Blocked", node_short)
 

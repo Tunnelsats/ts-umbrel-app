@@ -1192,6 +1192,8 @@ const STATUS_ERROR_HINTS = {
     no_wireguard_config: 'No TunnelSats subscription is installed yet. Buy one or import your WireGuard configuration on the Subscribe / Import tab.',
     no_lightning_node: 'TunnelSats cannot reach a Lightning node. Start the Lightning Node or Core Lightning app on your Umbrel, then re-check.',
     protected_node_not_running: 'Your protected Lightning node is not running. TunnelSats keeps it blocked until it starts. To protect your other Lightning node instead, switch the node type.',
+    reconcile_kill_switch_active: 'The temporary reconciliation kill switch (pref 32762) is still blocking outbound clearnet traffic for your Lightning node. Restart the TunnelSats app from the Umbrel dashboard (or trigger a tunnel restart) and check the daemon logs if it does not clear.',
+    reconcile_stale: 'The TunnelSats reconciliation loop heartbeat is overdue or stalled, so protection status cannot be verified. Restart the TunnelSats app from the Umbrel dashboard and check the daemon logs if it persists.',
     rules_not_synced: 'TunnelSats has not finished applying its protection rules yet. This can take a moment after a restart. If it does not clear, restart the TunnelSats app from the Umbrel dashboard.',
     dataplane_error: 'The TunnelSats background service reported this problem while protecting your node. Traffic stays blocked until it is resolved. Restart the TunnelSats app from the Umbrel dashboard, then re-check. If it keeps happening, open an issue and include the TunnelSats logs (see the FAQ).',
     daemon_unavailable: 'The TunnelSats background service is not responding, so the dashboard cannot read your protection status. Restart the TunnelSats app from the Umbrel dashboard, then re-check.',
