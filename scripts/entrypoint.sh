@@ -992,62 +992,150 @@ persist_kill_switch_armed_state() {
     KILL_SWITCH_ARMED_PERSISTED="${armed_json}"
 }
 
+_scan_lightning_config_markers_and_includes() {
+    local cfg="$1"
+    local allow_includes="${2:-false}"
+    if [ -d "${cfg}" ]; then
+        LAST_ERROR="Lightning config path is a directory, not a readable file: ${cfg}"
+        return 2
+    fi
+    if [ ! -r "${cfg}" ] || ! cat "${cfg}" >/dev/null 2>&1; then
+        LAST_ERROR="Failed to read Lightning config ${cfg}"
+        return 2
+    fi
+    awk -v allow_includes="${allow_includes}" '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            sub(/[[:space:]]*[#;].*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            if (line == "") next
+
+            if (allow_includes == "true") {
+                lower_line = tolower(line)
+                if (lower_line ~ /^include([[:space:]]*=|[[:space:]]+)/) {
+                    inc = line
+                    sub(/^[Ii][Nn][Cc][Ll][Uu][Dd][Ee]([[:space:]]*=[[:space:]]*|[[:space:]]+)/, "", inc)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", inc)
+                    if ((substr(inc, 1, 1) == "\"" && substr(inc, length(inc), 1) == "\"") ||
+                        (substr(inc, 1, 1) == "\047" && substr(inc, length(inc), 1) == "\047")) {
+                        if (length(inc) >= 2) {
+                            inc = substr(inc, 2, length(inc) - 2)
+                        }
+                    }
+                    print "INCLUDE:" inc
+                    next
+                }
+            }
+
+            eq = index(line, "=")
+            if (eq == 0) next
+            key = tolower(substr(line, 1, eq - 1))
+            val = tolower(substr(line, eq + 1))
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+            if (key == "externalhosts" || key == "announce-addr" || key == "tlsextradomain" || key == "externalip") {
+                if (val ~ /(^|[^a-z0-9-])tunnelsats\.com([^a-z0-9-]|$)/ || val ~ /(^|[^0-9.])10\.9\.9\.9([^0-9.]|$)/) {
+                    print "MARKER"
+                    exit 0
+                }
+            }
+        }
+    ' "${cfg}"
+}
+
 lightning_config_has_tunnelsats_markers() {
-    local cfg awk_rc
-    local -a config_paths=()
-    [ -n "${LND_CONFIG_PATH:-}" ] && config_paths+=("${LND_CONFIG_PATH}")
-    if [ -n "${CLN_DATA_DIR:-}" ]; then
-        config_paths+=(
+    local cfg scan_output scan_rc line raw_inc cfg_dir candidate resolved_cln_root resolved_cfg
+    local max_include_depth=8
+
+    if [ -n "${LND_CONFIG_PATH:-}" ] && { [ -e "${LND_CONFIG_PATH}" ] || [ -L "${LND_CONFIG_PATH}" ]; }; then
+        scan_rc=0
+        scan_output="$(_scan_lightning_config_markers_and_includes "${LND_CONFIG_PATH}" "false")" || scan_rc=$?
+        if [ "${scan_rc}" -ne 0 ]; then
+            LAST_ERROR="${LAST_ERROR:-Failed to inspect Lightning config ${LND_CONFIG_PATH}}"
+            return 2
+        fi
+        if printf '%s\n' "${scan_output}" | grep -Fxq "MARKER"; then
+            return 0
+        fi
+    fi
+
+    if [ -n "${CLN_DATA_DIR:-}" ] && [ -d "${CLN_DATA_DIR}" ]; then
+        resolved_cln_root="$(readlink -f "${CLN_DATA_DIR}" 2>/dev/null || printf '%s' "${CLN_DATA_DIR}")"
+        local -a queue_paths=(
             "${CLN_DATA_DIR}/config"
             "${CLN_DATA_DIR}/bitcoin/config"
             "${CLN_DATA_DIR}/testnet/config"
             "${CLN_DATA_DIR}/signet/config"
             "${CLN_DATA_DIR}/regtest/config"
         )
-    fi
+        local -a queue_depths=(0 0 0 0 0)
+        local -A visited_cln_configs=()
+        local idx=0 depth
 
-    for cfg in "${config_paths[@]}"; do
-        [ -e "${cfg}" ] || [ -L "${cfg}" ] || continue
-        if [ -d "${cfg}" ]; then
-            LAST_ERROR="Lightning config path is a directory, not a readable file: ${cfg}"
-            return 2
-        fi
-        if [ ! -r "${cfg}" ] || ! cat "${cfg}" >/dev/null 2>&1; then
-            LAST_ERROR="Failed to read Lightning config ${cfg}"
-            return 2
-        fi
-        awk_rc=0
-        awk '
-            {
-                line = $0
-                sub(/\r$/, "", line)
-                sub(/[[:space:]]*[#;].*$/, "", line)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-                if (line == "") next
-                eq = index(line, "=")
-                if (eq == 0) next
-                key = tolower(substr(line, 1, eq - 1))
-                val = tolower(substr(line, eq + 1))
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
-                if (key == "externalhosts" || key == "announce-addr" || key == "tlsextradomain" || key == "externalip") {
-                    if (val ~ /(^|[^a-z0-9-])tunnelsats\.com([^a-z0-9-]|$)/ || val ~ /(^|[^0-9.])10\.9\.9\.9([^0-9.]|$)/) {
-                        found = 1
-                        exit 0
-                    }
-                }
-            }
-            END {
-                if (!found) exit 1
-            }
-        ' "${cfg}" || awk_rc=$?
-        if [ "${awk_rc}" -eq 0 ]; then
-            return 0
-        elif [ "${awk_rc}" -ne 1 ]; then
-            LAST_ERROR="Failed to inspect Lightning config ${cfg}"
-            return 2
-        fi
-    done
+        while [ "${idx}" -lt "${#queue_paths[@]}" ]; do
+            cfg="${queue_paths[${idx}]}"
+            depth="${queue_depths[${idx}]}"
+            idx=$((idx + 1))
+
+            if [ "${depth}" -gt "${max_include_depth}" ]; then
+                LAST_ERROR="CLN config include depth exceeded limit at ${cfg}"
+                return 2
+            fi
+
+            if [ ! -e "${cfg}" ] && [ ! -L "${cfg}" ]; then
+                if [ "${depth}" -eq 0 ]; then
+                    continue
+                fi
+                LAST_ERROR="CLN included config cannot be inspected: ${cfg}"
+                return 2
+            fi
+
+            resolved_cfg="$(readlink -f "${cfg}" 2>/dev/null || true)"
+            if [ -z "${resolved_cfg}" ]; then
+                LAST_ERROR="Failed to resolve CLN config path: ${cfg}"
+                return 2
+            fi
+            if [ "${depth}" -gt 0 ] && [ "${resolved_cfg}" != "${resolved_cln_root}" ] && \
+               [[ "${resolved_cfg}" != "${resolved_cln_root}/"* ]]; then
+                LAST_ERROR="CLN included config resolves outside mounted CLN directory: ${cfg}"
+                return 2
+            fi
+            if [ -n "${visited_cln_configs[${resolved_cfg}]:-}" ]; then
+                continue
+            fi
+            visited_cln_configs["${resolved_cfg}"]=1
+
+            scan_rc=0
+            scan_output="$(_scan_lightning_config_markers_and_includes "${resolved_cfg}" "true")" || scan_rc=$?
+            if [ "${scan_rc}" -ne 0 ]; then
+                LAST_ERROR="${LAST_ERROR:-Failed to inspect CLN config ${cfg}}"
+                return 2
+            fi
+
+            while IFS= read -r line; do
+                [ -n "${line}" ] || continue
+                if [ "${line}" = "MARKER" ]; then
+                    return 0
+                fi
+                if [[ "${line}" == INCLUDE:* ]]; then
+                    raw_inc="${line#INCLUDE:}"
+                    if [ -z "${raw_inc}" ]; then
+                        LAST_ERROR="CLN config contains empty include directive in ${cfg}"
+                        return 2
+                    fi
+                    if [[ "${raw_inc}" = /* ]]; then
+                        candidate="${raw_inc}"
+                    else
+                        cfg_dir="$(dirname "${resolved_cfg}")"
+                        candidate="${cfg_dir}/${raw_inc}"
+                    fi
+                    queue_paths+=("${candidate}")
+                    queue_depths+=("$((depth + 1))")
+                fi
+            done <<< "${scan_output}"
+        done
+    fi
 
     return 1
 }
@@ -5854,6 +5942,13 @@ ensure_reconcile_kill_switch() {
             fi
         fi
         if [ "${arm_rc}" -ne 0 ]; then
+            # After a host reboot, load_managed_k3s_policy_state clears the
+            # prior boot's pod IP. Install selector-based NetworkPolicy and
+            # subnet quarantine before returning an error so startup abort
+            # never leaves a k3s Lightning pod unprotected on clearnet.
+            if [ -z "${MANAGED_K3S_TARGET_IP:-}" ]; then
+                ensure_k3s_pre_discovery_containment "" || true
+            fi
             LAST_ERROR="${arm_error}"
             return 1
         fi

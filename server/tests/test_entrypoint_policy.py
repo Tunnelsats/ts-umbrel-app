@@ -6984,6 +6984,111 @@ evaluate_kill_switch_arming
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_startup_latch_error_after_reboot_installs_selector_and_subnet_containment():
+    result = run_bash(
+        r'''
+source "$1"
+K3S_MODE="true"
+SECURE_MODE="false"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app=lnd"
+K3S_POD_API_QUERY_OK="false"
+
+# Prior-boot persisted k3s state (boot_id does not match current host boot, so
+# load_managed_k3s_policy_state clears MANAGED_K3S_TARGET_IP).
+printf '{"version":1,"boot_id":"stale-boot-id","target_ip":"10.42.1.7","target_ipv6_addresses":[],"target_impl":"lnd","pod_name":"lnd-0","pod_namespace":"lightning","pod_selector":"app=lnd","decommissioned":false}\n' \
+    > "${K3S_POLICY_STATE_FILE}"
+
+# Malformed armed-state latch triggers arm_rc != 0 during startup.
+printf '{corrupt-json\n' > "${KILL_SWITCH_ARMED_STATE_FILE}"
+
+NETPOL_CALLS=0
+QUARANTINE_CALLS=0
+ensure_k3s_emergency_network_policy() {
+    NETPOL_CALLS=$((NETPOL_CALLS + 1))
+    return 0
+}
+ensure_k3s_subnet_quarantine() {
+    QUARANTINE_CALLS=$((QUARANTINE_CALLS + 1))
+    return 0
+}
+
+if ensure_reconcile_kill_switch; then
+    exit 1
+fi
+[[ -z "${MANAGED_K3S_TARGET_IP}" ]]
+[[ "${NETPOL_CALLS}" -ge 1 ]]
+[[ "${QUARANTINE_CALLS}" -ge 1 ]]
+[[ "${LAST_ERROR}" == *"malformed"* ]]
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_cln_include_directives_detect_markers_and_fail_closed_on_unresolvable_includes():
+    result = run_bash(
+        r'''
+source "$1"
+
+# 1. Space-separated relative include pointing to TunnelSats announce-addr -> marker found (0)
+mkdir -p "${CLN_DATA_DIR}/bitcoin/extra"
+printf 'alias=my-node\ninclude tunnelsats.conf\n' > "${CLN_DATA_DIR}/bitcoin/config"
+printf 'announce-addr=us3.tunnelsats.com:23217\n' > "${CLN_DATA_DIR}/bitcoin/tunnelsats.conf"
+lightning_config_has_tunnelsats_markers
+
+# 2. Nested '=' include syntax with quotes -> marker found (0)
+rm -f "${CLN_DATA_DIR}/bitcoin/tunnelsats.conf"
+printf 'include="extra/nested.conf"\n' > "${CLN_DATA_DIR}/bitcoin/config"
+printf 'include=deep.conf\n' > "${CLN_DATA_DIR}/bitcoin/extra/nested.conf"
+printf 'announce-addr=10.9.9.9:9735\n' > "${CLN_DATA_DIR}/bitcoin/extra/deep.conf"
+lightning_config_has_tunnelsats_markers
+
+# 3. Clean include + cycle (config -> safe.conf -> config) + commented include -> no markers (1)
+printf '# include tunnelsats.conf\ninclude safe.conf\n' > "${CLN_DATA_DIR}/bitcoin/config"
+printf 'alias=clean-node\ninclude config\n' > "${CLN_DATA_DIR}/bitcoin/safe.conf"
+rc=0
+lightning_config_has_tunnelsats_markers || rc=$?
+[[ "${rc}" -eq 1 ]]
+
+# 4. Missing included file -> fail closed (2)
+printf 'include does-not-exist.conf\n' > "${CLN_DATA_DIR}/bitcoin/config"
+rc=0
+lightning_config_has_tunnelsats_markers || rc=$?
+[[ "${rc}" -eq 2 ]]
+
+# 5. Absolute container path outside mounted CLN_DATA_DIR -> fail closed (2)
+printf 'include /root/.lightning/tunnelsats.conf\n' > "${CLN_DATA_DIR}/bitcoin/config"
+rc=0
+lightning_config_has_tunnelsats_markers || rc=$?
+[[ "${rc}" -eq 2 ]]
+
+# 6. Relative path escaping CLN_DATA_DIR -> fail closed (2)
+printf 'alias=outside\n' > "${CLN_DATA_DIR}/../outside.conf"
+printf 'include ../../outside.conf\n' > "${CLN_DATA_DIR}/bitcoin/config"
+rc=0
+lightning_config_has_tunnelsats_markers || rc=$?
+[[ "${rc}" -eq 2 ]]
+
+# 7. Verify unresolvable include causes reconcile_once to fail closed (not standby)
+K3S_MODE="false"
+SECURE_MODE="true"
+GUARD_CALLS=0
+wg() { return 1; }
+ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+cleanup_dataplane() { return 0; }
+if reconcile_once "startup"; then
+    exit 1
+fi
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+[[ "${GUARD_CALLS}" -ge 2 ]]
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+
 
 
 
