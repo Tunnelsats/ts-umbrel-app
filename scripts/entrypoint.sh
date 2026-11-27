@@ -9712,6 +9712,13 @@ fail_reconcile_closed() {
     return 1
 }
 
+canonical_sorted_lines() {
+    if [ "$#" -eq 0 ]; then
+        return 0
+    fi
+    printf '%s\n' "$@" | sed '/^$/d' | LC_ALL=C sort -u
+}
+
 reconcile_steady_state_is_synced() {
     local saved_target_container_id="${TARGET_CONTAINER_ID:-}"
     local saved_target_container_name="${TARGET_CONTAINER_NAME:-}"
@@ -9723,6 +9730,7 @@ reconcile_steady_state_is_synced() {
     local saved_resolved_expected_impl="${RESOLVED_EXPECTED_DOCKER_IMPL:-}"
     local saved_resolved_expected_ip="${RESOLVED_EXPECTED_DOCKER_STATIC_IP:-}"
     local -a saved_target_ipv4_endpoints=("${TARGET_IPV4_ENDPOINTS[@]}")
+    local -a saved_managed_docker_ipv4_endpoints=("${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}")
     local -a saved_target_ipv6_addresses=("${TARGET_IPV6_ADDRESSES[@]}")
     local -a saved_target_ipv6_macs=("${TARGET_IPV6_MACS[@]}")
     local saved_target_has_ipv6_default_route="${TARGET_HAS_IPV6_DEFAULT_ROUTE:-false}"
@@ -9788,6 +9796,43 @@ reconcile_steady_state_is_synced() {
     fi
 
     if [ "${ok}" = true ]; then
+        # Ensure the live target IPv4 endpoint and IPv6 selector sets exactly
+        # match both the previously synced snapshot and the currently managed
+        # rule sets. If the container dropped an extra Docker network, lost an
+        # IPv6 address/MAC, or still owns a policy table with no remaining IPv6
+        # selectors, fall through to full reconciliation so stale rules are retired.
+        local cur_v4="" saved_v4="" managed_v4=""
+        local cur_v6="" saved_v6="" managed_v6=""
+        local cur_macs="" saved_macs=""
+        if [[ "${SECURE_MODE}" != "true" ]]; then
+            cur_v4="$(canonical_sorted_lines "${TARGET_IPV4_ENDPOINTS[@]}")"
+            saved_v4="$(canonical_sorted_lines "${saved_target_ipv4_endpoints[@]}")"
+            managed_v4="$(canonical_sorted_lines "${MANAGED_DOCKER_IPV4_ENDPOINTS[@]}")"
+            if [ "${cur_v4}" != "${saved_v4}" ] || [ "${cur_v4}" != "${managed_v4}" ]; then
+                ok=false
+            fi
+        fi
+        if [ "${ok}" = true ]; then
+            cur_v6="$(canonical_sorted_lines "${TARGET_IPV6_ADDRESSES[@]}")"
+            saved_v6="$(canonical_sorted_lines "${saved_target_ipv6_addresses[@]}")"
+            managed_v6="$(canonical_sorted_lines "${MANAGED_TARGET_IPV6_ADDRESSES[@]}")"
+            cur_macs="$(canonical_sorted_lines "${TARGET_IPV6_MACS[@]}")"
+            saved_macs="$(canonical_sorted_lines "${saved_target_ipv6_macs[@]}")"
+            if [ "${cur_v6}" != "${saved_v6}" ] || \
+               [ "${cur_v6}" != "${managed_v6}" ] || \
+               [ "${cur_macs}" != "${saved_macs}" ] || \
+               [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE:-false}" != "${saved_target_has_ipv6_default_route}" ]; then
+                ok=false
+            elif [ "${#TARGET_IPV6_ADDRESSES[@]}" -eq 0 ] && \
+                 [ "${#TARGET_IPV6_MACS[@]}" -eq 0 ] && \
+                 [ "${TARGET_HAS_IPV6_DEFAULT_ROUTE:-false}" != "true" ] && \
+                 [ "${IPV6_POLICY_TABLE_MANAGED:-false}" = "true" ]; then
+                ok=false
+            fi
+        fi
+    fi
+
+    if [ "${ok}" = true ]; then
         return 0
     fi
 
@@ -9801,6 +9846,7 @@ reconcile_steady_state_is_synced() {
     RESOLVED_EXPECTED_DOCKER_IMPL="${saved_resolved_expected_impl}"
     RESOLVED_EXPECTED_DOCKER_STATIC_IP="${saved_resolved_expected_ip}"
     TARGET_IPV4_ENDPOINTS=("${saved_target_ipv4_endpoints[@]}")
+    MANAGED_DOCKER_IPV4_ENDPOINTS=("${saved_managed_docker_ipv4_endpoints[@]}")
     TARGET_IPV6_ADDRESSES=("${saved_target_ipv6_addresses[@]}")
     TARGET_IPV6_MACS=("${saved_target_ipv6_macs[@]}")
     TARGET_HAS_IPV6_DEFAULT_ROUTE="${saved_target_has_ipv6_default_route}"
@@ -10321,11 +10367,13 @@ terminate_process_tree() {
     [ -n "${root_pid}" ] || return 0
     [[ "${root_pid}" =~ ^[0-9]+$ ]] || return 0
 
-    local -a descendants=()
-    local pid
-    mapfile -t descendants < <(collect_descendant_pids "${root_pid}" "${exclude_pid}")
+    local -a tracked_descendants=()
+    local -a current_descendants=()
+    local -a scan_roots=()
+    local pid cpid existing found
+    mapfile -t tracked_descendants < <(collect_descendant_pids "${root_pid}" "${exclude_pid}")
 
-    for pid in "${descendants[@]}"; do
+    for pid in "${tracked_descendants[@]}"; do
         [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && kill -TERM "${pid}" 2>/dev/null || true
     done
     if [ "${root_pid}" != "${exclude_pid}" ]; then
@@ -10338,7 +10386,7 @@ terminate_process_tree() {
         if [ "${root_pid}" != "${exclude_pid}" ] && pid_is_live "${root_pid}"; then
             still_alive=true
         else
-            for pid in "${descendants[@]}"; do
+            for pid in "${tracked_descendants[@]}"; do
                 if [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && pid_is_live "${pid}"; then
                     still_alive=true
                     break
@@ -10350,13 +10398,55 @@ terminate_process_tree() {
         attempt=$((attempt + 1))
     done
 
-    mapfile -t descendants < <(collect_descendant_pids "${root_pid}" "${exclude_pid}")
-    for pid in "${descendants[@]}"; do
-        [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && kill -KILL "${pid}" 2>/dev/null || true
+    # Preserve the originally captured descendants and merge any newly spawned
+    # children from root_pid or surviving descendants so grandchildren reparented
+    # to PID 1 after root_pid exits still receive SIGKILL.
+    scan_roots=("${root_pid}")
+    for pid in "${tracked_descendants[@]}"; do
+        [ -n "${pid}" ] && scan_roots+=("${pid}")
     done
-    if [ "${root_pid}" != "${exclude_pid}" ]; then
+    for pid in "${scan_roots[@]}"; do
+        pid_is_live "${pid}" || continue
+        mapfile -t current_descendants < <(collect_descendant_pids "${pid}" "${exclude_pid}")
+        for cpid in "${current_descendants[@]}"; do
+            [ -n "${cpid}" ] || continue
+            found=false
+            for existing in "${tracked_descendants[@]}"; do
+                if [ "${existing}" = "${cpid}" ]; then
+                    found=true
+                    break
+                fi
+            done
+            if [ "${found}" = false ]; then
+                tracked_descendants+=("${cpid}")
+            fi
+        done
+    done
+
+    for pid in "${tracked_descendants[@]}"; do
+        [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && pid_is_live "${pid}" && kill -KILL "${pid}" 2>/dev/null || true
+    done
+    if [ "${root_pid}" != "${exclude_pid}" ] && pid_is_live "${root_pid}"; then
         kill -KILL "${root_pid}" 2>/dev/null || true
     fi
+
+    attempt=0
+    while [ "${attempt}" -lt 5 ]; do
+        local still_alive=false
+        if [ "${root_pid}" != "${exclude_pid}" ] && pid_is_live "${root_pid}"; then
+            still_alive=true
+        else
+            for pid in "${tracked_descendants[@]}"; do
+                if [ -n "${pid}" ] && [ "${pid}" != "${exclude_pid}" ] && pid_is_live "${pid}"; then
+                    still_alive=true
+                    break
+                fi
+            done
+        fi
+        [ "${still_alive}" = false ] && return 0
+        sleep 0.05 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
     return 0
 }
 
@@ -10402,6 +10492,10 @@ run_reconcile_with_watchdog() {
         sleep "${timeout_sec}" &
         sleep_pid=$!
         wait "${sleep_pid}" || exit 0
+        # Once the timeout fires, ignore TERM/INT so parent cleanup cannot abort
+        # terminate_process_tree mid-grace-period if worker_pid exits on SIGTERM
+        # before slow or TERM-ignoring grandchildren receive SIGKILL.
+        trap '' TERM INT
         if pid_is_live "${worker_pid}"; then
             printf 'timeout\n' > "${timeout_flag}" 2>/dev/null || true
             exclude_pid=""
@@ -10418,14 +10512,20 @@ run_reconcile_with_watchdog() {
     wait "${worker_pid}" || worker_rc=$?
     ACTIVE_RECONCILE_WORKER_PID=""
 
-    local -a timer_children=()
-    local tpid
-    mapfile -t timer_children < <(collect_descendant_pids "${timer_pid}")
-    kill -TERM "${timer_pid}" 2>/dev/null || true
-    for tpid in "${timer_children[@]}"; do
-        [ -n "${tpid}" ] && kill -TERM "${tpid}" 2>/dev/null || true
-    done
-    wait "${timer_pid}" 2>/dev/null || true
+    if [ -f "${timeout_flag}" ]; then
+        # Let the watchdog timer complete its full TERM -> grace -> KILL pass
+        # over all timed-out worker descendants before fail-closed recovery.
+        wait "${timer_pid}" 2>/dev/null || true
+    else
+        local -a timer_children=()
+        local tpid
+        mapfile -t timer_children < <(collect_descendant_pids "${timer_pid}")
+        kill -TERM "${timer_pid}" 2>/dev/null || true
+        for tpid in "${timer_children[@]}"; do
+            [ -n "${tpid}" ] && kill -TERM "${tpid}" 2>/dev/null || true
+        done
+        wait "${timer_pid}" 2>/dev/null || true
+    fi
     ACTIVE_RECONCILE_TIMER_PID=""
 
     if [ -f "${timeout_flag}" ]; then

@@ -7956,6 +7956,205 @@ TIMER_PID="$(cat "${TIMER_PID_FILE}")"
     assert result.returncode == 0, result.stderr
 
 
+def test_periodic_reconcile_steady_state_rejects_dropped_docker_endpoint_and_ipv6_selector():
+    result = run_bash(
+        r'''
+source "$1"
+
+WG_CFG="${WG_DATA_DIR}/tunnelsatsv2.conf"
+printf '[Interface]\nPrivateKey = key-v1\n# VPNPort: 19735\n' > "${WG_CFG}"
+
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.docker.sock"
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+IPV6_ENSURE_CALLS=0
+CURRENT_V4_ENDPOINTS=(
+    "10.9.9.9|10.9.9.0/25|10.9.9.1|1|100"
+    "10.21.0.9|10.21.0.0/16|10.21.0.1|0|0"
+)
+CURRENT_V6_ADDRS=("2001:db8::9" "2001:db8::10")
+CURRENT_V6_MACS=("aa:bb:cc:dd:ee:01")
+CURRENT_V6_DEFAULT="true"
+
+ensure_reconcile_kill_switch() { KS_INSTALL_CALLS=$((KS_INSTALL_CALLS + 1)); return 0; }
+remove_reconcile_kill_switch() { return 0; }
+detect_lightning_container() {
+    TARGET_CONTAINER_ID="cid-target-1"
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.9.9.9"
+    LN_TARGET_PORT="9735"
+    if [[ "${SECURE_MODE}" == "true" ]]; then
+        TARGET_CONTAINER_ID=""
+        DOCKER_TARGET_IP="10.21.21.9"
+        TARGET_IPV6_ADDRESSES=("${CURRENT_V6_ADDRS[@]}")
+        TARGET_IPV6_MACS=("${CURRENT_V6_MACS[@]}")
+        TARGET_HAS_IPV6_DEFAULT_ROUTE="${CURRENT_V6_DEFAULT}"
+    fi
+    return 0
+}
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() {
+    if [[ "${SECURE_MODE}" == "true" ]]; then BRIDGE_NAME=""; else BRIDGE_NAME="br-1234567890ab"; fi
+    return 0
+}
+ensure_wg_up() { FORWARDING_PORT="19735"; return 0; }
+wg() { return 0; }
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() {
+    POLICY_CALLS=$((POLICY_CALLS + 1))
+    POLICY_CHANGED="0"
+    TARGET_IPV4_ENDPOINTS=("${CURRENT_V4_ENDPOINTS[@]}")
+    MANAGED_DOCKER_IPV4_ENDPOINTS=("${CURRENT_V4_ENDPOINTS[@]}")
+    TARGET_IPV6_ADDRESSES=("${CURRENT_V6_ADDRS[@]}")
+    TARGET_IPV6_MACS=("${CURRENT_V6_MACS[@]}")
+    TARGET_HAS_IPV6_DEFAULT_ROUTE="${CURRENT_V6_DEFAULT}"
+    return 0
+}
+ensure_ipv6_containment() {
+    IPV6_ENSURE_CALLS=$((IPV6_ENSURE_CALLS + 1))
+    MANAGED_TARGET_IPV6_ADDRESSES=("${CURRENT_V6_ADDRS[@]}")
+    if [ "${#CURRENT_V6_ADDRS[@]}" -gt 0 ] || [ "${#CURRENT_V6_MACS[@]}" -gt 0 ] || [ "${CURRENT_V6_DEFAULT}" = "true" ]; then
+        IPV6_POLICY_TABLE_MANAGED="true"
+    else
+        IPV6_POLICY_TABLE_MANAGED="false"
+    fi
+    return 0
+}
+ipv6_containment_is_synced() { return 0; }
+ensure_nat_forward_rules() { NAT_CHANGED="0"; return 0; }
+rules_are_synced() {
+    # Mimics real Standard Mode refresh_docker_target_endpoints inside rules_are_synced:
+    # updates current TARGET_* arrays without retiring stale entries from MANAGED_*.
+    if [[ "${SECURE_MODE}" != "true" ]]; then
+        TARGET_IPV4_ENDPOINTS=("${CURRENT_V4_ENDPOINTS[@]}")
+        TARGET_IPV6_ADDRESSES=("${CURRENT_V6_ADDRS[@]}")
+        TARGET_IPV6_MACS=("${CURRENT_V6_MACS[@]}")
+        TARGET_HAS_IPV6_DEFAULT_ROUTE="${CURRENT_V6_DEFAULT}"
+    fi
+    IPV4_RULES_SYNCED="true"
+    IPV6_RULES_SYNCED="true"
+    return 0
+}
+cleanup_dataplane() { return 0; }
+docker_api() {
+    if [[ "$1 $2" == "GET /networks/docker-tunnelsats" ]]; then
+        printf '{"Id":"1234567890abcdef","Containers":{"cid-target-1":{"Name":"lightning_lnd_1","IPv4Address":"10.9.9.9/25"}}}\n'
+        return 0
+    fi
+    return 1
+}
+
+# Initial full reconcile establishes 2 IPv4 endpoints and 2 IPv6 addresses
+reconcile_once "startup"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ "${#MANAGED_DOCKER_IPV4_ENDPOINTS[@]}" == "2" ]]
+[[ "${#MANAGED_TARGET_IPV6_ADDRESSES[@]}" == "2" ]]
+
+# Unchanged periodic tick uses fast path
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+IPV6_ENSURE_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" == "0" ]]
+[[ "${POLICY_CALLS}" == "0" ]]
+[[ "${IPV6_ENSURE_CALLS}" == "0" ]]
+
+# Drop second Docker IPv4 network -> MUST fall through to full reconcile so stale rules are retired
+CURRENT_V4_ENDPOINTS=("10.9.9.9|10.9.9.0/25|10.9.9.1|1|100")
+KS_INSTALL_CALLS=0
+POLICY_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${POLICY_CALLS}" -ge 1 ]]
+[[ "${#MANAGED_DOCKER_IPV4_ENDPOINTS[@]}" == "1" ]]
+
+# Drop second IPv6 address -> MUST fall through to full reconcile so stale IPv6 rules are retired
+CURRENT_V6_ADDRS=("2001:db8::9")
+KS_INSTALL_CALLS=0
+IPV6_ENSURE_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${IPV6_ENSURE_CALLS}" -ge 1 ]]
+[[ "${#MANAGED_TARGET_IPV6_ADDRESSES[@]}" == "1" ]]
+
+# Secure Mode: dropping an IPv6 address or MAC selector MUST also fall through to full reconcile
+SECURE_MODE="true"
+CURRENT_V6_ADDRS=("2001:db8::9")
+CURRENT_V6_MACS=("aa:bb:cc:dd:ee:01")
+CURRENT_V6_DEFAULT="true"
+reconcile_once "startup"
+[[ "${RULES_SYNCED}" == "true" ]]
+
+KS_INSTALL_CALLS=0
+IPV6_ENSURE_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" == "0" ]]
+[[ "${IPV6_ENSURE_CALLS}" == "0" ]]
+
+CURRENT_V6_ADDRS=()
+CURRENT_V6_MACS=()
+CURRENT_V6_DEFAULT="false"
+KS_INSTALL_CALLS=0
+IPV6_ENSURE_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${IPV6_ENSURE_CALLS}" -ge 1 ]]
+[[ "${IPV6_POLICY_TABLE_MANAGED}" == "false" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_watchdog_timeout_kills_term_ignoring_grandchild_after_worker_exits():
+    result = run_bash(
+        r'''
+source "$1"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+RECONCILE_CYCLE_TIMEOUT=1
+STUBBORN_PID_FILE="${POLICY_TEST_STATE_FILE}.stubborn.pid"
+FAIL_CLOSED_FILE="${POLICY_TEST_STATE_FILE}.stubborn.fail_closed"
+
+fail_reconcile_closed() {
+    printf '%s\n' "${1:-}" > "${FAIL_CLOSED_FILE}"
+    return 1
+}
+
+reconcile_once() {
+    # Grandchild ignores SIGTERM so it survives worker_pid's immediate exit on TERM
+    # and can only be terminated by SIGKILL from terminate_process_tree.
+    bash -c 'trap "" TERM; echo "$$" > "$1"; sleep 30' _ "${STUBBORN_PID_FILE}" &
+    while [ ! -s "${STUBBORN_PID_FILE}" ]; do
+        sleep 0.05
+    done
+    sleep 30
+}
+
+if run_reconcile_with_watchdog "periodic" "req-stubborn-1"; then
+    exit 1
+fi
+
+STUBBORN_PID="$(cat "${STUBBORN_PID_FILE}" 2>/dev/null || true)"
+cleanup_stubborn() {
+    [ -n "${STUBBORN_PID:-}" ] && kill -KILL "${STUBBORN_PID}" 2>/dev/null || true
+}
+trap cleanup_stubborn EXIT
+
+[[ -n "${STUBBORN_PID}" ]]
+[[ "$(cat "${FAIL_CLOSED_FILE}")" == "req-stubborn-1" ]]
+! kill -0 "${STUBBORN_PID}" 2>/dev/null
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
 
 
 
