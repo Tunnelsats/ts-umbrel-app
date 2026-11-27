@@ -4336,9 +4336,19 @@ class TestUmbrelAppIdAndCrossGradeDetection:
             ({"ip_rule": "32762:\tfrom 10.9.9.9 blackhole\n"}, "ip_rule:10.9.9.9"),
             ({"ip_route": "10.9.9.0/25 dev br-abc123 proto kernel scope link src 10.9.9.1\n"}, "ip_route:10.9.9.0/25"),
             ({"ip_route": "10.9.9.1 dev br-abc123 scope link\n"}, "ip_route:10.9.9.1"),
-            ({"wg_show": "interface: tunnelsatsv2\n  public key: abc123\n"}, "wg_interface:tunnelsatsv2"),
             (
-                {"wg_show": None, "ip_link": "12: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n"},
+                {
+                    "ip_rule": "32762:\tfrom 10.9.9.0/25 blackhole\n",
+                    "wg_show": "interface: tunnelsatsv2\n  public key: abc123\n",
+                },
+                "wg_interface:tunnelsatsv2",
+            ),
+            (
+                {
+                    "ip_route": "10.9.9.0/25 dev br-abc123 proto kernel scope link src 10.9.9.1\n",
+                    "wg_show": None,
+                    "ip_link": "12: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n",
+                },
                 "ip_link:tunnelsatsv2",
             ),
         ],
@@ -4355,6 +4365,34 @@ class TestUmbrelAppIdAndCrossGradeDetection:
         )
         assert detected is True
         assert expected_fragment in evidence
+
+    @pytest.mark.parametrize(
+        "runner_kwargs",
+        [
+            {"wg_show": "interface: tunnelsatsv2\n  public key: abc123\n"},
+            {
+                "wg_show": None,
+                "ip_link": "12: tunnelsatsv2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n",
+            },
+            {
+                "ip_rule": "0:\tfrom all lookup local\n32762:\tfrom 10.21.21.9 blackhole\n",
+                "ip_route": "default via 192.168.1.1 dev eth0\n10.21.21.0/24 dev br-umbrel src 10.21.21.1\n",
+                "wg_show": "interface: tunnelsatsv2\n  public key: abc123\n",
+            },
+        ],
+    )
+    def test_detect_community_cross_grade_negative_for_official_reinstall_without_standard_mode_remnants(
+        self, runner_kwargs
+    ):
+        detected, evidence = app_module.detect_community_cross_grade(
+            configs=[],
+            secure_mode=True,
+            k3s_mode=False,
+            role="daemon",
+            run_cmd=self._kernel_runner(**runner_kwargs),
+        )
+        assert detected is False
+        assert evidence == []
 
     def test_detect_community_cross_grade_negative_when_config_exists(self):
         detected, evidence = app_module.detect_community_cross_grade(

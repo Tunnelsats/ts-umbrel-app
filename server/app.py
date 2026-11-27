@@ -1323,9 +1323,15 @@ def detect_community_cross_grade(
     Triggers only when:
     - ``SECURE_MODE`` is True and ``K3S_MODE`` is False (and not ``web``-only role),
     - ``/data`` has no ``tunnelsats*.conf`` WireGuard configuration, and
-    - Live host kernel state shows Standard Mode (``docker-full-parity``) remnants:
-      ``ip rule show`` or ``ip route show`` referencing ``10.9.9.0/25``, ``10.9.9.9``,
-      or ``10.9.9.1``, OR ``tunnelsatsv2`` WireGuard interface is already UP.
+    - Live host kernel state shows Community Standard Mode (``docker-full-parity``)
+      remnants: ``ip rule show`` or ``ip route show`` referencing ``10.9.9.0/25``,
+      ``10.9.9.9``, or ``10.9.9.1``.
+
+    An existing ``tunnelsatsv2`` WireGuard interface is recorded only as corroborating
+    evidence when Standard Mode ``10.9.9.*`` remnants are present — never as a
+    standalone trigger — so an Official-only reinstall (where skipping Restore leaves
+    ``tunnelsatsv2`` up while ``app-data/tunnelsats-data/`` never existed) does not
+    raise a false Community recovery warning.
     """
     is_secure = SECURE_MODE if secure_mode is None else bool(secure_mode)
     is_k3s = K3S_MODE if k3s_mode is None else bool(k3s_mode)
@@ -1373,6 +1379,9 @@ def detect_community_cross_grade(
         if match:
             evidence.append(f"ip_route:{match.group(0)}")
 
+    if not evidence:
+        return False, []
+
     wg_detected = False
     rc, wg_out = _safe_run(["wg", "show", WG_INTERFACE_NAME])
     if rc == 0 and f"interface: {WG_INTERFACE_NAME}" in wg_out:
@@ -1384,7 +1393,7 @@ def detect_community_cross_grade(
         if rc == 0 and WG_INTERFACE_NAME in link_out and _IP_LINK_UP_RE.search(link_out):
             evidence.append(f"ip_link:{WG_INTERFACE_NAME}")
 
-    return bool(evidence), evidence
+    return True, evidence
 
 
 def _build_cross_grade_recovery_banner(evidence: List[str]) -> Dict[str, Any]:
