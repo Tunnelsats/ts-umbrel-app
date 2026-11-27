@@ -10371,7 +10371,21 @@ preserve_fail_closed_dataplane() {
         fi
         # Always install selector-based emergency NetworkPolicy before exiting or
         # restarting so any controller-created replacement Lightning pod (with a
-        # new IP) is also fail-closed while TunnelSats is stopped.
+        # new IP) is also fail-closed while TunnelSats is stopped. When no target
+        # pod IP is known and the CNI does not enforce NetworkPolicy:
+        # - On an unexpected API crash (mode=api-crash), ensure kernel pod-CIDR
+        #   quarantine is installed immediately.
+        # - On any mode, never remove an existing or retry-installed kernel
+        #   pod-CIDR quarantine when an unenforced NetworkPolicy succeeds on retry.
+        local keep_kernel_quarantine=false
+        if [ -z "${target_ip}" ] && [ "${K3S_CNI_ENFORCES_NETWORK_POLICY:-false}" != "true" ]; then
+            keep_kernel_quarantine=true
+            if [ "${mode}" = "api-crash" ]; then
+                if ensure_k3s_subnet_quarantine "" && ensure_k3s_ipv6_subnet_quarantine; then
+                    quarantine_ok=true
+                fi
+            fi
+        fi
         local quarantine_for_netpol=false
         if ensure_k3s_emergency_network_policy; then
             policy_ok=true
@@ -10381,7 +10395,9 @@ preserve_fail_closed_dataplane() {
                 # quarantine the pod CIDR in the kernel so replacement pods scheduled on
                 # this node cannot egress over clearnet while the cluster-wide emergency
                 # NetworkPolicy is retried.
-                quarantine_for_netpol=true
+                if [ "${keep_kernel_quarantine}" = false ]; then
+                    quarantine_for_netpol=true
+                fi
                 if ensure_k3s_subnet_quarantine "${target_ip}" && ensure_k3s_ipv6_subnet_quarantine; then
                     quarantine_ok=true
                 fi
@@ -10395,7 +10411,7 @@ preserve_fail_closed_dataplane() {
                 fi
                 if ensure_k3s_emergency_network_policy; then
                     policy_ok=true
-                    if [ "${quarantine_for_netpol}" = true ]; then
+                    if [ "${quarantine_for_netpol}" = true ] && [ "${keep_kernel_quarantine}" = false ]; then
                         remove_k3s_subnet_quarantine || true
                         remove_k3s_ipv6_subnet_quarantine || true
                         quarantine_ok=false
@@ -10869,7 +10885,7 @@ main_loop() {
             log ERROR "${LAST_ERROR}"
             if ! evaluate_kill_switch_arming || [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
                 if [[ "${K3S_MODE}" == "true" ]]; then
-                    preserve_fail_closed_dataplane || true
+                    preserve_fail_closed_dataplane "api-crash" || true
                 else
                     fail_reconcile_closed || true
                 fi

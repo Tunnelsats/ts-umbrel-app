@@ -7199,6 +7199,83 @@ jq -e '.last_error | contains("Failed to inspect CLN config")' "${STATE_FILE}" >
     assert result.returncode == 0, result.stderr
 
 
+def test_k3s_preserve_fail_closed_retains_kernel_quarantine_when_no_pod_ip_and_cni_unenforced():
+    result = run_bash(
+        r'''
+source "$1"
+K3S_MODE="true"
+SECURE_MODE="false"
+LND_K8S_NAMESPACE="lightning"
+LND_K8S_POD_SELECTOR="app=lnd"
+DOCKER_TARGET_IP="10.9.9.9"
+MANAGED_K3S_TARGET_IP=""
+K3S_SHUTDOWN_NETPOL_ATTEMPTS=2
+K3S_SHUTDOWN_RETRY_INTERVAL=0
+cleanup_dataplane() { return 0; }
+ensure_k3s_ipv6_subnet_quarantine() { return 0; }
+remove_k3s_ipv6_subnet_quarantine() { return 0; }
+
+# 1. Unenforced CNI + no target pod IP + NetworkPolicy succeeds on retry 2:
+#    kernel subnet quarantine MUST be installed and MUST NOT be removed on retry.
+K3S_CNI_ENFORCES_NETWORK_POLICY="false"
+QUARANTINE_CALLS=0
+UNQUARANTINE_CALLS=0
+NETPOL_ATTEMPTS=0
+ensure_k3s_subnet_quarantine() { QUARANTINE_CALLS=$((QUARANTINE_CALLS + 1)); return 0; }
+remove_k3s_subnet_quarantine() { UNQUARANTINE_CALLS=$((UNQUARANTINE_CALLS + 1)); return 0; }
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
+    [[ "${NETPOL_ATTEMPTS}" -ge 2 ]]
+}
+
+preserve_fail_closed_dataplane "api-crash"
+[[ "${QUARANTINE_CALLS}" -ge 1 ]]
+[[ "${UNQUARANTINE_CALLS}" == "0" ]]
+[[ "${NETPOL_ATTEMPTS}" == "2" ]]
+
+# Also verify routine shutdown retry with no target IP & unenforced CNI never removes quarantine.
+QUARANTINE_CALLS=0
+UNQUARANTINE_CALLS=0
+NETPOL_ATTEMPTS=0
+preserve_fail_closed_dataplane "shutdown"
+[[ "${QUARANTINE_CALLS}" -ge 1 ]]
+[[ "${UNQUARANTINE_CALLS}" == "0" ]]
+[[ "${NETPOL_ATTEMPTS}" == "2" ]]
+
+# 2. Unenforced CNI + no target pod IP + API crash + NetworkPolicy succeeds on attempt 1:
+#    kernel subnet quarantine MUST still be installed.
+QUARANTINE_CALLS=0
+UNQUARANTINE_CALLS=0
+NETPOL_ATTEMPTS=0
+ensure_k3s_emergency_network_policy() { NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1)); return 0; }
+
+preserve_fail_closed_dataplane "api-crash"
+[[ "${QUARANTINE_CALLS}" -ge 1 ]]
+[[ "${UNQUARANTINE_CALLS}" == "0" ]]
+[[ "${NETPOL_ATTEMPTS}" == "1" ]]
+
+# 3. Enforcing CNI + no target pod IP + API crash + NetworkPolicy succeeds on retry 2:
+#    temporary kernel quarantine during retry IS lifted once enforcing policy succeeds.
+K3S_CNI_ENFORCES_NETWORK_POLICY="true"
+QUARANTINE_CALLS=0
+UNQUARANTINE_CALLS=0
+NETPOL_ATTEMPTS=0
+ensure_k3s_emergency_network_policy() {
+    NETPOL_ATTEMPTS=$((NETPOL_ATTEMPTS + 1))
+    [[ "${NETPOL_ATTEMPTS}" -ge 2 ]]
+}
+
+preserve_fail_closed_dataplane "api-crash"
+[[ "${QUARANTINE_CALLS}" == "1" ]]
+[[ "${UNQUARANTINE_CALLS}" == "1" ]]
+[[ "${NETPOL_ATTEMPTS}" == "2" ]]
+''',
+        armed=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+
 
 
 
