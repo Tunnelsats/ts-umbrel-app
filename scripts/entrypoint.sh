@@ -308,6 +308,7 @@ K3S_KNOWN_NON_TARGET_POD_V6_PEERS=""
 K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
 ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
 LAST_SYNCED_WG_CFG_SIG=""
+APPLIED_WG_CFG_SIG=""
 LEGACY_MANGLE_RULES_REMOVED="0"
 ACTIVE_RECONCILE_WORKER_PID=""
 ACTIVE_RECONCILE_TIMER_PID=""
@@ -2196,8 +2197,12 @@ read_wg_config_path() {
 }
 
 compute_wg_config_signature() {
-    local cfg_path
-    cfg_path="$(read_wg_config_path 2>/dev/null || true)"
+    local cfg_path="${1:-}"
+    local key_path="${2:-}"
+    if [ -z "${cfg_path}" ]; then
+        cfg_path="$(read_wg_config_path 2>/dev/null || true)"
+    fi
+    [ -n "${key_path}" ] || key_path="${cfg_path}"
     [ -n "${cfg_path}" ] && [ -f "${cfg_path}" ] && [ -r "${cfg_path}" ] || return 0
     local digest=""
     if command -v sha256sum >/dev/null 2>&1; then
@@ -2206,7 +2211,7 @@ compute_wg_config_signature() {
         digest="$(shasum -a 256 "${cfg_path}" 2>/dev/null | awk '{print $1}' || true)"
     fi
     [ -n "${digest}" ] || return 0
-    printf '%s|%s\n' "${cfg_path}" "${digest}"
+    printf '%s|%s\n' "${key_path}" "${digest}"
 }
 
 ensure_runtime_wireguard_keepalive() {
@@ -3712,6 +3717,16 @@ ensure_wg_up() {
 
     mkdir -p /etc/wireguard
     cp "${source_cfg}" "${WG_CONF_PATH}"
+    # Hash and parse the copied snapshot before mutating WG_CONF_PATH so
+    # APPLIED_WG_CFG_SIG, FORWARDING_PORT, and WireGuard all correspond to the
+    # exact same config bytes even if background port updates rewrite source_cfg.
+    APPLIED_WG_CFG_SIG="$(compute_wg_config_signature "${WG_CONF_PATH}" "${source_cfg}" || true)"
+    FORWARDING_PORT="$(extract_forwarding_port "${WG_CONF_PATH}" || true)"
+    if [ -z "${FORWARDING_PORT}" ]; then
+        LAST_ERROR="No forwarding port metadata found in config"
+        return 1
+    fi
+
     if ! ensure_runtime_wireguard_keepalive "${WG_CONF_PATH}"; then
         LAST_ERROR="Failed to ensure PersistentKeepalive in runtime WireGuard config"
         return 1
@@ -3720,12 +3735,6 @@ ensure_wg_up() {
     # Ensure WireGuard doesn't aggressively hijack the host routing table via AllowedIPs=0.0.0.0/0
     sed -i '/^\s*Table\s*=/Id' "${WG_CONF_PATH}"
     sed -i '/^\[Interface\]/a Table = off' "${WG_CONF_PATH}"
-
-    FORWARDING_PORT="$(extract_forwarding_port "${source_cfg}" || true)"
-    if [ -z "${FORWARDING_PORT}" ]; then
-        LAST_ERROR="No forwarding port metadata found in config"
-        return 1
-    fi
 
     if wg show "${WG_IFACE}" >/dev/null 2>&1; then
         local stripped_cfg
@@ -10136,45 +10145,77 @@ reconcile_once() {
         return 1
     fi
 
-    if ! ensure_wg_up; then
-        fail_reconcile_closed "${request_id}"
-        return 1
-    fi
-
-    if [[ "${K3S_MODE}" != "true" ]] && ! wireguard_handshake_is_fresh; then
-        fail_reconcile_closed "${request_id}"
-        return 1
-    fi
-
-    if ! ensure_policy_routing; then
-        fail_reconcile_closed "${request_id}"
-        return 1
-    fi
-    policy_changed="${POLICY_CHANGED}"
-
-    if [ "${policy_changed}" = "1" ]; then
-        changed=1
-    fi
-
-    if ! ensure_nat_forward_rules; then
-        fail_reconcile_closed "${request_id}"
-        return 1
-    fi
-    nat_changed="${NAT_CHANGED}"
-
-    if [ "${nat_changed}" = "1" ]; then
-        changed=1
-    fi
-
-    if [[ "${K3S_MODE}" == "true" ]]; then
-        K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="true"
-        if ! rules_are_synced; then
-            K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
-            LAST_ERROR="Dataplane rules are not fully synced"
+    local wg_cfg_attempt=0
+    local pre_wg_sig=""
+    local applied_wg_sig=""
+    local current_wg_sig=""
+    while true; do
+        APPLIED_WG_CFG_SIG=""
+        pre_wg_sig="$(compute_wg_config_signature || true)"
+        if ! ensure_wg_up; then
             fail_reconcile_closed "${request_id}"
             return 1
         fi
-        K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
+        applied_wg_sig="${APPLIED_WG_CFG_SIG:-${pre_wg_sig}}"
+
+        if [[ "${K3S_MODE}" != "true" ]] && ! wireguard_handshake_is_fresh; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+
+        if ! ensure_policy_routing; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        policy_changed="${POLICY_CHANGED}"
+
+        if [ "${policy_changed}" = "1" ]; then
+            changed=1
+        fi
+
+        if ! ensure_nat_forward_rules; then
+            fail_reconcile_closed "${request_id}"
+            return 1
+        fi
+        nat_changed="${NAT_CHANGED}"
+
+        if [ "${nat_changed}" = "1" ]; then
+            changed=1
+        fi
+
+        if [[ "${K3S_MODE}" == "true" ]]; then
+            K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="true"
+            if ! rules_are_synced; then
+                K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
+                LAST_ERROR="Dataplane rules are not fully synced"
+                fail_reconcile_closed "${request_id}"
+                return 1
+            fi
+            K3S_ALLOW_ACTIVE_QUARANTINE_DURING_SYNC="false"
+        else
+            ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="true"
+            if ! rules_are_synced; then
+                ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+                LAST_ERROR="Dataplane rules are not fully synced"
+                fail_reconcile_closed "${request_id}"
+                return 1
+            fi
+            ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
+        fi
+
+        current_wg_sig="$(compute_wg_config_signature || true)"
+        if [ -n "${applied_wg_sig}" ] && \
+           [ -n "${current_wg_sig}" ] && \
+           [ "${current_wg_sig}" != "${applied_wg_sig}" ] && \
+           [ "${wg_cfg_attempt}" -lt 1 ]; then
+            wg_cfg_attempt=$((wg_cfg_attempt + 1))
+            log INFO "WireGuard config changed during reconciliation; re-applying updated config (attempt ${wg_cfg_attempt})"
+            continue
+        fi
+        break
+    done
+
+    if [[ "${K3S_MODE}" == "true" ]]; then
         if ! release_k3s_reconcile_guards; then
             RULES_SYNCED="false"
             fail_reconcile_closed "${request_id}"
@@ -10188,15 +10229,6 @@ reconcile_once() {
         fi
         RULES_SYNCED="true"
     else
-        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="true"
-        if ! rules_are_synced; then
-            ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
-            LAST_ERROR="Dataplane rules are not fully synced"
-            fail_reconcile_closed "${request_id}"
-            return 1
-        fi
-        ALLOW_RECONCILE_KILL_SWITCH_DURING_SYNC="false"
-
         # The emergency guard remains active while the complete dataplane and
         # handshake are verified. Only then can target traffic use table 51820.
         if ! wireguard_handshake_is_fresh; then
@@ -10217,7 +10249,10 @@ reconcile_once() {
         RULES_SYNCED="true"
     fi
 
-    LAST_SYNCED_WG_CFG_SIG="$(compute_wg_config_signature || true)"
+    # Record the exact signature of the config snapshot actually applied, never
+    # a post-hoc re-hash of the live file, so any concurrent update forces a
+    # full reconcile on the next cycle instead of taking the steady-state fast path.
+    LAST_SYNCED_WG_CFG_SIG="${applied_wg_sig}"
     record_protected_target
     write_state
 

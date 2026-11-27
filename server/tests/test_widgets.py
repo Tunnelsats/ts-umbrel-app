@@ -838,3 +838,52 @@ def test_widgets_report_blocked_on_stale_reconcile_heartbeat_and_active_kill_swi
         assert o_ks["title"] == "🟠 Blocked · LND · 🇺🇸 us3"
         assert "Active" not in o_ks["title"]
 
+
+def test_widgets_report_blocked_when_verification_pending_coexists_with_kill_switch_or_stale_reconcile():
+    """Issue #202: locked/initializing node (verification-pending) must still report Blocked + Check App when wedged."""
+    from widgets import build_widget_overview_payload, build_widget_status_payload, classify_widget_shield
+
+    base_status = {
+        "vpn_active": True,
+        "wg_status": "Connected",
+        "target_impl": "lnd",
+        "lnd_detected": True,
+        "lnd_routing_active": True,
+        "rules_synced": False,
+        "decommissioned": False,
+        "server_domain": "us3.tunnelsats.com",
+        "last_reconcile_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "announcement_verification_required": True,
+        "announcement_verified": None,
+        "announcement_conflicts": [],
+        "announcement_diagnostics": [
+            {
+                "kind": "verification-pending",
+                "title": "Waiting for LND unlock",
+                "detail": "LND wallet is still locked or initializing.",
+            }
+        ],
+    }
+
+    for extra_fields in (
+        {"kill_switch_active": True, "last_error_code": "reconcile_kill_switch_active"},
+        {"reconcile_stale": True, "last_error_code": "reconcile_stale"},
+        {"kill_switch_active": True, "target_switch_pending": True, "last_error_code": "reconcile_kill_switch_active"},
+    ):
+        payload = {**base_status, **extra_fields}
+        state_key, shield_title, badge_text, node_short = classify_widget_shield(payload)
+        assert state_key == "blocked", f"Expected blocked for {extra_fields}, got {state_key}"
+        assert shield_title == "LND Shield"
+        assert badge_text == "🟠 Blocked"
+        assert node_short == "LND"
+
+        status_widget = build_widget_status_payload(payload)
+        assert status_widget["items"][0] == {"title": "LND Shield", "text": "🟠 Blocked", "subtext": ""}
+        assert status_widget["items"][3] == {"title": "Action", "text": "Check App", "subtext": ""}
+
+        overview_widget = build_widget_overview_payload(payload)
+        assert overview_widget["title"] == "🟠 Blocked · LND · us3"
+        assert overview_widget["text"] == "Check App"
+        assert overview_widget["progressLabel"] == "Fail-closed block active"
+
+

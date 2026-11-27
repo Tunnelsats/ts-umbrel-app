@@ -8155,6 +8155,137 @@ trap cleanup_stubborn EXIT
     assert result.returncode == 0, result.stderr
 
 
+def test_reconcile_records_applied_wg_config_signature_and_retries_mid_cycle_port_change():
+    result = run_bash(
+        r'''
+source "$1"
+
+WG_CFG="${WG_DATA_DIR}/tunnelsatsv2.conf"
+WG_CONF_PATH="${POLICY_TEST_STATE_FILE}.runtime.conf"
+cat > "${WG_CFG}" <<'EOF'
+[Interface]
+PrivateKey = key-v1
+# VPNPort: 19735
+
+[Peer]
+PublicKey = peer-pub
+AllowedIPs = 0.0.0.0/0
+EOF
+
+DOCKER_SOCK="${POLICY_TEST_STATE_FILE}.docker.sock"
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "${DOCKER_SOCK}"
+
+K3S_MODE="false"
+SECURE_MODE="false"
+KS_INSTALL_CALLS=0
+NAT_APPLIED_PORT=""
+SIMULATE_MID_CYCLE_PORT_UPDATE="true"
+SIMULATE_POST_RELEASE_PORT_UPDATE="false"
+
+ensure_reconcile_kill_switch() { KS_INSTALL_CALLS=$((KS_INSTALL_CALLS + 1)); return 0; }
+remove_reconcile_kill_switch() {
+    if [[ "${SIMULATE_POST_RELEASE_PORT_UPDATE}" == "true" ]]; then
+        SIMULATE_POST_RELEASE_PORT_UPDATE="false"
+        cat > "${WG_CFG}" <<'EOF'
+[Interface]
+PrivateKey = key-v1
+# VPNPort: 39735
+
+[Peer]
+PublicKey = peer-pub
+AllowedIPs = 0.0.0.0/0
+EOF
+    fi
+    return 0
+}
+detect_lightning_container() {
+    TARGET_CONTAINER_ID="cid-target-1"
+    TARGET_CONTAINER_NAME="lightning_lnd_1"
+    TARGET_IMPL="lnd"
+    DOCKER_TARGET_IP="10.9.9.9"
+    LN_TARGET_PORT="9735"
+    return 0
+}
+ensure_docker_network() { return 0; }
+ensure_container_attached() { return 0; }
+resolve_bridge_name() { BRIDGE_NAME="br-1234567890ab"; return 0; }
+wg() { return 0; }
+wg-quick() {
+    if [[ "$1" == "strip" ]]; then
+        cat "$2"
+        return 0
+    fi
+    return 0
+}
+wireguard_handshake_is_fresh() { return 0; }
+ensure_policy_routing() { POLICY_CHANGED="0"; return 0; }
+ensure_ipv6_containment() { return 0; }
+ipv6_containment_is_synced() { return 0; }
+ensure_nat_forward_rules() {
+    NAT_APPLIED_PORT="${FORWARDING_PORT}"
+    NAT_CHANGED="1"
+    if [[ "${SIMULATE_MID_CYCLE_PORT_UPDATE}" == "true" ]]; then
+        SIMULATE_MID_CYCLE_PORT_UPDATE="false"
+        cat > "${WG_CFG}" <<'EOF'
+[Interface]
+PrivateKey = key-v1
+# VPNPort: 29735
+
+[Peer]
+PublicKey = peer-pub
+AllowedIPs = 0.0.0.0/0
+EOF
+    fi
+    return 0
+}
+rules_are_synced() {
+    IPV4_RULES_SYNCED="true"
+    IPV6_RULES_SYNCED="true"
+    return 0
+}
+cleanup_dataplane() { return 0; }
+docker_api() {
+    if [[ "$1 $2" == "GET /networks/docker-tunnelsats" ]]; then
+        printf '{"Id":"1234567890abcdef","Containers":{"cid-target-1":{"Name":"lightning_lnd_1","IPv4Address":"10.9.9.9/25"}}}\n'
+        return 0
+    fi
+    return 1
+}
+
+# 1. Background apply_vpn_port() updates VPNPort from 19735 -> 29735 after ensure_wg_up()
+#    and during ensure_nat_forward_rules(). reconcile_once must detect the change and retry
+#    in-cycle so FORWARDING_PORT and NAT rules both converge to 29735.
+reconcile_once "startup"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ "${FORWARDING_PORT}" == "29735" ]]
+[[ "${NAT_APPLIED_PORT}" == "29735" ]]
+SIG_29735="$(compute_wg_config_signature)"
+[[ "${LAST_SYNCED_WG_CFG_SIG}" == "${SIG_29735}" ]]
+
+# 2. Background apply_vpn_port() updates VPNPort from 29735 -> 39735 right during
+#    remove_reconcile_kill_switch(). LAST_SYNCED_WG_CFG_SIG MUST stay tied to 29735
+#    (the config actually applied), so the next periodic tick rejects the fast path
+#    and applies 39735.
+SIMULATE_POST_RELEASE_PORT_UPDATE="true"
+reconcile_once "manual"
+[[ "${RULES_SYNCED}" == "true" ]]
+[[ "${FORWARDING_PORT}" == "29735" ]]
+[[ "${NAT_APPLIED_PORT}" == "29735" ]]
+[[ "${LAST_SYNCED_WG_CFG_SIG}" == "${SIG_29735}" ]]
+SIG_39735="$(compute_wg_config_signature)"
+[[ "${LAST_SYNCED_WG_CFG_SIG}" != "${SIG_39735}" ]]
+
+KS_INSTALL_CALLS=0
+reconcile_once "periodic"
+[[ "${KS_INSTALL_CALLS}" -ge 1 ]]
+[[ "${FORWARDING_PORT}" == "39735" ]]
+[[ "${NAT_APPLIED_PORT}" == "39735" ]]
+[[ "${LAST_SYNCED_WG_CFG_SIG}" == "${SIG_39735}" ]]
+'''
+    )
+    assert result.returncode == 0, result.stderr
+
+
 
 
 
