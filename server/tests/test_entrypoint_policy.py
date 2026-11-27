@@ -9,10 +9,23 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ENTRYPOINT_PATH = os.path.join(REPO_ROOT, "scripts", "entrypoint.sh")
 
 
-def run_bash(script):
+def run_bash(script, armed=True):
     with tempfile.TemporaryDirectory() as temp_dir:
+        wg_data_dir = os.path.join(temp_dir, "data")
+        migration_source_dir = os.path.join(temp_dir, "migration_source")
+        lightning_dir = os.path.join(temp_dir, "lightning-data")
+        os.makedirs(wg_data_dir, exist_ok=True)
+        os.makedirs(migration_source_dir, exist_ok=True)
+        os.makedirs(os.path.join(lightning_dir, "lnd"), exist_ok=True)
+        os.makedirs(os.path.join(lightning_dir, "cln"), exist_ok=True)
+
         env = os.environ.copy()
         env["POLICY_TEST_STATE_FILE"] = os.path.join(temp_dir, "state")
+        env["STATE_FILE"] = os.path.join(temp_dir, "tunnelsats_state.json")
+        env["WG_DATA_DIR"] = wg_data_dir
+        env["MIGRATION_SOURCE_DIR"] = migration_source_dir
+        env["LND_CONFIG_PATH"] = os.path.join(lightning_dir, "lnd", "lnd.conf")
+        env["CLN_DATA_DIR"] = os.path.join(lightning_dir, "cln")
         env["DOCKER_POLICY_STATE_FILE"] = os.path.join(
             temp_dir, "docker-policy-sources.json"
         )
@@ -28,6 +41,11 @@ def run_bash(script):
         env["DECOMMISSION_STATE_FILE"] = os.path.join(
             temp_dir, "decommissioned.json"
         )
+        armed_state_file = os.path.join(temp_dir, "tunnelsats-armed.json")
+        env["KILL_SWITCH_ARMED_STATE_FILE"] = armed_state_file
+        if armed:
+            with open(armed_state_file, "w", encoding="utf-8") as fh:
+                fh.write('{"version": 1, "armed": true}\n')
         env["K3S_DNS_PROXY_PID_FILE"] = os.path.join(
             temp_dir, "k3s-dns-proxy.pid"
         )
@@ -3920,14 +3938,27 @@ reconcile_once "periodic"
 [[ "${DETECT_CALLS}" == "0" ]]
 [[ "${DECOMMISSIONED}" == "true" ]]
 
-# Manual reconcile clears decommissioned state and resumes normal protection.
+# Manual reconcile without any WireGuard config clears decommissioned state
+# but stays in non-blocking standby (empty post-decommission state files must
+# not falsely re-arm the kill switch).
+reconcile_once "manual"
+[[ "${DETECT_CALLS}" == "0" ]]
+[[ "${DECOMMISSIONED}" == "false" ]]
+[[ "${KILL_SWITCH_ARMED}" == "false" ]]
+jq -e '.decommissioned == false' "${DECOMMISSION_STATE_FILE}" >/dev/null
+jq -e '.decommissioned == false' "${K3S_POLICY_STATE_FILE}" >/dev/null
+jq -e '.armed == false' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+
+# Once a WireGuard config is present again, manual reconcile re-arms the kill
+# switch and resumes normal protection.
+printf '[Interface]\nPrivateKey = test\n' > "${WG_DATA_DIR}/tunnelsats.conf"
 if reconcile_once "manual"; then
     exit 1
 fi
 [[ "${DETECT_CALLS}" == "1" ]]
 [[ "${DECOMMISSIONED}" == "false" ]]
-jq -e '.decommissioned == false' "${DECOMMISSION_STATE_FILE}" >/dev/null
-jq -e '.decommissioned == false' "${K3S_POLICY_STATE_FILE}" >/dev/null
+[[ "${KILL_SWITCH_ARMED}" == "true" ]]
+jq -e '.armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
 '''
     )
 
@@ -6384,6 +6415,512 @@ fi
 '''
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode_name", "k3s_mode", "secure_mode"),
+    [
+        ("docker", "false", "false"),
+        ("secure", "false", "true"),
+        ("k3s", "true", "false"),
+    ],
+)
+def test_fresh_install_standby_installs_zero_guards_across_modes_and_lifecycle(
+    mode_name, k3s_mode, secure_mode
+):
+    result = run_bash(
+        f'''
+K3S_MODE="{k3s_mode}"
+SECURE_MODE="{secure_mode}"
+source "$1"
+
+STATE_FILE="${{POLICY_TEST_STATE_FILE}}.{mode_name}.state.json"
+RECONCILE_RESULT_DIR="${{POLICY_TEST_STATE_FILE}}.{mode_name}.results"
+RESTART_TRIGGER="${{POLICY_TEST_STATE_FILE}}.{mode_name}.restart"
+mkdir -p "${{RECONCILE_RESULT_DIR}}"
+
+GUARD_CALLS=0
+NETPOL_CALLS=0
+QUARANTINE_CALLS=0
+WATCH_LOOP_CALLS=0
+CLEANUP_CALLS=0
+DETECT_CALLS=0
+
+wg() {{ return 1; }}
+ensure_source_blackhole_rule() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+ensure_fallback_blackhole_rule() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+ensure_k3s_egress_guard() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+ensure_k3s_emergency_network_policy() {{ NETPOL_CALLS=$((NETPOL_CALLS + 1)); return 0; }}
+ensure_k3s_subnet_quarantine() {{ QUARANTINE_CALLS=$((QUARANTINE_CALLS + 1)); return 0; }}
+ensure_k3s_pre_discovery_containment() {{ QUARANTINE_CALLS=$((QUARANTINE_CALLS + 1)); return 0; }}
+k3s_pod_watch_loop() {{ WATCH_LOOP_CALLS=$((WATCH_LOOP_CALLS + 1)); }}
+cleanup_dataplane() {{ CLEANUP_CALLS=$((CLEANUP_CALLS + 1)); return 0; }}
+detect_lightning_container() {{ DETECT_CALLS=$((DETECT_CALLS + 1)); return 0; }}
+ensure_ipv6_containment() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+ensure_docker_network() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+ensure_container_attached() {{ GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }}
+
+ensure_reconcile_kill_switch
+[[ "${{KILL_SWITCH_ARMED}}" == "false" ]]
+[[ "${{GUARD_CALLS}}" == "0" ]]
+
+K3S_ENABLE_BACKGROUND_WATCHER="true"
+ensure_k3s_pod_watcher_running
+[[ "${{WATCH_LOOP_CALLS}}" == "0" ]]
+[[ -z "${{K3S_WATCHER_PID}}" ]]
+
+reconcile_once "startup"
+[[ "${{KILL_SWITCH_ARMED}}" == "false" ]]
+[[ "${{GUARD_CALLS}}" == "0" ]]
+[[ "${{NETPOL_CALLS}}" == "0" ]]
+[[ "${{QUARANTINE_CALLS}}" == "0" ]]
+[[ "${{DETECT_CALLS}}" == "0" ]]
+jq -e '.kill_switch_armed == false and .rules_synced == false and .last_error == "No WireGuard config found in /data"' "${{STATE_FILE}}" >/dev/null
+
+reconcile_once "periodic" "req-standby-1"
+jq -e '.request_id == "req-standby-1" and .changed == false and .state.kill_switch_armed == false' "${{RECONCILE_RESULT_DIR}}/req-standby-1.json" >/dev/null
+
+touch "${{RESTART_TRIGGER}}"
+handle_restart_trigger
+[[ "${{KILL_SWITCH_ARMED}}" == "false" ]]
+[[ "${{GUARD_CALLS}}" == "0" ]]
+[[ "${{NETPOL_CALLS}}" == "0" ]]
+[[ "${{QUARANTINE_CALLS}}" == "0" ]]
+
+preserve_fail_closed_dataplane "shutdown"
+[[ "${{GUARD_CALLS}}" == "0" ]]
+[[ "${{NETPOL_CALLS}}" == "0" ]]
+[[ "${{QUARANTINE_CALLS}}" == "0" ]]
+[[ "${{CLEANUP_CALLS}}" == "0" ]]
+
+(
+    cleanup
+)
+[[ "$?" == "0" ]]
+[[ "${{GUARD_CALLS}}" == "0" ]]
+[[ "${{NETPOL_CALLS}}" == "0" ]]
+[[ "${{QUARANTINE_CALLS}}" == "0" ]]
+[[ "${{CLEANUP_CALLS}}" == "0" ]]
+[[ ! -e "${{KILL_SWITCH_ARMED_STATE_FILE}}" ]]
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_kill_switch_auto_arms_on_config_migration_backup_state_and_wg_signals():
+    result = run_bash(
+        r'''
+# 1. Standby transitions to armed as soon as /data/tunnelsats.conf is created
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.wg.state.json"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+    detect_lightning_container() { return 1; }
+    cleanup_dataplane() { return 0; }
+
+    reconcile_once "startup"
+    [[ "${KILL_SWITCH_ARMED}" == "false" ]]
+    [[ "${GUARD_CALLS}" == "0" ]]
+
+    printf '[Interface]\nPrivateKey = abc\n' > "${WG_DATA_DIR}/tunnelsats.conf"
+    if reconcile_once "periodic"; then
+        exit 1
+    fi
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+    [[ "$(stat -c %a "${KILL_SWITCH_ARMED_STATE_FILE}")" == "600" ]]
+    jq -e '.version == 1 and .armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+    jq -e '.kill_switch_armed == true' "${STATE_FILE}" >/dev/null
+)
+
+# 2. Legacy /migration_source/tunnelsats.conf arms kill switch before migration copy
+(
+    rm -f "${WG_DATA_DIR}"/tunnelsats* "${KILL_SWITCH_ARMED_STATE_FILE}"
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="false"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+    ensure_expected_docker_fallback_blackhole() { return 0; }
+
+    printf '[Interface]\nPrivateKey = legacy\n' > "${MIGRATION_SOURCE_DIR}/tunnelsats.conf"
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+    jq -e '.version == 1 and .armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+)
+
+# 3. Backup file in WG_DATA_DIR arms kill switch
+(
+    rm -f "${MIGRATION_SOURCE_DIR}"/tunnelsats* "${KILL_SWITCH_ARMED_STATE_FILE}"
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+    printf '[Interface]\n' > "${WG_DATA_DIR}/tunnelsats.conf.bak.1"
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+)
+
+# 4. Pre-existing v3.6.0 dataplane state files each independently arm kill switch
+for state_var in DOCKER_TARGET_STATE_FILE DOCKER_POLICY_STATE_FILE IPV6_POLICY_STATE_FILE K3S_POLICY_STATE_FILE; do
+    (
+        rm -f "${WG_DATA_DIR}"/tunnelsats* "${KILL_SWITCH_ARMED_STATE_FILE}" \
+            "${DOCKER_TARGET_STATE_FILE}" "${DOCKER_POLICY_STATE_FILE}" \
+            "${IPV6_POLICY_STATE_FILE}" "${K3S_POLICY_STATE_FILE}"
+        source "$1"
+        K3S_MODE="false"
+        SECURE_MODE="true"
+        GUARD_CALLS=0
+        wg() { return 1; }
+        ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+        printf '{}\n' > "${!state_var}"
+        ensure_reconcile_kill_switch
+        [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+        [[ "${GUARD_CALLS}" -gt 0 ]]
+    )
+done
+
+# 5. Active WireGuard interface arms kill switch
+(
+    rm -f "${WG_DATA_DIR}"/tunnelsats* "${KILL_SWITCH_ARMED_STATE_FILE}" \
+        "${DOCKER_TARGET_STATE_FILE}" "${DOCKER_POLICY_STATE_FILE}" \
+        "${IPV6_POLICY_STATE_FILE}" "${K3S_POLICY_STATE_FILE}"
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    GUARD_CALLS=0
+    wg() { [[ "$1 $2" == "show ${WG_IFACE}" ]]; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+)
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_lightning_config_markers_arm_on_active_directives_and_ignore_comments():
+    result = run_bash(
+        r'''
+# 1. Commented-out Restore lines, semicolon comments, inline comments, and unrelated directives must NOT arm
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+    cat > "${LND_CONFIG_PATH}" <<'EOF'
+[Application Options]
+alias=tunnelsats.com-fan
+# TunnelSats disabled managed: externalhosts=us3.tunnelsats.com:23217
+; externalhosts=eu1.tunnelsats.com:23217
+   # externalip=10.9.9.9:9735
+externalhosts=example.com:9735 # old us3.tunnelsats.com:23217
+externalip=10.9.9.90:9735 ; not 10.9.9.9
+EOF
+    mkdir -p "${CLN_DATA_DIR}/bitcoin"
+    cat > "${CLN_DATA_DIR}/bitcoin/config" <<'EOF'
+# TunnelSats disabled managed: announce-addr=us3.tunnelsats.com:23217
+announce-addr=node.example.org:9735 # us3.tunnelsats.com
+EOF
+
+    if lightning_config_has_tunnelsats_markers; then
+        exit 1
+    fi
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "false" ]]
+    [[ "${GUARD_CALLS}" == "0" ]]
+)
+
+# 2. Active LND markers (case-insensitive tunnelsats.com and 10.9.9.9) arm kill switch
+for marker_line in \
+    "externalhosts=US3.TUNNELSATS.COM:23217" \
+    "tlsextradomain = eu2.tunnelsats.com" \
+    "externalip=10.9.9.9:9735"; do
+    (
+        rm -f "${KILL_SWITCH_ARMED_STATE_FILE}" "${LND_CONFIG_PATH}" "${CLN_DATA_DIR}/config" "${CLN_DATA_DIR}/bitcoin/config"
+        source "$1"
+        K3S_MODE="false"
+        SECURE_MODE="true"
+        GUARD_CALLS=0
+        wg() { return 1; }
+        ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+        printf '[Application Options]\n%s\n' "${marker_line}" > "${LND_CONFIG_PATH}"
+        lightning_config_has_tunnelsats_markers
+        ensure_reconcile_kill_switch
+        [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+        [[ "${GUARD_CALLS}" -gt 0 ]]
+    )
+done
+
+# 3. Active CLN markers in root and network subdirectory config files arm kill switch
+for cln_spec in \
+    "${CLN_DATA_DIR}/config|announce-addr=10.9.9.9:9735" \
+    "${CLN_DATA_DIR}/bitcoin/config|announce-addr=us3.tunnelsats.com:23217"; do
+    cln_path="${cln_spec%%|*}"
+    cln_line="${cln_spec#*|}"
+    (
+        rm -f "${KILL_SWITCH_ARMED_STATE_FILE}" "${LND_CONFIG_PATH}" "${CLN_DATA_DIR}/config" "${CLN_DATA_DIR}/bitcoin/config"
+        source "$1"
+        K3S_MODE="false"
+        SECURE_MODE="true"
+        GUARD_CALLS=0
+        wg() { return 1; }
+        ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+        mkdir -p "$(dirname "${cln_path}")"
+        printf '%s\n' "${cln_line}" > "${cln_path}"
+        lightning_config_has_tunnelsats_markers
+        ensure_reconcile_kill_switch
+        [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+        [[ "${GUARD_CALLS}" -gt 0 ]]
+    )
+done
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_armed_latch_persists_across_config_deletion_and_fails_closed():
+    result = run_bash(
+        r'''
+# Arm from WireGuard config, then delete the config completely.
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { return 0; }
+    printf '[Interface]\nPrivateKey = abc\n' > "${WG_DATA_DIR}/tunnelsats.conf"
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+)
+
+rm -f "${WG_DATA_DIR}/tunnelsats.conf"
+
+# Subsequent startup kill switch, periodic reconcile, and SIGTERM cleanup MUST stay fail-closed.
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.deleted.state.json"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+    detect_lightning_container() { return 0; }
+    ensure_ipv6_containment() { return 0; }
+    ipv6_containment_is_synced() { return 0; }
+    ensure_docker_network() { return 0; }
+    ensure_container_attached() { return 0; }
+    resolve_bridge_name() { return 0; }
+    cleanup_dataplane() { return 0; }
+
+    ensure_reconcile_kill_switch
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" == "2" ]]
+
+    GUARD_CALLS=0
+    if reconcile_once "periodic"; then
+        exit 1
+    fi
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+    jq -e '.kill_switch_armed == true and .rules_synced == false and .last_error == "No WireGuard config found in /data"' "${STATE_FILE}" >/dev/null
+
+    GUARD_CALLS=0
+    (
+        cleanup
+    )
+    [[ "$?" == "0" ]]
+    # Subshell cannot propagate GUARD_CALLS back, so verify directly via preserve_fail_closed_dataplane too.
+    preserve_fail_closed_dataplane "shutdown"
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+)
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_corrupted_armed_state_or_unreadable_lightning_config_fails_closed():
+    result = run_bash(
+        r'''
+# 1. Corrupted JSON in KILL_SWITCH_ARMED_STATE_FILE fails closed on startup, reconcile, and cleanup
+for bad_payload in '{not-json' '{"version":2,"armed":false}' '{"version":1,"armed":"false"}'; do
+    (
+        printf '%s\n' "${bad_payload}" > "${KILL_SWITCH_ARMED_STATE_FILE}"
+        source "$1"
+        K3S_MODE="false"
+        SECURE_MODE="true"
+        STATE_FILE="${POLICY_TEST_STATE_FILE}.corrupt.state.json"
+        GUARD_CALLS=0
+        wg() { return 1; }
+        ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+        cleanup_dataplane() { return 0; }
+
+        if ensure_reconcile_kill_switch; then
+            exit 1
+        fi
+        [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+        [[ "${GUARD_CALLS}" == "2" ]]
+
+        GUARD_CALLS=0
+        KILL_SWITCH_ARMED="false"
+        KILL_SWITCH_ARMED_STATE_LOADED="false"
+        if reconcile_once "periodic"; then
+            exit 1
+        fi
+        [[ "${GUARD_CALLS}" -gt 0 ]]
+        jq -e '.kill_switch_armed == true and .rules_synced == false' "${STATE_FILE}" >/dev/null
+
+        set +e
+        (
+            KILL_SWITCH_ARMED="false"
+            KILL_SWITCH_ARMED_STATE_LOADED="false"
+            cleanup
+        )
+        cleanup_rc=$?
+        set -e
+        [[ "${cleanup_rc}" -ne 0 ]]
+    )
+done
+
+# 2. Unreadable existing Lightning config fails closed (return 2 -> armed + error)
+(
+    rm -f "${KILL_SWITCH_ARMED_STATE_FILE}" "${LND_CONFIG_PATH}"
+    mkdir -p "${LND_CONFIG_PATH}"
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    GUARD_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+
+    rc=0
+    lightning_config_has_tunnelsats_markers || rc=$?
+    [[ "${rc}" == "2" ]]
+
+    if ensure_reconcile_kill_switch; then
+        exit 1
+    fi
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" == "2" ]]
+)
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_decommission_disarms_latch_and_takes_precedence_over_leftover_config():
+    result = run_bash(
+        r'''
+printf '[Interface]\nPrivateKey = abc\n' > "${WG_DATA_DIR}/tunnelsats.conf"
+
+# 1. Rollback check: if persist_kill_switch_armed_state fails during decommission, both flags roll back
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.decomm_rb.state.json"
+    KILL_SWITCH_ARMED="true"
+    persist_kill_switch_armed_state
+    iptables() { return 0; }
+    ip6tables() { return 0; }
+    ip() { return 0; }
+    wg() { return 1; }
+    cleanup_dataplane() { return 0; }
+    persist_kill_switch_armed_state() {
+        LAST_ERROR="Simulated armed state write failure"
+        return 1
+    }
+
+    if decommission_dataplane; then
+        exit 1
+    fi
+    [[ "${DECOMMISSIONED}" == "false" ]]
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    jq -e '.decommissioned == false' "${DECOMMISSION_STATE_FILE}" >/dev/null
+    jq -e '.armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+)
+
+# 2. Successful decommission sets DECOMMISSIONED=true AND KILL_SWITCH_ARMED=false
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.decomm_ok.state.json"
+    KILL_SWITCH_ARMED="true"
+    persist_kill_switch_armed_state
+    iptables() { return 0; }
+    ip6tables() { return 0; }
+    ip() { return 0; }
+    wg() { return 1; }
+    cleanup_dataplane() { return 0; }
+
+    decommission_dataplane
+    [[ "${DECOMMISSIONED}" == "true" ]]
+    [[ "${KILL_SWITCH_ARMED}" == "false" ]]
+    jq -e '.version == 1 and .decommissioned == true' "${DECOMMISSION_STATE_FILE}" >/dev/null
+    jq -e '.version == 1 and .armed == false' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+    jq -e '.decommissioned == true and .kill_switch_armed == false' "${STATE_FILE}" >/dev/null
+)
+
+# 3. Leftover tunnelsats.conf must NOT re-arm while DECOMMISSIONED=true across startup/periodic/cleanup
+(
+    source "$1"
+    K3S_MODE="false"
+    SECURE_MODE="true"
+    STATE_FILE="${POLICY_TEST_STATE_FILE}.decomm_stay.state.json"
+    GUARD_CALLS=0
+    CLEANUP_CALLS=0
+    wg() { return 1; }
+    ensure_source_blackhole_rule() { GUARD_CALLS=$((GUARD_CALLS + 1)); return 0; }
+    cleanup_dataplane() { CLEANUP_CALLS=$((CLEANUP_CALLS + 1)); return 0; }
+    detect_lightning_container() { return 1; }
+
+    ensure_reconcile_kill_switch
+    [[ "${DECOMMISSIONED}" == "true" ]]
+    [[ "${KILL_SWITCH_ARMED}" == "false" ]]
+    [[ "${GUARD_CALLS}" == "0" ]]
+
+    reconcile_once "startup"
+    reconcile_once "periodic"
+    [[ "${KILL_SWITCH_ARMED}" == "false" ]]
+    [[ "${GUARD_CALLS}" == "0" ]]
+
+    # Explicit manual reconcile clears DECOMMISSIONED, detects tunnelsats.conf, and re-arms!
+    if reconcile_once "manual"; then
+        exit 1
+    fi
+    [[ "${DECOMMISSIONED}" == "false" ]]
+    [[ "${KILL_SWITCH_ARMED}" == "true" ]]
+    [[ "${GUARD_CALLS}" -gt 0 ]]
+    jq -e '.armed == true' "${KILL_SWITCH_ARMED_STATE_FILE}" >/dev/null
+)
+''',
+        armed=False,
+    )
+    assert result.returncode == 0, result.stderr
+
 
 
 

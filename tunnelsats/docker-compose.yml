@@ -1,5 +1,3 @@
-version: "3.7"
-
 services:
   app_proxy:
     # Umbrel injects the authenticated proxy image and public port. Its target
@@ -10,7 +8,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   tunnelsats-web:
-    image: tunnelsats/ts-umbrel-app:3.6.0
+    image: tunnelsats/ts-umbrel-app:3.6.1
     container_name: tunnelsats-web
     restart: on-failure
     user: "1000:1000"
@@ -25,13 +23,13 @@ services:
       - MANAGEMENT_BROWSER_SECURITY_ENABLED=true
       - MANAGEMENT_TRUSTED_PROXY_HOST=app_proxy
     volumes:
-      # Subscription metadata/configs are user-owned application state. The web
-      # service has no host, Docker, Lightning, or dataplane access.
       - ${APP_DATA_DIR}/../tunnelsats-data:/data
       - ${APP_DATA_DIR}/runtime:/run/tunnelsats
 
+  # Host network and NET_ADMIN are needed to create the WireGuard interface and
+  # the routing and firewall rules that send Lightning traffic through it
   tunnelsats-daemon:
-    image: tunnelsats/ts-umbrel-app:3.6.0
+    image: tunnelsats/ts-umbrel-app:3.6.1
     container_name: tunnelsats-daemon
     restart: on-failure
     network_mode: "host"
@@ -47,13 +45,12 @@ services:
       - SECURE_MODE=${SECURE_MODE:-false}
       - MANAGEMENT_BROWSER_SECURITY_ENABLED=false
     volumes:
-      # Persistent application state directory
       - ${APP_DATA_DIR}/../tunnelsats-data:/data
+      - ${APP_DATA_DIR}/runtime:/run/tunnelsats
       # Read-only legacy config source for one-time upgrades from older layouts
       - ${APP_DATA_DIR}/.:/migration_source:ro
-      # Lightning Node config mounts (Graceful discovery via relative paths)
+      # Lightning Node config mounts (graceful discovery via relative paths)
       - ${APP_DATA_DIR}/../lightning/data/lnd:/lightning-data/lnd
       - ${APP_DATA_DIR}/../core-lightning/data/lightningd:/lightning-data/cln
-      # Host socket (For container detection & Docker API access)
+      # Host socket for container detection and Docker API access (Standard Mode)
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${APP_DATA_DIR}/runtime:/run/tunnelsats

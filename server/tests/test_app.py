@@ -1910,10 +1910,23 @@ class TestDataplaneAndRegressionFixes:
         assert data['rules_synced'] is False
         assert data['ipv4_rules_synced'] is False
         assert data['ipv6_rules_synced'] is False
+        assert data['kill_switch_armed'] is False
         assert data['ipv6_policy'] == 'deny'
         assert data['target_ipv6_addresses'] == []
         assert data['target_ipv6_default_route'] is False
         assert data['last_error'] is None
+
+    def test_local_status_exposes_kill_switch_armed_from_dataplane_state(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = os.path.join(tmp_dir, 'tunnelsats_state.json')
+            for expected in (False, True):
+                with open(state_path, 'w', encoding='utf-8') as f:
+                    json.dump({'kill_switch_armed': expected, 'rules_synced': False}, f)
+                with patch('app.STATE_FILE', state_path):
+                    res = client.get('/api/local/status')
+                assert res.status_code == 200
+                data = json.loads(res.data)
+                assert data['kill_switch_armed'] is expected
 
     @patch('app.docker_api')
     def test_status_queries_only_running_containers_for_ips(self, mock_docker_api, client):

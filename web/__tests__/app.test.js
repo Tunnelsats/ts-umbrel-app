@@ -2606,6 +2606,38 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(document.getElementById('view-buy').classList.contains('hidden')).toBe(false);
     });
 
+    test('standby install without a subscription reassures that clearnet networking is untouched', async () => {
+        mockStatus({
+            vpn_active: false, lnd_detected: true, wg_status: 'Disconnected', target_impl: 'lnd',
+            rules_synced: false, kill_switch_armed: false,
+            last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config',
+            announcement_diagnostics: []
+        });
+        await window.fetchStatus();
+
+        expect(document.getElementById('txt-routing-status').textContent).toBe('No Subscription Installed');
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('no_wireguard_config');
+        expect(help.textContent).toContain('Subscribe / Import');
+        expect(help.textContent).toContain('clearnet networking remains untouched');
+        expect(document.getElementById('btn-open-subscribe')).toBeTruthy();
+    });
+
+    test('armed install missing its config does not claim clearnet networking is untouched', async () => {
+        mockStatus({
+            vpn_active: false, lnd_detected: true, wg_status: 'Disconnected', target_impl: 'lnd',
+            rules_synced: false, kill_switch_armed: true,
+            last_error: 'No WireGuard config found in /data', last_error_code: 'no_wireguard_config',
+            announcement_diagnostics: []
+        });
+        await window.fetchStatus();
+
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('no_wireguard_config');
+        expect(help.textContent).toContain('Subscribe / Import');
+        expect(help.textContent).not.toContain('clearnet networking remains untouched');
+    });
+
     function waitingStatus(targetImpl, error) {
         return {
             vpn_active: true, wg_status: 'Connected', configs_found: [], secure_mode: false,

@@ -5,7 +5,7 @@ APP_NAME="tunnelsats"
 WG_IFACE="tunnelsatsv2"
 WG_CONF_PATH="/etc/wireguard/${WG_IFACE}.conf"
 DOCKER_SOCK="/var/run/docker.sock"
-STATE_FILE="/tmp/tunnelsats_state.json"
+STATE_FILE="${STATE_FILE:-/tmp/tunnelsats_state.json}"
 RECONCILE_TRIGGER_DIR="/tmp/tunnelsats_reconcile_trigger.d"
 RECONCILE_RESULT_DIR="/tmp/tunnelsats_reconcile_result.d"
 RECONCILE_TRIGGER_LEGACY="/tmp/tunnelsats_reconcile_trigger"
@@ -13,6 +13,10 @@ RECONCILE_RESULT_LEGACY="/tmp/tunnelsats_reconcile_result.json"
 DECOMMISSION_TRIGGER_DIR="/tmp/tunnelsats_decommission_trigger.d"
 DECOMMISSION_RESULT_DIR="/tmp/tunnelsats_decommission_result.d"
 RESTART_TRIGGER="/tmp/tunnelsats_restart_trigger"
+WG_DATA_DIR="${WG_DATA_DIR:-/data}"
+MIGRATION_SOURCE_DIR="${MIGRATION_SOURCE_DIR:-/migration_source}"
+LND_CONFIG_PATH="${LND_CONFIG_PATH:-/lightning-data/lnd/lnd.conf}"
+CLN_DATA_DIR="${CLN_DATA_DIR:-/lightning-data/cln}"
 TUNNELSATS_META_PATH="${TUNNELSATS_META_PATH:-/data/tunnelsats-meta.json}"
 DOCKER_NETWORK_NAME="docker-tunnelsats"
 DOCKER_NETWORK_SUBNET="10.9.9.0/25"
@@ -26,6 +30,7 @@ DOCKER_TARGET_STATE_FILE="${DOCKER_TARGET_STATE_FILE:-/data/tunnelsats-docker-ta
 IPV6_POLICY_STATE_FILE="${IPV6_POLICY_STATE_FILE:-/data/tunnelsats-ipv6-policy-sources.json}"
 K3S_POLICY_STATE_FILE="${K3S_POLICY_STATE_FILE:-/data/tunnelsats-k3s-policy-state.json}"
 DECOMMISSION_STATE_FILE="${DECOMMISSION_STATE_FILE:-/data/tunnelsats-decommissioned.json}"
+KILL_SWITCH_ARMED_STATE_FILE="${KILL_SWITCH_ARMED_STATE_FILE:-${WG_DATA_DIR}/tunnelsats-armed.json}"
 IPV6_POLICY_TABLE="${IPV6_POLICY_TABLE:-51821}"
 IPV6_TUNNEL_RULE_PREF="${IPV6_TUNNEL_RULE_PREF:-32764}"
 IPV6_BLACKHOLE_RULE_PREF="${IPV6_BLACKHOLE_RULE_PREF:-32765}"
@@ -279,6 +284,8 @@ IPV6_RULES_SYNCED="false"
 DNS_PROTECTED="false"
 DECOMMISSIONED="${DECOMMISSIONED:-false}"
 DECOMMISSION_STATE_LOADED="false"
+KILL_SWITCH_ARMED="${KILL_SWITCH_ARMED:-false}"
+KILL_SWITCH_ARMED_STATE_LOADED="false"
 LAST_ERROR=""
 POLICY_CHANGED="0"
 NAT_CHANGED="0"
@@ -350,6 +357,13 @@ write_state() {
         decommissioned_json="false"
     fi
 
+    local kill_switch_armed_json
+    if [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
+        kill_switch_armed_json="true"
+    else
+        kill_switch_armed_json="false"
+    fi
+
     local dns_protected_json="false"
     if [[ "${K3S_MODE}" == "true" ]] && [ "${DNS_PROTECTED:-false}" = "true" ]; then
         dns_protected_json="true"
@@ -373,6 +387,7 @@ write_state() {
         --argjson ipv6_rules_synced "${IPV6_RULES_SYNCED}" \
         --argjson dns_protected "${dns_protected_json}" \
         --argjson decommissioned "${decommissioned_json}" \
+        --argjson kill_switch_armed "${kill_switch_armed_json}" \
         --arg ipv6_policy "deny" \
         --argjson target_ipv6_addresses "${target_ipv6_addresses_json}" \
         --argjson target_ipv6_default_route "${TARGET_HAS_IPV6_DEFAULT_ROUTE}" \
@@ -393,6 +408,7 @@ write_state() {
             ipv6_rules_synced: $ipv6_rules_synced,
             dns_protected: $dns_protected,
             decommissioned: $decommissioned,
+            kill_switch_armed: $kill_switch_armed,
             ipv6_policy: $ipv6_policy,
             target_ipv6_addresses: $target_ipv6_addresses,
             target_ipv6_default_route: $target_ipv6_default_route,
@@ -917,6 +933,203 @@ persist_decommissioned_state() {
         return 1
     fi
     DECOMMISSION_STATE_LOADED="true"
+}
+
+load_kill_switch_armed_state() {
+    [ "${KILL_SWITCH_ARMED_STATE_LOADED}" = "false" ] || return 0
+
+    local state armed
+    if [ ! -e "${KILL_SWITCH_ARMED_STATE_FILE}" ] && [ ! -L "${KILL_SWITCH_ARMED_STATE_FILE}" ]; then
+        KILL_SWITCH_ARMED_STATE_LOADED="true"
+        return 0
+    fi
+    state=$(cat "${KILL_SWITCH_ARMED_STATE_FILE}" 2>/dev/null) || {
+        LAST_ERROR="Failed to read kill switch armed state"
+        return 1
+    }
+    if ! printf '%s' "${state}" | jq -e '
+        .version == 1 and
+        (.armed | type == "boolean")
+    ' >/dev/null 2>&1; then
+        LAST_ERROR="Kill switch armed state is malformed"
+        return 1
+    fi
+    armed=$(printf '%s' "${state}" | jq -r '.armed')
+    KILL_SWITCH_ARMED="${armed}"
+    KILL_SWITCH_ARMED_STATE_LOADED="true"
+}
+
+persist_kill_switch_armed_state() {
+    local state_dir state_tmp armed_json
+    state_dir="${KILL_SWITCH_ARMED_STATE_FILE%/*}"
+    [ "${state_dir}" != "${KILL_SWITCH_ARMED_STATE_FILE}" ] || state_dir="."
+    mkdir -p "${state_dir}" || {
+        LAST_ERROR="Failed to create kill switch armed state directory"
+        return 1
+    }
+    state_tmp=$(mktemp "${KILL_SWITCH_ARMED_STATE_FILE}.tmp.XXXXXX") || {
+        LAST_ERROR="Failed to create temporary kill switch armed state"
+        return 1
+    }
+    if [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
+        armed_json="true"
+    else
+        armed_json="false"
+    fi
+    if ! jq -n \
+        --argjson armed "${armed_json}" \
+        '{version: 1, armed: $armed}' > "${state_tmp}" || \
+       ! chmod 600 "${state_tmp}" || \
+       ! mv -f "${state_tmp}" "${KILL_SWITCH_ARMED_STATE_FILE}"; then
+        rm -f "${state_tmp}"
+        LAST_ERROR="Failed to persist kill switch armed state"
+        return 1
+    fi
+    KILL_SWITCH_ARMED_STATE_LOADED="true"
+}
+
+lightning_config_has_tunnelsats_markers() {
+    local cfg awk_rc
+    local -a config_paths=()
+    [ -n "${LND_CONFIG_PATH:-}" ] && config_paths+=("${LND_CONFIG_PATH}")
+    if [ -n "${CLN_DATA_DIR:-}" ]; then
+        config_paths+=(
+            "${CLN_DATA_DIR}/config"
+            "${CLN_DATA_DIR}/bitcoin/config"
+            "${CLN_DATA_DIR}/testnet/config"
+            "${CLN_DATA_DIR}/signet/config"
+            "${CLN_DATA_DIR}/regtest/config"
+        )
+    fi
+
+    for cfg in "${config_paths[@]}"; do
+        [ -e "${cfg}" ] || [ -L "${cfg}" ] || continue
+        if [ -d "${cfg}" ]; then
+            LAST_ERROR="Lightning config path is a directory, not a readable file: ${cfg}"
+            return 2
+        fi
+        if [ ! -r "${cfg}" ] || ! cat "${cfg}" >/dev/null 2>&1; then
+            LAST_ERROR="Failed to read Lightning config ${cfg}"
+            return 2
+        fi
+        awk_rc=0
+        awk '
+            {
+                line = $0
+                sub(/\r$/, "", line)
+                sub(/[[:space:]]*[#;].*$/, "", line)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                if (line == "") next
+                eq = index(line, "=")
+                if (eq == 0) next
+                key = tolower(substr(line, 1, eq - 1))
+                val = tolower(substr(line, eq + 1))
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+                if (key == "externalhosts" || key == "announce-addr" || key == "tlsextradomain" || key == "externalip") {
+                    if (val ~ /(^|[^a-z0-9-])tunnelsats\.com([^a-z0-9-]|$)/ || val ~ /(^|[^0-9.])10\.9\.9\.9([^0-9.]|$)/) {
+                        found = 1
+                        exit 0
+                    }
+                }
+            }
+            END {
+                if (!found) exit 1
+            }
+        ' "${cfg}" || awk_rc=$?
+        if [ "${awk_rc}" -eq 0 ]; then
+            return 0
+        elif [ "${awk_rc}" -ne 1 ]; then
+            LAST_ERROR="Failed to inspect Lightning config ${cfg}"
+            return 2
+        fi
+    done
+
+    return 1
+}
+
+has_arming_signal() {
+    local wg_cfg marker_rc
+
+    if [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
+        return 0
+    fi
+
+    wg_cfg="$(read_wg_config_path)"
+    if [ -n "${wg_cfg}" ]; then
+        return 0
+    fi
+
+    if [ -d "${MIGRATION_SOURCE_DIR}" ] && \
+       [ -n "$(find "${MIGRATION_SOURCE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name 'tunnelsats*.conf' -print -quit 2>/dev/null || true)" ]; then
+        return 0
+    fi
+
+    if [ -d "${WG_DATA_DIR}" ] && \
+       [ -n "$(find "${WG_DATA_DIR}" -maxdepth 1 \( -type f -o -type l \) -name 'tunnelsats*.conf.bak*' -print -quit 2>/dev/null || true)" ]; then
+        return 0
+    fi
+
+    # Legacy v3.6.0 upgrade heuristic: only auto-arm from prior dataplane state
+    # files when no explicit armed-state latch file exists yet, so empty state
+    # files retained after decommission do not falsely re-arm on restart.
+    if [ ! -e "${KILL_SWITCH_ARMED_STATE_FILE}" ] && [ ! -L "${KILL_SWITCH_ARMED_STATE_FILE}" ]; then
+        if [ -e "${DOCKER_TARGET_STATE_FILE}" ] || \
+           [ -e "${DOCKER_POLICY_STATE_FILE}" ] || \
+           [ -e "${IPV6_POLICY_STATE_FILE}" ] || \
+           [ -e "${K3S_POLICY_STATE_FILE}" ]; then
+            return 0
+        fi
+    fi
+
+    if wg show "${WG_IFACE}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    marker_rc=0
+    lightning_config_has_tunnelsats_markers || marker_rc=$?
+    if [ "${marker_rc}" -eq 0 ]; then
+        return 0
+    elif [ "${marker_rc}" -eq 2 ]; then
+        return 2
+    fi
+
+    return 1
+}
+
+evaluate_kill_switch_arming() {
+    load_decommissioned_state || return 1
+
+    if [ "${KILL_SWITCH_ARMED:-false}" != "true" ] && \
+       { [ -e "${KILL_SWITCH_ARMED_STATE_FILE}" ] || [ -L "${KILL_SWITCH_ARMED_STATE_FILE}" ]; }; then
+        KILL_SWITCH_ARMED_STATE_LOADED="false"
+    fi
+    if ! load_kill_switch_armed_state; then
+        KILL_SWITCH_ARMED="true"
+        return 1
+    fi
+
+    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+        return 0
+    fi
+
+    local signal_rc=0
+    has_arming_signal || signal_rc=$?
+    if [ "${signal_rc}" -eq 2 ]; then
+        KILL_SWITCH_ARMED="true"
+        return 1
+    fi
+    if [ "${signal_rc}" -eq 0 ]; then
+        if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+            KILL_SWITCH_ARMED="true"
+            if ! persist_kill_switch_armed_state; then
+                return 1
+            fi
+            log INFO "kill_switch_armed=true (latched from active configuration or state)"
+        fi
+    fi
+
+    return 0
 }
 
 load_managed_k3s_policy_state() {
@@ -1847,7 +2060,7 @@ read_wg_config_path() {
     # Use ls -1t for flat (non-recursive), time-ordered discovery.
     # grep -v '.bak' explicitly excludes any rotation artifacts (*.conf.bak, *.conf.bak.1, etc.)
     # that server/app.py leaves in the same /data/ directory.
-    mapfile -t files < <(ls -1t /data/tunnelsats*.conf 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true)
+    mapfile -t files < <(ls -1t "${WG_DATA_DIR}"/tunnelsats*.conf 2>/dev/null | grep -E -v '\.bak(\.[0-9]+)*$' || true)
     if [ "${#files[@]}" -gt 1 ]; then
         log WARN "Multiple tunnelsats*.conf files found, using most recent: ${files[0]}"
     fi
@@ -5597,11 +5810,17 @@ ensure_docker_target_kill_switches() {
 
 ensure_reconcile_kill_switch() {
     local include_detected_target="${1:-true}"
+    local arm_rc=0
+    local arm_error=""
     load_decommissioned_state || return 1
     if [[ "${K3S_MODE}" == "true" ]]; then
         load_managed_k3s_policy_state || return 1
     fi
-    if [ "${DECOMMISSIONED:-false}" = "true" ]; then
+    if ! evaluate_kill_switch_arming; then
+        arm_rc=1
+        arm_error="${LAST_ERROR:-Failed to evaluate kill switch armed state}"
+    fi
+    if [ "${arm_rc}" -eq 0 ] && { [ "${DECOMMISSIONED:-false}" = "true" ] || [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; }; then
         return 0
     fi
     if [[ "${K3S_MODE}" == "true" ]]; then
@@ -5621,6 +5840,10 @@ ensure_reconcile_kill_switch() {
                 return 1
             fi
         fi
+        if [ "${arm_rc}" -ne 0 ]; then
+            LAST_ERROR="${arm_error}"
+            return 1
+        fi
         return 0
     fi
 
@@ -5631,6 +5854,10 @@ ensure_reconcile_kill_switch() {
         ensure_source_blackhole_rule \
             "${UMBREL_CLN_IP}" "${KILL_SWITCH_PREF}" \
             "SecureMode: Failed to install CLN reconciliation kill switch" || return 1
+        if [ "${arm_rc}" -ne 0 ]; then
+            LAST_ERROR="${arm_error}"
+            return 1
+        fi
         return 0
     fi
 
@@ -5645,7 +5872,12 @@ ensure_reconcile_kill_switch() {
     fi
 
     if [ "${include_detected_target}" = "true" ] && [ -n "${TARGET_CONTAINER_ID}" ]; then
-        ensure_docker_target_kill_switches
+        ensure_docker_target_kill_switches || return 1
+    fi
+
+    if [ "${arm_rc}" -ne 0 ]; then
+        LAST_ERROR="${arm_error}"
+        return 1
     fi
 }
 
@@ -9344,6 +9576,33 @@ reconcile_once() {
         fi
     fi
 
+    if ! evaluate_kill_switch_arming; then
+        local arm_error="${LAST_ERROR:-Failed to evaluate kill switch armed state}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        DNS_PROTECTED="false"
+        LAST_ERROR="${arm_error}"
+        fail_reconcile_closed "${request_id}"
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+
+    if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+        LAST_ERROR="No WireGuard config found in /data"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        DNS_PROTECTED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_reconcile_result "${request_id}" false
+        fi
+        LAST_RECONCILE_EPOCH="$(date +%s)"
+        log INFO "reconcile_standby reason=${reason} kill_switch_armed=false"
+        return 0
+    fi
+
     if [[ "${K3S_MODE}" == "true" ]] && [ "${K3S_ENABLE_BACKGROUND_WATCHER:-false}" = "true" ]; then
         ensure_k3s_pod_watcher_running
     fi
@@ -9688,6 +9947,10 @@ refresh_k3s_watcher_runtime_state() {
     [ "${K3S_IN_BACKGROUND_WATCHER:-false}" = "true" ] || return 0
     DECOMMISSION_STATE_LOADED="false"
     load_decommissioned_state >/dev/null 2>&1 || true
+    KILL_SWITCH_ARMED_STATE_LOADED="false"
+    if ! load_kill_switch_armed_state >/dev/null 2>&1; then
+        KILL_SWITCH_ARMED="true"
+    fi
     if [ -e "${K3S_POLICY_STATE_FILE}" ]; then
         K3S_POLICY_STATE_LOADED="false"
         DOCKER_TARGET_IP=""
@@ -9880,6 +10143,7 @@ k3s_pod_watch_loop() {
     while true; do
         refresh_k3s_watcher_runtime_state
         if [ "${DECOMMISSIONED:-false}" = "true" ] || \
+           [ "${KILL_SWITCH_ARMED:-false}" != "true" ] || \
            { [ -f "${DECOMMISSION_STATE_FILE}" ] && jq -e '.decommissioned == true' "${DECOMMISSION_STATE_FILE}" >/dev/null 2>&1; }; then
             sleep 1
             continue
@@ -9892,7 +10156,12 @@ k3s_pod_watch_loop() {
 
 ensure_k3s_pod_watcher_running() {
     [[ "${K3S_MODE}" == "true" ]] || return 0
+    load_decommissioned_state >/dev/null 2>&1 || true
     [ "${DECOMMISSIONED:-false}" != "true" ] || return 0
+    if ! load_kill_switch_armed_state >/dev/null 2>&1; then
+        KILL_SWITCH_ARMED="true"
+    fi
+    [ "${KILL_SWITCH_ARMED:-false}" = "true" ] || return 0
     if [ -n "${K3S_WATCHER_PID:-}" ] && kill -0 "${K3S_WATCHER_PID}" >/dev/null 2>&1; then
         return 0
     fi
@@ -9912,6 +10181,15 @@ stop_k3s_pod_watcher() {
 
 preserve_fail_closed_dataplane() {
     local mode="${1:-shutdown}"
+    local arm_rc=0
+    local arm_error=""
+    if ! evaluate_kill_switch_arming; then
+        arm_rc=1
+        arm_error="${LAST_ERROR:-Failed to evaluate kill switch armed state}"
+    fi
+    if [ "${arm_rc}" -eq 0 ] && [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+        return 0
+    fi
     if [[ "${K3S_MODE}" == "true" ]]; then
         load_managed_k3s_policy_state || true
         load_managed_ipv6_policy_state || true
@@ -10022,6 +10300,10 @@ preserve_fail_closed_dataplane() {
             IPV4_RULES_SYNCED="false"
             write_state
             log ERROR "${LAST_ERROR}"
+            return 1
+        fi
+        if [ "${arm_rc}" -ne 0 ]; then
+            LAST_ERROR="${arm_error}"
             return 1
         fi
         return 0
@@ -10251,10 +10533,33 @@ decommission_dataplane() {
         return 1
     fi
 
+    local was_decommissioned="${DECOMMISSIONED:-false}"
+    local was_armed="${KILL_SWITCH_ARMED:-false}"
     DECOMMISSIONED="true"
     if ! persist_decommissioned_state; then
         restore_saved_decommission_ownership
-        DECOMMISSIONED="false"
+        DECOMMISSIONED="${was_decommissioned}"
+        KILL_SWITCH_ARMED="${was_armed}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        DNS_PROTECTED="false"
+        write_state
+        if [ -n "${request_id}" ]; then
+            write_decommission_result "${request_id}" false
+        fi
+        log ERROR "decommission_failed request_id=${request_id:-none} error=${LAST_ERROR}"
+        return 1
+    fi
+
+    KILL_SWITCH_ARMED="false"
+    if ! persist_kill_switch_armed_state; then
+        local disarm_error="${LAST_ERROR:-Failed to persist kill switch armed state}"
+        restore_saved_decommission_ownership
+        DECOMMISSIONED="${was_decommissioned}"
+        persist_decommissioned_state || true
+        KILL_SWITCH_ARMED="${was_armed}"
+        LAST_ERROR="${disarm_error}"
         RULES_SYNCED="false"
         IPV4_RULES_SYNCED="false"
         IPV6_RULES_SYNCED="false"
@@ -10364,6 +10669,11 @@ cleanup() {
     fi
     if [ "${DECOMMISSIONED:-false}" = "true" ]; then
         cleanup_dataplane || rc=$?
+    elif ! evaluate_kill_switch_arming; then
+        preserve_fail_closed_dataplane || rc=$?
+        [ "${rc}" -ne 0 ] || rc=1
+    elif [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+        rc=0
     else
         preserve_fail_closed_dataplane || rc=$?
     fi
@@ -10392,6 +10702,21 @@ handle_restart_trigger() {
         log ERROR "${LAST_ERROR:-Failed to persist decommission state before WireGuard restart}"
         return 1
     fi
+    if ! evaluate_kill_switch_arming; then
+        local arm_error="${LAST_ERROR:-Failed to evaluate kill switch armed state before WireGuard restart}"
+        preserve_fail_closed_dataplane "restart" || true
+        LAST_ERROR="${arm_error}"
+        RULES_SYNCED="false"
+        IPV4_RULES_SYNCED="false"
+        IPV6_RULES_SYNCED="false"
+        write_state
+        log ERROR "${LAST_ERROR}"
+        return 1
+    fi
+    if [ "${KILL_SWITCH_ARMED:-false}" != "true" ]; then
+        reconcile_once "restart" || true
+        return 0
+    fi
     LAST_ERROR="Restart requested; dataplane remains fail-closed"
     if ! preserve_fail_closed_dataplane "restart"; then
         log ERROR "${LAST_ERROR:-Failed to preserve fail-closed dataplane before WireGuard restart}"
@@ -10411,7 +10736,9 @@ main_loop() {
         if [ -n "${API_PID}" ] && ! kill -0 "${API_PID}" >/dev/null 2>&1; then
             LAST_ERROR="Internal management process exited unexpectedly"
             log ERROR "${LAST_ERROR}"
-            fail_reconcile_closed || true
+            if ! evaluate_kill_switch_arming || [ "${KILL_SWITCH_ARMED:-false}" = "true" ]; then
+                fail_reconcile_closed || true
+            fi
             exit 1
         fi
 
@@ -10419,6 +10746,7 @@ main_loop() {
         ensure_decommission_dirs
 
         if [[ "${K3S_MODE}" == "true" ]] && [ "${DECOMMISSIONED:-false}" != "true" ] && \
+           [ "${KILL_SWITCH_ARMED:-false}" = "true" ] && \
            [ "${K3S_ENABLE_BACKGROUND_WATCHER:-false}" = "true" ]; then
             ensure_k3s_pod_watcher_running
         fi
@@ -10465,6 +10793,7 @@ main_loop() {
 
         if [[ "${K3S_MODE}" == "true" ]]; then
             if [ "${DECOMMISSIONED:-false}" != "true" ] && \
+               [ "${KILL_SWITCH_ARMED:-false}" = "true" ] && \
                [ "${K3S_ENABLE_BACKGROUND_WATCHER:-false}" != "true" ] && \
                [ ! -f "${RESTART_TRIGGER}" ] && [ ! -f "${RECONCILE_TRIGGER_LEGACY}" ] && \
                [ -z "$(find "${DECOMMISSION_TRIGGER_DIR}" "${RECONCILE_TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' -print -quit 2>/dev/null)" ]; then
@@ -10507,19 +10836,19 @@ if [[ "${TUNNELSATS_ROLE}" == "daemon" ]]; then
 fi
 
 # Zero-Loss Migration: Safeguard existing users moving to persistent data mounts (Grep ID 3033104615)
-if ! ls /data/tunnelsats*.conf >/dev/null 2>&1 && ls /migration_source/tunnelsats*.conf >/dev/null 2>&1; then
-    log INFO "Legacy configuration detected in migration_source. Promoting to persistent /data mount..."
+if ! ls "${WG_DATA_DIR}"/tunnelsats*.conf >/dev/null 2>&1 && ls "${MIGRATION_SOURCE_DIR}"/tunnelsats*.conf >/dev/null 2>&1; then
+    log INFO "Legacy configuration detected in migration_source. Promoting to persistent ${WG_DATA_DIR} mount..."
 
     migrated_configs=0
     while IFS= read -r -d '' legacy_cfg; do
-        if cp -pn "${legacy_cfg}" /data/ 2>/dev/null; then
+        if cp -pn "${legacy_cfg}" "${WG_DATA_DIR}/" 2>/dev/null; then
             migrated_configs=$((migrated_configs + 1))
         fi
-    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.conf' -print0 2>/dev/null || true)
+    done < <(find "${MIGRATION_SOURCE_DIR}" -maxdepth 1 -type f -name 'tunnelsats*.conf' -print0 2>/dev/null || true)
 
     while IFS= read -r -d '' legacy_bak; do
-        cp -pn "${legacy_bak}" /data/ 2>/dev/null || true
-    done < <(find /migration_source -maxdepth 1 -type f -name 'tunnelsats*.bak*' -print0 2>/dev/null || true)
+        cp -pn "${legacy_bak}" "${WG_DATA_DIR}/" 2>/dev/null || true
+    done < <(find "${MIGRATION_SOURCE_DIR}" -maxdepth 1 -type f -name 'tunnelsats*.bak*' -print0 2>/dev/null || true)
 
     log INFO "Migration complete. Promoted ${migrated_configs} config file(s) to persistent storage."
 fi

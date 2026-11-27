@@ -190,6 +190,10 @@ def test_manifest_declares_both_umbrel_widgets_and_survives_promotion(tmp_path):
     project = tmp_path / "project"
     (project / "scripts").mkdir(parents=True)
     shutil.copy2(repo_root / "scripts" / "sync.sh", project / "scripts" / "sync.sh")
+    shutil.copy2(
+        repo_root / "scripts" / "promote_official_store.py",
+        project / "scripts" / "promote_official_store.py",
+    )
     shutil.copytree(repo_root / "tunnelsats", project / "tunnelsats")
 
     store = tmp_path / "umbrel-apps"

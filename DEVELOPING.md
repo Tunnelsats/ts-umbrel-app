@@ -113,17 +113,22 @@ Dependabot PRs:
 - An open Dependabot PR gets no new run of the workflow until Dependabot pushes to it again (for example a PR opened before the workflow changed). Comment `@dependabot rebase` on it to trigger one.
 
 ### 5. Multi-Repo Release Automation (`promote`)
-We utilize an automated release promotion workflow to maintain total parity between our local repository and the official `umbrel-apps` GitHub fork.
+We utilize an automated release promotion workflow (`scripts/sync.sh promote` -> `scripts/promote_official_store.py`) to maintain total parity between our local repository and the official `getumbrel/umbrel-apps` package (staged via the personal fork `TrezorHannes/umbrel-apps`).
 
-When a new version is merged to `master`:
+When a new version is merged to `master` and its multi-arch Docker image is published on Docker Hub:
 ```bash
-SUBMISSION_URL="https://github.com/getumbrel/umbrel-apps/pull/<PR_NUMBER>" npm run promote
+# Uses default SUBMISSION_URL (https://github.com/getumbrel/umbrel-apps/pull/4919)
+# and defaults UMBREL_APPS_DIR to ../umbrel-apps (your TrezorHannes/umbrel-apps checkout)
+npm run promote
+
+# Override target checkout or submission PR URL if needed:
+UMBREL_APPS_DIR=../umbrel-apps SUBMISSION_URL="https://github.com/getumbrel/umbrel-apps/pull/4919" npm run promote
 ```
-> [!IMPORTANT]
-> The `SUBMISSION_URL` environment variable is required for production promotions to ensure proper provenance and metadata in the app store. Without it, the promotion script will exit with an error.
+> [!NOTE]
+> `SUBMISSION_URL` defaults to `https://github.com/getumbrel/umbrel-apps/pull/4919` (the original TunnelSats submission PR) and remains overridable via environment variable. After running `npm run promote`, commit the updated `tunnelsats/` files on a fresh branch in `TrezorHannes/umbrel-apps`, run `node .tools/lint-apps.mjs tunnelsats --root .`, and open an update PR against `getumbrel/umbrel-apps`.
 
 #### Previewing Changes (Dry-Run)
-You can run a dry-run to preview the files and changes that would be generated without writing anything to the actual monorepo target. In dry-run mode, `SUBMISSION_URL` is optional and will default to a placeholder (`https://github.com/getumbrel/umbrel-apps/pull/CHANGE_ME`) if unset:
+You can run a dry-run to preview the unified diff against your local `umbrel-apps` checkout without writing anything to the target repository:
 ```bash
 # Via npm script
 npm run promote -- --dry-run
@@ -133,18 +138,14 @@ npm run promote -- --dry-run
 ```
 
 **The `promote` automation executes the following sequence:**
-- **Validation**: Enforces that `SUBMISSION_URL` is provided (or defaults to a placeholder in `--dry-run` mode).
-- **Discovery**: Extracts the version from `umbrel-app.yml`.
-- **SHA256 Pinning**: Polls Docker Hub to fetch the official multi-arch digest index and pins it directly into `tunnelsats/docker-compose.yml`, ensuring production immutability.
-- **Monorepo Synchronization**: Recursively forces synchronization (rsync) of the local `tunnelsats/` folder into the target `umbrel-apps` structure.
-- **Metadata Injection**: Independently checks for and injects the `submitter: Tunnelsats` and `submission: <SUBMISSION_URL>` metadata fields into `umbrel-app.yml`.
-- **Hybrid Stripping**: Surgically strips our development absolute GitHub URLs (icons, gallery) from the target `umbrel-app.yml` to maintain Umbrel CDN-first submission protocol compliance.
-- **Two-Service Hardening**: Keeps `app_proxy` pointed at
-  `tunnelsats-web`, pins both image references, and strips development-only
-  privileges only from `tunnelsats-daemon`.
+- **Discovery & Digest Lookup**: Extracts the version from `tunnelsats/umbrel-app.yml` and fetches the published multi-arch `sha256` manifest index digest from Docker Hub (`docker buildx imagetools inspect` with Docker Hub v2 API fallback). Aborts without touching the target repo if lookup fails.
+- **Structural Validation & Staging (`scripts/promote_official_store.py`)**: Parses source `tunnelsats/docker-compose.yml` and `tunnelsats/umbrel-app.yml` with PyYAML, fails closed on unexpected structural drift, renders Official Store manifests into a temporary staging directory, and verifies both generated files round-trip cleanly with `yaml.safe_load` before syncing.
+- **Manifest Parity (`umbrel-app.yml`)**: Injects `storage.dataRoot: data`, preserves user-facing `releaseNotes` for post-launch updates, strips Community Store `icon:`, preserves existing official local `gallery:` entries from `${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml` (falling back to `["1.webp", "2.webp", "3.webp", "4.webp"]`), preserves `widgets` verbatim, and places `submitter: Tunnelsats` and `submission: <SUBMISSION_URL>` at the bottom.
+- **Two-Service Official Hardening (`docker-compose.yml`)**: Removes top-level `version:`, sets `app_proxy` to `APP_HOST: tunnelsats_tunnelsats-web_1` without `PROXY_AUTH_ADD`, digest-pins both service images, strips `container_name`, `NET_RAW`, `apparmor:unconfined`, `migration_source`, and `docker.sock`, hard-pins `SECURE_MODE=true`, mounts `lnd` and `cln` read-only, and writes 0-byte `data/.gitkeep` and `runtime/.gitkeep`.
+- **Atomic Target Sync**: Only after validation succeeds does `sync.sh` run `rsync -av --delete` from the staging directory into `${UMBREL_APPS_DIR}/tunnelsats/`.
 
 > [!TIP]
-> **Pre-Push Hook**: A Git pre-push hook intercepts pushes to `master` and prompts the developer to execute this promotion layer automatically before changes are pushed upstream. Since promotion requires `SUBMISSION_URL`, ensure it is set in your environment if you choose to trigger promotion during `git push` (e.g., `SUBMISSION_URL="https://github.com/..." git push`).
+> **Pre-Push Hook**: A Git pre-push hook intercepts pushes to `master` and prompts the developer to execute `npm run promote` before changes are pushed upstream. Because `SUBMISSION_URL` now defaults to `https://github.com/getumbrel/umbrel-apps/pull/4919`, no extra environment variable is required unless overriding `UMBREL_APPS_DIR` or `SUBMISSION_URL`.
 
 ## Important Files
 

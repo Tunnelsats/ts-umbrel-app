@@ -348,94 +348,62 @@ run_promote() {
         return 1
     fi
 
-    local target_dir="${UMBREL_APPS_DIR}/tunnelsats"
-    if [ "${dry_run}" = "true" ]; then
-        target_dir="/tmp/tunnelsats_promote_dry_run"
-        rm -rf "${target_dir}"
-        mkdir -p "${target_dir}"
-        rsync -a --exclude="/icon.svg" --exclude="/gallery" "${REPO_ROOT}/tunnelsats/" "${target_dir}/"
+    local sub_url="${SUBMISSION_URL:-https://github.com/getumbrel/umbrel-apps/pull/4919}"
+    local existing_manifest="${UMBREL_APPS_DIR}/tunnelsats/umbrel-app.yml"
+    local stage_dir
+    stage_dir="$(mktemp -d)"
+
+    log_info "Generating official-store manifests via scripts/promote_official_store.py..."
+    local promote_status=0
+    if [ -f "${existing_manifest}" ]; then
+        python3 "${REPO_ROOT}/scripts/promote_official_store.py" \
+            --source-dir "${REPO_ROOT}/tunnelsats" \
+            --target-dir "${stage_dir}" \
+            --version "${VERSION#v}" \
+            --digest "${DIGEST}" \
+            --submission-url "${sub_url}" \
+            --existing-manifest "${existing_manifest}" || promote_status=$?
     else
-        log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
-        rsync -av --delete --exclude="/icon.svg" --exclude="/gallery" "${REPO_ROOT}/tunnelsats/" "${UMBREL_APPS_DIR}/tunnelsats/"
+        python3 "${REPO_ROOT}/scripts/promote_official_store.py" \
+            --source-dir "${REPO_ROOT}/tunnelsats" \
+            --target-dir "${stage_dir}" \
+            --version "${VERSION#v}" \
+            --digest "${DIGEST}" \
+            --submission-url "${sub_url}" || promote_status=$?
     fi
 
-    log_info "Pinning image digest and applying official-store hardening in docker-compose.yml..."
-    local target_compose="${target_dir}/docker-compose.yml"
-    sed -E -e "s#(ts-umbrel-app:)v?[^@\" ]+(@sha256:[0-9a-f]{64})?#\1${VERSION#v}@${DIGEST}#" \
-           -e "s/SECURE_MODE=.*/SECURE_MODE=\\\${SECURE_MODE:-true}/" \
-           -e "s#\.\./tunnelsats-data#data#" \
-           -e "/container_name: tunnelsats/d" \
-           -e "/NET_RAW/d" \
-           -e "/security_opt: \[apparmor:unconfined\]/d" \
-           -e 's#(:/lightning-data/lnd)$#\1:ro#' \
-           -e 's#(:/lightning-data/cln)$#\1:ro#' \
-           -e "/# Host socket/d" \
-           -e "/\/var\/run\/docker.sock/d" \
-           -e "/migration_source/d" \
-           -e "/# Read-only legacy/d" \
-           "${target_compose}" > "${target_compose}.tmp" && mv "${target_compose}.tmp" "${target_compose}"
-
-    # Strip scripts dir (verify.sh etc.) — not needed in official store
-    rm -rf "${target_dir}/scripts"
-
-    local target_manifest="${target_dir}/umbrel-app.yml"
-
-    # Strip raw GitHub URLs for monorepo (assets are local)
-    sed -E "s@https://raw.githubusercontent.com/Tunnelsats/ts-umbrel-app/(master|main)/tunnelsats/@@g" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-
-    # Remove trailing period from tagline
-    sed -E 's/^(tagline:.*)\.$/\1/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-
-    # Validate and determine submission URL
-    if [ -z "${SUBMISSION_URL:-}" ]; then
-        if [ "${dry_run}" = "false" ]; then
-            log_error "SUBMISSION_URL environment variable is required for promotion."
-            return 1
-        fi
-        local sub_url="https://github.com/getumbrel/umbrel-apps/pull/CHANGE_ME"
-    else
-        local sub_url="${SUBMISSION_URL}"
+    if [ "${promote_status}" -ne 0 ]; then
+        rm -rf "${stage_dir}"
+        log_error "Official-store promotion failed; target repository was not modified."
+        return "${promote_status}"
     fi
-
-    # Escape special characters for sed replacement to prevent delimiter injection and ampersand expansion
-    local escaped_sub_url="${sub_url//\\/\\\\}"
-    escaped_sub_url="${escaped_sub_url//&/\\&}"
-    escaped_sub_url="${escaped_sub_url//@/\\@}"
-
-    # Inject submitter and submission PR URL (or update if already present)
-    if ! grep -qE "^submitter:" "${target_manifest}"; then
-        sed -E "s@^(website:.*)@\1\\"$'\n'"submitter: Tunnelsats@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-    fi
-    if grep -qE "^submission:" "${target_manifest}"; then
-        sed -E "s@^submission:.*@submission: ${escaped_sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-    else
-        sed -E "s@^(website:.*)@\1\\"$'\n'"submission: ${escaped_sub_url}@" "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-    fi
-
-    # Clear releaseNotes (Must be empty for new app submissions to pass official validation checks)
-    sed -e '/^releaseNotes:/,/^developer:/ { /^releaseNotes:/! { /^developer:/! d; } }' \
-        -e 's/^releaseNotes:.*/releaseNotes: ""/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
-
-    # Clear icon and gallery for monorepo submission (assets must not be committed to the store)
-    sed -e '/^icon:/d' \
-        -e '/^gallery:/,/^path:/ { /^gallery:/! { /^path:/! d; } }' \
-        -e 's/^gallery:.*/gallery: []/' "${target_manifest}" > "${target_manifest}.tmp" && mv "${target_manifest}.tmp" "${target_manifest}"
 
     if [ "${dry_run}" = "true" ]; then
-        log_info "Monorepo files generated in temporary dry-run directory: ${target_dir}."
+        log_info "Monorepo files generated in temporary dry-run directory: ${stage_dir}."
         if [ -d "${UMBREL_APPS_DIR}/tunnelsats" ]; then
             log_info "Comparing against existing files at ${UMBREL_APPS_DIR}/tunnelsats..."
-            diff -urN "${UMBREL_APPS_DIR}/tunnelsats" "${target_dir}" || true
+            diff -urN "${UMBREL_APPS_DIR}/tunnelsats" "${stage_dir}" || true
         else
             log_info "Target directory ${UMBREL_APPS_DIR}/tunnelsats does not exist yet. Showing preview of generated files:"
             log_info "--- docker-compose.yml ---"
-            cat "${target_compose}"
+            cat "${stage_dir}/docker-compose.yml"
             log_info "--- umbrel-app.yml ---"
-            cat "${target_manifest}"
+            cat "${stage_dir}/umbrel-app.yml"
         fi
-        rm -rf "${target_dir}"
+        rm -rf "${stage_dir}"
         log_info "[DRY RUN] Complete."
     else
+        log_info "Synchronizing to official monorepo at ${UMBREL_APPS_DIR}..."
+        local sync_status=0
+        mkdir -p "${UMBREL_APPS_DIR}/tunnelsats" || sync_status=$?
+        if [ "${sync_status}" -eq 0 ]; then
+            rsync -av --delete "${stage_dir}/" "${UMBREL_APPS_DIR}/tunnelsats/" || sync_status=$?
+        fi
+        rm -rf "${stage_dir}"
+        if [ "${sync_status}" -ne 0 ]; then
+            log_error "Failed to synchronize staged files to ${UMBREL_APPS_DIR}/tunnelsats."
+            return "${sync_status}"
+        fi
         log_info "Promotion complete. Commit changes in ${UMBREL_APPS_DIR}."
     fi
 }

@@ -1226,6 +1226,9 @@ function statusHintText(code, status) {
         const otherName = LIGHTNING_IMPL_NAMES[otherLightningImpl(impl)];
         return `Your protected node (${LIGHTNING_IMPL_NAMES[impl]}) is not running. TunnelSats keeps it blocked until it starts. To protect ${otherName} instead, switch the node type.`;
     }
+    if (code === 'no_wireguard_config' && status && typeof status === 'object' && status.kill_switch_armed === false) {
+        return `${STATUS_ERROR_HINTS.no_wireguard_config} Your node is in standby and clearnet networking remains untouched until you activate a subscription.`;
+    }
     return STATUS_ERROR_HINTS[code] || STATUS_ERROR_HINTS.dataplane_error;
 }
 
