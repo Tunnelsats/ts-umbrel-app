@@ -3018,4 +3018,47 @@ describe('Issue #170: actionable status diagnostics', () => {
         expect(card.querySelector('.ts-diag-ssh')).toBeNull();
         expect(card.querySelector('.ts-diag-steps').textContent).toContain(`externalhosts=${EXPECTED}`);
     });
+
+    test('active pref 32762 kill switch renders Dataplane Blocked with dedicated guidance', async () => {
+        const error = 'Temporary reconciliation kill switch (pref 32762) is still blocking 10.9.9.0/25';
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            kill_switch_active: true,
+            last_error: error,
+            last_error_code: 'reconcile_kill_switch_active',
+            announcement_diagnostics: []
+        }));
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Dataplane Blocked');
+        expect(document.getElementById('txt-routing-error').textContent).toBe(error);
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('reconcile_kill_switch_active');
+        expect(help.querySelector('.ts-diag-text').textContent).toContain('pref 32762');
+        expect(help.querySelector('.ts-diag-text').textContent).toContain('outbound clearnet');
+        expect(help.querySelector('.ts-diag-text').textContent).not.toContain('\u2014');
+    });
+
+    test('stale reconciliation heartbeat renders Dataplane Blocked with dedicated guidance', async () => {
+        const error = 'Reconciliation heartbeat is stale (240s old; max 150s)';
+        mockStatus(blockedStatus({
+            secure_mode: false,
+            reconcile_stale: true,
+            reconcile_age_seconds: 240,
+            last_error: error,
+            last_error_code: 'reconcile_stale',
+            announcement_diagnostics: []
+        }));
+        await window.fetchStatus();
+
+        expect(document.getElementById('statusBadge').textContent).not.toBe('Protected');
+        expect(document.getElementById('txt-routing-status').textContent).toBe('Dataplane Blocked');
+        expect(document.getElementById('txt-routing-error').textContent).toBe(error);
+        const help = document.getElementById('status-help-panel');
+        expect(help.dataset.code).toBe('reconcile_stale');
+        expect(help.querySelector('.ts-diag-text').textContent).toContain('reconciliation loop heartbeat');
+        expect(help.querySelector('.ts-diag-text').textContent).toContain('daemon logs');
+        expect(help.querySelector('.ts-diag-text').textContent).not.toContain('\u2014');
+    });
 });

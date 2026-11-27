@@ -43,3 +43,7 @@
 ## [3.6.1]
 
 - Arm the fail-closed kill switch only after a WireGuard subscription or TunnelSats node config is present (keeping fresh installs in non-blocking standby), and align Official Umbrel App Store promotion tooling with PR #6433
+
+## [3.6.2]
+
+- Remove obsolete iptables mangle CONNMARK dependency from Official App Store Secure Mode (fixing UmbrelOS 2.0 + Tailscale native nftables compatibility), add bounded Docker API timeouts, per-cycle reconcile watchdog, steady-state periodic verification without pref 32762 flapping, and fail-closed stale-heartbeat and live pref 32762 status detection

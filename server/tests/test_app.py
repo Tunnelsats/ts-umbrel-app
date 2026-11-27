@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 import requests
 from app import app
@@ -3978,6 +3979,321 @@ def test_k3s_status_exposes_dns_protected_and_withholds_complete_protection_when
             assert protected_res["dns_protected"] is True
             assert protected_res["rules_synced"] is True
             assert protected_res["last_error"] is None
+
+
+class TestIssue202FailClosedStatusReporting:
+    """Issue #202: fail-closed status API for stale heartbeat and active pref 32762 kill switch."""
+
+    @staticmethod
+    def _setup_healthy_env(tmp_dir, *, secure_mode=False, dataplane_overrides=None):
+        lnd_path = os.path.join(tmp_dir, "lnd.conf")
+        with open(lnd_path, "w", encoding="utf-8") as fp:
+            fp.write("[Application Options]\nexternalhosts=de2.tunnelsats.com:35825\nnat=false\n")
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        meta = {
+            "vpnPort": 35825,
+            "serverDomain": "de2.tunnelsats.com",
+            "nodeType": "lnd",
+            "lndAnnouncementVerification": {
+                "endpoint": "de2.tunnelsats.com:35825",
+                "verified": True,
+                "checkedAt": now_iso,
+            },
+        }
+        with open(os.path.join(tmp_dir, app_module.META_FILE), "w", encoding="utf-8") as fp:
+            json.dump(meta, fp)
+
+        dataplane = app_module.read_dataplane_state()
+        dataplane.update(
+            {
+                "dataplane_mode": "secure-mode" if secure_mode else "docker-full-parity",
+                "target_container": "lightning_lnd_1",
+                "target_ip": "10.21.21.9",
+                "target_impl": "lnd",
+                "rules_synced": True,
+                "ipv4_rules_synced": True,
+                "ipv6_rules_synced": True,
+                "dns_protected": True,
+                "decommissioned": False,
+                "last_reconcile_at": now_iso,
+                "last_error": None,
+            }
+        )
+        if dataplane_overrides:
+            dataplane.update(dataplane_overrides)
+        return lnd_path, dataplane
+
+    @staticmethod
+    def _ip_subprocess_side_effect(pref_32762_stdout=""):
+        def _run(cmd, *args, **kwargs):
+            if cmd == ["ip", "rule", "show", "pref", "32762"]:
+                return MagicMock(returncode=0, stdout=pref_32762_stdout)
+            if cmd == ["ip", "-4", "addr", "show", "dev", "tunnelsatsv2"]:
+                return MagicMock(returncode=0, stdout="inet 10.9.0.2/32 scope global tunnelsatsv2\n")
+            return MagicMock(returncode=1, stdout="")
+        return _run
+
+    def test_evaluate_reconcile_freshness_handles_empty_fresh_stale_and_malformed(self):
+        now = datetime(2026, 11, 27, 15, 0, 0, tzinfo=timezone.utc)
+        assert app_module._evaluate_reconcile_freshness(None, now=now) == (False, None)
+        assert app_module._evaluate_reconcile_freshness("", now=now) == (False, None)
+        assert app_module._evaluate_reconcile_freshness("   ", now=now) == (False, None)
+
+        # Fresh timestamp within threshold
+        assert app_module._evaluate_reconcile_freshness("2026-11-27T14:58:00Z", now=now) == (False, 120)
+        # Exactly at threshold (150s) is not stale
+        assert app_module._evaluate_reconcile_freshness("2026-11-27T14:57:30+00:00", now=now) == (False, 150)
+        # Past threshold is stale
+        assert app_module._evaluate_reconcile_freshness("2026-11-27T14:57:29Z", now=now) == (True, 151)
+
+        # Malformed, timezone-naive, or non-string values fail closed
+        assert app_module._evaluate_reconcile_freshness("not-a-timestamp", now=now) == (True, None)
+        assert app_module._evaluate_reconcile_freshness("2026-11-27T14:59:59", now=now) == (True, None)
+        assert app_module._evaluate_reconcile_freshness(12345, now=now) == (True, None)
+
+    def test_stale_and_malformed_heartbeat_override_rules_synced_fail_closed(self, client):
+        stale_ts = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=app_module.RECONCILE_HEARTBEAT_MAX_AGE_SECONDS + 90)
+        ).isoformat().replace("+00:00", "Z")
+        containers = [
+            {
+                "Id": "lnd1",
+                "Names": ["/lightning_lnd_1"],
+                "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}},
+            }
+        ]
+        for bad_ts, expect_age_int in ((stale_ts, True), ("corrupted-timestamp", False)):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                lnd_path, dataplane = self._setup_healthy_env(
+                    tmp_dir, dataplane_overrides={"last_reconcile_at": bad_ts}
+                )
+                with patch("app.DATA_DIR", tmp_dir), \
+                        patch("app.LND_CONFIG_PATH", lnd_path), \
+                        patch("app.SECURE_MODE", False), \
+                        patch("app.K3S_MODE", False), \
+                        patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                        patch("app.list_containers", return_value=containers), \
+                        patch("app.read_dataplane_state", return_value=dataplane), \
+                        patch("app.subprocess.run", side_effect=self._ip_subprocess_side_effect("")):
+                    data = json.loads(client.get("/api/local/status").data)
+
+                assert data["rules_synced"] is False
+                assert data["reconcile_stale"] is True
+                assert data["kill_switch_active"] is False
+                assert data["last_error_code"] == app_module.STATUS_ERROR_RECONCILE_STALE
+                assert "Reconciliation heartbeat is stale" in (data["last_error"] or "")
+                if expect_age_int:
+                    assert isinstance(data["reconcile_age_seconds"], int)
+                    assert data["reconcile_age_seconds"] > app_module.RECONCILE_HEARTBEAT_MAX_AGE_SECONDS
+                else:
+                    assert data["reconcile_age_seconds"] is None
+
+    def test_fresh_heartbeat_keeps_rules_synced_true(self, client):
+        containers = [
+            {
+                "Id": "lnd1",
+                "Names": ["/lightning_lnd_1"],
+                "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}},
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path, dataplane = self._setup_healthy_env(tmp_dir)
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.SECURE_MODE", False), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.list_containers", return_value=containers), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch("app.subprocess.run", side_effect=self._ip_subprocess_side_effect("")):
+                data = json.loads(client.get("/api/local/status").data)
+
+            assert data["rules_synced"] is True
+            assert data["ipv4_rules_synced"] is True
+            assert data["reconcile_stale"] is False
+            assert data["kill_switch_active"] is False
+            assert isinstance(data["reconcile_age_seconds"], int)
+            assert data["reconcile_age_seconds"] <= 10
+            assert data["last_error"] is None
+            assert data["last_error_code"] is None
+
+    def test_standard_mode_active_pref_32762_overrides_rules_synced_and_beats_stale(self, client):
+        stale_ts = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=app_module.RECONCILE_HEARTBEAT_MAX_AGE_SECONDS + 120)
+        ).isoformat().replace("+00:00", "Z")
+        containers = [
+            {
+                "Id": "lnd1",
+                "Names": ["/lightning_lnd_1"],
+                "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}},
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path, dataplane = self._setup_healthy_env(
+                tmp_dir, dataplane_overrides={"last_reconcile_at": stale_ts}
+            )
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.SECURE_MODE", False), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.list_containers", return_value=containers), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect("32762:\tfrom 10.9.9.0/25 blackhole\n"),
+                    ):
+                data = json.loads(client.get("/api/local/status").data)
+
+            assert data["rules_synced"] is False
+            assert data["ipv4_rules_synced"] is False
+            assert data["kill_switch_active"] is True
+            assert data["reconcile_stale"] is True
+            assert data["last_error_code"] == app_module.STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE
+            assert "10.9.9.0/25" in (data["last_error"] or "")
+
+    def test_secure_mode_flags_active_target_pref_32762_but_ignores_inactive_candidate(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path, dataplane = self._setup_healthy_env(tmp_dir, secure_mode=True)
+
+            # 1. Inactive CLN candidate (10.21.21.96) blackholed while LND (10.21.21.9) is active -> healthy!
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.SECURE_MODE", True), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.lnd_exists", return_value=True), \
+                    patch("app.cln_exists", return_value=False), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect("32762:\tfrom 10.21.21.96 blackhole\n"),
+                    ):
+                healthy = json.loads(client.get("/api/local/status").data)
+
+            assert healthy["rules_synced"] is True
+            assert healthy["ipv4_rules_synced"] is True
+            assert healthy["kill_switch_active"] is False
+            assert healthy["last_error"] is None
+            assert healthy["last_error_code"] is None
+
+            # 2. Active LND target (10.21.21.9) blackholed -> fail-closed blocked!
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.SECURE_MODE", True), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.lnd_exists", return_value=True), \
+                    patch("app.cln_exists", return_value=False), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect(
+                            "32762:\tfrom 10.21.21.96 blackhole\n32762:\tfrom 10.21.21.9 blackhole\n"
+                        ),
+                    ):
+                blocked = json.loads(client.get("/api/local/status").data)
+
+            assert blocked["rules_synced"] is False
+            assert blocked["ipv4_rules_synced"] is False
+            assert blocked["kill_switch_active"] is True
+            assert blocked["last_error_code"] == app_module.STATUS_ERROR_RECONCILE_KILL_SWITCH_ACTIVE
+            assert "10.21.21.9" in (blocked["last_error"] or "")
+            assert "10.21.21.96" not in (blocked["last_error"] or "")
+
+    def test_k3s_mode_and_decommissioned_skip_pref_32762_override(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. k3s mode never flags pref 32762
+            lnd_path, dataplane_k3s = self._setup_healthy_env(
+                tmp_dir, dataplane_overrides={"dataplane_mode": "k3s"}
+            )
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.K3S_MODE", True), \
+                    patch("app.SECURE_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.lnd_exists", return_value=True), \
+                    patch("app.cln_exists", return_value=False), \
+                    patch("app.read_dataplane_state", return_value=dataplane_k3s), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect("32762:\tfrom 10.9.9.0/25 blackhole\n"),
+                    ):
+                k3s_data = json.loads(client.get("/api/local/status").data)
+
+            assert k3s_data["kill_switch_active"] is False
+            assert k3s_data["rules_synced"] is True
+            assert k3s_data["last_error_code"] is None
+
+            # 2. decommissioned=True skips pref 32762 and stale overrides
+            stale_ts = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=app_module.RECONCILE_HEARTBEAT_MAX_AGE_SECONDS + 120)
+            ).isoformat().replace("+00:00", "Z")
+            _, dataplane_decomm = self._setup_healthy_env(
+                tmp_dir,
+                dataplane_overrides={
+                    "decommissioned": True,
+                    "rules_synced": False,
+                    "ipv4_rules_synced": False,
+                    "last_reconcile_at": stale_ts,
+                    "last_error": None,
+                },
+            )
+            containers = [
+                {
+                    "Id": "lnd1",
+                    "Names": ["/lightning_lnd_1"],
+                    "NetworkSettings": {"Networks": {"main": {"IPAddress": "10.21.21.9"}}},
+                }
+            ]
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app.SECURE_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.list_containers", return_value=containers), \
+                    patch("app.read_dataplane_state", return_value=dataplane_decomm), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect("32762:\tfrom 10.9.9.0/25 blackhole\n"),
+                    ):
+                decomm_data = json.loads(client.get("/api/local/status").data)
+
+            assert decomm_data["decommissioned"] is True
+            assert decomm_data["last_error_code"] is None
+            assert decomm_data["last_error"] is None
+
+    def test_stopped_protected_node_preserves_specific_error_code_while_kill_switch_is_armed(self, client):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lnd_path, dataplane = self._setup_healthy_env(
+                tmp_dir,
+                dataplane_overrides={
+                    "rules_synced": False,
+                    "ipv4_rules_synced": False,
+                    "last_error": "Waiting for the protected node to start: LND (lightning_lnd_1)",
+                },
+            )
+            with patch("app.DATA_DIR", tmp_dir), \
+                    patch("app.LND_CONFIG_PATH", lnd_path), \
+                    patch("app.K3S_MODE", False), \
+                    patch("app.SECURE_MODE", False), \
+                    patch("app._get_wireguard_state", return_value=("Connected", "pubkey123")), \
+                    patch("app.list_containers", return_value=[]), \
+                    patch("app.read_dataplane_state", return_value=dataplane), \
+                    patch(
+                        "app.subprocess.run",
+                        side_effect=self._ip_subprocess_side_effect("32762:\tfrom 10.9.9.0/25 blackhole\n"),
+                    ):
+                data = json.loads(client.get("/api/local/status").data)
+
+            assert data["rules_synced"] is False
+            assert data["ipv4_rules_synced"] is False
+            assert data["kill_switch_active"] is True
+            assert data["last_error_code"] == app_module.STATUS_ERROR_PROTECTED_NODE_NOT_RUNNING
+
 
 
 

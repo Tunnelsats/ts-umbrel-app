@@ -117,16 +117,32 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
         )
     )
 
+    reconcile_blocked = bool(
+        status_dict.get("kill_switch_active")
+        or status_dict.get("reconcile_stale")
+        or last_error_code in ("reconcile_kill_switch_active", "reconcile_stale")
+    )
+
     if (
         vpn_active
         and active_detected
         and active_routing
         and rules_synced
         and not decommissioned
+        and not reconcile_blocked
         and not conflicts
         and (not verification_required or announcement_verified is True)
     ):
         return ("active", shield_title, "🟢 Active", node_short)
+
+    if (
+        vpn_active
+        and active_detected
+        and active_routing
+        and not decommissioned
+        and reconcile_blocked
+    ):
+        return ("blocked", shield_title, "🟠 Blocked", node_short)
 
     if only_verification_pending and vpn_active:
         return ("syncing", shield_title, "🟡 Syncing", node_short)
@@ -150,7 +166,7 @@ def classify_widget_shield(status_dict: Dict[str, Any]) -> Tuple[str, str, str, 
         return ("setup", shield_title, "🟠 Setup", node_short)
 
     if vpn_active and active_routing and not rules_synced:
-        if not status_dict.get("last_reconcile_at"):
+        if not status_dict.get("last_reconcile_at") and not reconcile_blocked:
             return ("syncing", shield_title, "🟡 Syncing", node_short)
         return ("blocked", shield_title, "🟠 Blocked", node_short)
 
